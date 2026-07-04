@@ -14,13 +14,23 @@ from typing import Any
 from sqlalchemy import func, select
 
 from app.db import SessionLocal, init_db
-from app.models import CaptureSession, Event, Job, MediaAsset, Transcript, WorkflowGraphRow
+from app.models import (
+    AutoRecordRun,
+    CaptureSession,
+    Event,
+    Job,
+    MediaAsset,
+    Transcript,
+    WorkflowGraphRow,
+)
 from app.storage import store
 from worker.pipeline import media as media_stage
-from worker.pipeline.extract import build_graph
+from worker.pipeline.extract import build_graph, build_graph_auto
+from worker.pipeline.narrate import narrate_steps
 from worker.pipeline.providers import Transcript as TranscriptData
 from worker.pipeline.providers import Word, transcribe
 from worker.pipeline.segment import segment
+from worker.pipeline.segment_auto import segment_auto
 
 log = logging.getLogger("refract.pipeline.run")
 
@@ -74,6 +84,18 @@ def run_pipeline(session_id: str) -> dict[str, Any]:
         sess.status = "processing"
         db.commit()
 
+        # Auto Record: the agent's own decision log is the authoritative step source,
+        # and the transcript is user-supplied text (no spoken audio to transcribe).
+        is_auto = sess.source_type == "auto"
+        auto_run = (
+            db.scalar(select(AutoRecordRun).where(AutoRecordRun.session_id == session_id))
+            if is_auto
+            else None
+        )
+        if auto_run is not None:
+            auto_run.status = "processing"
+            db.commit()
+
         # ---- media stage: ffmpeg keyframes + audio demux ---------------------
         job = _job(db, session_id, "media", version)
         if job.status != "done":
@@ -97,7 +119,10 @@ def run_pipeline(session_id: str) -> dict[str, Any]:
             job.attempts += 1
             db.commit()
             try:
-                _run_whisper(db, sess)
+                if is_auto:
+                    _write_user_transcript(db, sess, auto_run.transcript_text if auto_run else "")
+                else:
+                    _run_whisper(db, sess)
                 job.status = "done"
                 db.commit()
             except Exception as e:
@@ -144,9 +169,26 @@ def run_pipeline(session_id: str) -> dict[str, Any]:
         else:
             duration = _duration_s(sess, events, keyframes, transcript)
 
-        candidate_steps = segment(
-            events, transcript, keyframes, screenshots_by_seq, duration, sess.telemetry
-        )
+        if is_auto:
+            # Project the agent's decision log onto steps (timing from telemetry
+            # events keyed by decision index), then align the transcript across them.
+            events_by_index = {
+                e["seq"]: {"t_ms": e["t_ms"], "bbox": e.get("bbox"), "selector": e.get("selector")}
+                for e in events
+            }
+            agent_log = auto_run.agent_log_json if auto_run else []
+            candidate_steps = segment_auto(agent_log, events_by_index, screenshots_by_seq, duration)
+            narrations = narrate_steps(
+                candidate_steps,
+                auto_run.coverage_plan_json if auto_run else [],
+                auto_run.transcript_text if auto_run else "",
+            )
+            for cand, narr in zip(candidate_steps, narrations):
+                cand["narration_span"] = narr
+        else:
+            candidate_steps = segment(
+                events, transcript, keyframes, screenshots_by_seq, duration, sess.telemetry
+            )
         job.status = "done"
         db.commit()
 
@@ -156,12 +198,20 @@ def run_pipeline(session_id: str) -> dict[str, Any]:
         job.attempts += 1
         db.commit()
         title = f"Workflow ({len(candidate_steps)} steps)"
-        graph = build_graph(
-            candidate_steps,
-            workflow_id=f"wf_{session_id[:8]}",
-            title=title,
-            version=version,
-        )
+        if is_auto:
+            graph = build_graph_auto(
+                candidate_steps,
+                workflow_id=f"wf_{session_id[:8]}",
+                title=title,
+                version=version,
+            )
+        else:
+            graph = build_graph(
+                candidate_steps,
+                workflow_id=f"wf_{session_id[:8]}",
+                title=title,
+                version=version,
+            )
         _persist_graph(db, sess.project_id, version, graph)
         job.status = "done"
         db.commit()
@@ -183,10 +233,23 @@ def run_pipeline(session_id: str) -> dict[str, Any]:
             log.warning("project auto-title failed; keeping current name")
 
         sess.status = "ready"
+        if auto_run is not None:
+            auto_run.status = "ready"
         db.commit()
         return {"session_id": session_id, "version": version, "steps": len(graph["steps"])}
     finally:
         db.close()
+
+
+def _write_user_transcript(db, sess: CaptureSession, text: str) -> None:
+    """Auto Record has no spoken audio — persist the user's supplied transcript as
+    the session transcript (provider='user') so downstream titling still works."""
+    existing = db.scalar(select(Transcript).where(Transcript.session_id == sess.id))
+    if existing:
+        db.delete(existing)
+        db.commit()
+    db.add(Transcript(session_id=sess.id, words_json=[], text=text or "", provider="user"))
+    db.commit()
 
 
 # --------------------------------------------------------------------------- #

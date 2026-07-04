@@ -63,6 +63,38 @@ class CaptureSession(Base):
     )
 
 
+class AutoRecordRun(Base):
+    """An AI-driven Auto Record session: the agent drives the user's browser tab
+    (via the extension + CDP) through a coverage plan while the tab is recorded.
+
+    One run maps 1:1 to a CaptureSession (source_type="auto"). The `agent_log_json`
+    is the authoritative source for the Workflow Graph — the agent knows each step's
+    action/target/intent/screen at decision time, so no LLM extraction is needed."""
+
+    __tablename__ = "autorecord_runs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("capture_sessions.id"), index=True)
+    # created|driving|capture_done|processing|ready|failed|aborted
+    status: Mapped[str] = mapped_column(String, default="created")
+    start_url: Mapped[str | None] = mapped_column(String, nullable=True)
+    # [{ "id": "p1", "text": "...", "status": "pending|active|done" }, …]
+    coverage_plan_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    transcript_text: Mapped[str] = mapped_column(Text, default="")
+    # ordered decisions: [{ index, action, ref, target, intent, screen_name,
+    #   plan_item_id, reason, ok, selector, bbox, t_ms, error }, …]
+    agent_log_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    current_plan_item: Mapped[str | None] = mapped_column(String, nullable=True)
+    step_count: Mapped[int] = mapped_column(Integer, default=0)
+    max_steps: Mapped[int] = mapped_column(Integer, default=60)
+    error_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now
+    )
+
+
 class Event(Base):
     """A captured user action (click/input/navigation/...) on the session timeline.
     `value_redacted` never holds raw password/PII values — masking happens at capture."""

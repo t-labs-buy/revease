@@ -84,3 +84,55 @@ def build_graph(
         raise ValueError(f"graph validation failed: {result.errors[:5]}")
     assert_valid(graph)
     return graph
+
+
+def build_graph_auto(
+    candidate_steps: list[dict[str, Any]],
+    *,
+    workflow_id: str,
+    title: str,
+    version: int,
+) -> dict[str, Any]:
+    """Compose a Workflow Graph directly from an Auto Record run — NO LLM extraction.
+
+    The agent already emitted action/target/intent/screen_name per step at decision
+    time, so unlike `build_graph`, there is nothing to infer. Narration is filled
+    separately by the narrate stage (transcript alignment). Steps with full telemetry
+    (selector + screenshot) are trusted (`auto`); thinner ones flag `needs_review`."""
+    steps: list[dict[str, Any]] = []
+    for i, cand in enumerate(candidate_steps, start=1):
+        grounded = bool(cand.get("selector")) and bool(cand.get("screenshot"))
+        confidence = 0.95 if grounded else 0.7
+        steps.append(
+            {
+                "id": f"s{i}",
+                "action": cand.get("action") or "custom",
+                "target": (cand.get("target") or "element")[:200],
+                "intent": cand.get("intent"),
+                "screen_name": cand.get("screen_name"),
+                "selector": cand.get("selector"),
+                "screenshot": cand.get("screenshot"),
+                "bbox": _clean_bbox(cand.get("bbox")),
+                "narration": cand.get("narration_span") or "",
+                "t_start": cand.get("t_start"),
+                "t_end": cand.get("t_end"),
+                "confidence": confidence,
+                "review_status": "auto" if grounded else "needs_review",
+            }
+        )
+
+    edges = [{"from": f"s{i}", "to": f"s{i + 1}", "condition": None} for i in range(1, len(steps))]
+    graph: dict[str, Any] = {
+        "workflow_id": workflow_id,
+        "version": version,
+        "title": title,
+        "steps": steps,
+        "edges": edges,
+    }
+
+    result = validate(graph)
+    if not result.valid:
+        log.error("composed auto graph failed validation: %s", result.errors)
+        raise ValueError(f"graph validation failed: {result.errors[:5]}")
+    assert_valid(graph)
+    return graph

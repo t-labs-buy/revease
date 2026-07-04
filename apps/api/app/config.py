@@ -50,6 +50,13 @@ class Settings(BaseSettings):
     whisper_compute: str = "int8"
     disable_whisper: bool = False
 
+    # --- Auto Record (AI-driven tab recording) ---
+    # Hard cap on agent decisions per run (server force-ends with `done` when hit).
+    autorecord_max_steps: int = 60
+    # How many recent screenshots to keep in the agent's context window (older
+    # observations keep their text summary but drop the image to bound token cost).
+    autorecord_screenshot_window: int = 3
+
     cors_origins: str = "http://localhost:3000"
 
     def resolved_database_url(self) -> str:
