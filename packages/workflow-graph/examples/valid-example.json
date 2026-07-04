@@ -1,0 +1,34 @@
+{
+  "workflow_id": "wf_9f2",
+  "version": 3,
+  "title": "Create an API key",
+  "steps": [
+    {
+      "id": "s1",
+      "action": "click",
+      "target": "Settings → API Keys",
+      "selector": "#nav-api-keys",
+      "screenshot": "shot_s1.png",
+      "bbox": [812, 240, 130, 36],
+      "narration": "Open the API Keys page from Settings.",
+      "t_start": 4.2,
+      "t_end": 6.8,
+      "confidence": 0.97
+    },
+    {
+      "id": "s2",
+      "action": "click",
+      "target": "Create key",
+      "selector": "#create-key",
+      "screenshot": "shot_s2.png",
+      "bbox": [980, 320, 110, 40],
+      "narration": "Click Create key to generate a new API key.",
+      "t_start": 7.1,
+      "t_end": 9.0,
+      "confidence": 0.95
+    }
+  ],
+  "edges": [
+    { "from": "s1", "to": "s2", "condition": null }
+  ]
+}

@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://refract.dev/schemas/workflow-graph.schema.json",
+  "title": "Workflow Graph",
+  "description": "Canonical intermediate representation (IR) for Refract. Single source of truth: capture -> understanding produces it; every generator consumes it. Master plan section 2.",
+  "type": "object",
+  "required": ["workflow_id", "version", "title", "steps", "edges"],
+  "additionalProperties": false,
+  "properties": {
+    "workflow_id": { "type": "string", "minLength": 1 },
+    "version": { "type": "integer", "minimum": 1 },
+    "title": { "type": "string", "minLength": 1 },
+    "steps": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/step" }
+    },
+    "edges": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/edge" }
+    }
+  },
+  "$defs": {
+    "step": {
+      "type": "object",
+      "required": ["id", "action", "target"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "action": {
+          "type": "string",
+          "description": "The user action this step represents.",
+          "enum": ["click", "input", "navigation", "scroll", "keydown", "wait", "custom"]
+        },
+        "target": { "type": "string", "minLength": 1 },
+        "intent": { "type": "string" },
+        "screen_name": { "type": "string" },
+        "selector": { "type": ["string", "null"] },
+        "screenshot": { "type": ["string", "null"] },
+        "bbox": {
+          "description": "[x, y, w, h] in capture-viewport pixels.",
+          "type": ["array", "null"],
+          "items": { "type": "number" },
+          "minItems": 4,
+          "maxItems": 4
+        },
+        "narration": { "type": ["string", "null"] },
+        "t_start": { "type": ["number", "null"], "minimum": 0 },
+        "t_end": { "type": ["number", "null"], "minimum": 0 },
+        "confidence": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "review_status": {
+          "type": "string",
+          "enum": ["auto", "needs_review", "accepted", "edited"]
+        }
+      }
+    },
+    "edge": {
+      "type": "object",
+      "required": ["from", "to"],
+      "additionalProperties": false,
+      "properties": {
+        "from": { "type": "string", "minLength": 1 },
+        "to": { "type": "string", "minLength": 1 },
+        "condition": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

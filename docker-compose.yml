@@ -1,0 +1,25 @@
+# Local infra for Refract V1. SQLite + local filesystem media mean the app itself
+# needs only Redis. MinIO is included (commented) so V2 can drop in S3 storage.
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Optional for V2 object storage (presigned-style interface already matches S3):
+  # minio:
+  #   image: minio/minio
+  #   command: server /data --console-address ":9001"
+  #   ports: ["9000:9000", "9001:9001"]
+  #   environment:
+  #     MINIO_ROOT_USER: refract
+  #     MINIO_ROOT_PASSWORD: refract-dev
+  #   volumes: ["minio-data:/data"]
+
+# volumes:
+#   minio-data:
