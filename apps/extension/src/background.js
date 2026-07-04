@@ -9,6 +9,7 @@ import {
   postEvents,
   registerAndUpload,
 } from "./api.js";
+import { abortRun, getStatus, pauseRun, resumeRun, startRun } from "./agent.js";
 
 const SHOT_MIN_INTERVAL_MS = 1100; // captureVisibleTab is rate-limited; coalesce.
 
@@ -107,6 +108,10 @@ async function finishCapture() {
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  // Messages addressed to the offscreen doc / agent controller are handled by
+  // their own listeners (agent.js, offscreen.js) — don't double-handle here.
+  if (msg && msg.target) return false;
+  if (msg && msg.kind === "auto-status") return false; // agent->sidepanel broadcast
   (async () => {
     try {
       if (msg.kind === "event") {
@@ -121,6 +126,20 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       } else if (msg.kind === "stop") {
         const result = await finishCapture();
         sendResponse({ ok: true, result });
+      } else if (msg.kind === "auto-start") {
+        const r = await startRun(msg.config);
+        sendResponse({ ok: true, result: r });
+      } else if (msg.kind === "auto-pause") {
+        pauseRun();
+        sendResponse({ ok: true });
+      } else if (msg.kind === "auto-resume") {
+        resumeRun();
+        sendResponse({ ok: true });
+      } else if (msg.kind === "auto-abort") {
+        abortRun();
+        sendResponse({ ok: true });
+      } else if (msg.kind === "auto-query") {
+        sendResponse({ ok: true, status: getStatus() });
       } else {
         sendResponse({ ok: false, error: "unknown message" });
       }

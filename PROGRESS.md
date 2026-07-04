@@ -38,6 +38,15 @@ Video-only V1 (P4 doc export deferred to V2). Tick items only when the phase exi
   - **Verified:** render test + full suite **44/44**; **live broker E2E (release gate)**: upload video → understanding → 3-step graph → edit-spec → render MP4 (6.68s vs expected 6.58s, **drift < 0.11s**) → edit one segment's script → regenerate **rendered 1 / reused 2, TTS synth 1 / cached 2**
   - **Note:** offline here → silent TTS + still-image segments (screenshot/video-frame). Real voiceover needs `REFRACT_OPENAI_API_KEY`; live-video-motion segments (vs stills) and zoom ease-in are V2 refinements.
 
+- [x] **Auto Record — AI-driven tab recording (feature/autorec)**
+  - [x] E1 Extension records a chosen tab (offscreen doc + `tabCapture.getMediaStreamId`) and drives it via `chrome.debugger`/CDP with trusted input (click/type/scroll/navigate/keydown) + a ghost cursor for watchability
+  - [x] E2 Server-side agent loop: `POST /auto-record/runs` + `/step` (synchronous Claude, strict `next_action` tool use, prompt-cached plan+transcript prefix, `expected_index` idempotency) drives the tab through a coverage plan
+  - [x] E3 Pipeline auto branch: Whisper skipped (user transcript), `segment_auto` from the agent log + exact telemetry, `build_graph_auto` (no LLM extraction), `narrate` aligns the transcript to steps (verbatim, deterministic fallback)
+  - [x] E4 Side-panel UI (plan + transcript form, live step log, pause/abort); popup "Auto Record" button opens it
+  - **Endpoints:** `POST /auto-record/runs`, `/runs/{id}/step`, `/runs/{id}/complete`, `/runs/{id}/abort`, `GET /auto-record/runs[/{id}]`
+  - **Reuses:** session/asset/event/complete upload path, TTS + `buildTimeline` freeze-frame (narration longer than the clip auto-holds), render + regenerate, the video editor (auto sessions edit identically)
+  - **Verified:** api 23/23, workers 45/45 (segment_auto, narrate verbatim invariant, end-to-end seeded auto pipeline, router loop/idempotency/plan-state with mocked Claude); extension JS syntax-checked. **Needs manual browser E2E** (load unpacked → Auto Record a known product → confirm recording + graph + narrated render).
+
 ---
 
 ## 🎉 V1 core loop complete — capture → AI video → edit → regenerate → drift-free MP4

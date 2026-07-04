@@ -1,0 +1,62 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      body { font: 13px system-ui, sans-serif; padding: 14px; margin: 0; color: #111; }
+      h1 { font-size: 15px; margin: 0 0 4px; }
+      p.sub { color: #666; margin: 0 0 12px; font-size: 12px; }
+      label { display: block; font-size: 11px; color: #555; margin-top: 10px; font-weight: 600; }
+      input, select, textarea { width: 100%; box-sizing: border-box; padding: 7px; margin-top: 3px; border: 1px solid #d1d5db; border-radius: 6px; font: inherit; }
+      textarea { resize: vertical; }
+      button { padding: 9px; border: 0; border-radius: 6px; cursor: pointer; font-weight: 600; }
+      button:disabled { opacity: .5; cursor: default; }
+      #start { width: 100%; margin-top: 14px; background: #ef4444; color: #fff; }
+      .row { display: flex; gap: 8px; margin-top: 12px; }
+      .row button { flex: 1; }
+      #pause { background: #f3f4f6; color: #111; }
+      #abort { background: #111; color: #fff; }
+      #status { margin-top: 10px; font-size: 12px; }
+      .err { color: #b91c1c; }
+      .hidden { display: none; }
+      #timer { font-variant-numeric: tabular-nums; font-weight: 700; color: #ef4444; }
+      ul#plan { list-style: none; padding: 0; margin: 8px 0; font-size: 12px; }
+      ul#plan li { padding: 2px 0; color: #555; }
+      ul#plan li.done { color: #16a34a; }
+      ul#plan li.active { color: #111; font-weight: 600; }
+      #logbox { margin-top: 10px; max-height: 220px; overflow-y: auto; background: #f9fafb; border: 1px solid #eee; border-radius: 6px; padding: 8px; font-size: 12px; }
+      #logbox div { padding: 1px 0; color: #374151; }
+    </style>
+  </head>
+  <body>
+    <h1>Auto Record</h1>
+    <p class="sub">The AI drives this tab through your coverage plan while it records. Voiceover is added from your transcript afterward.</p>
+
+    <div id="form">
+      <label for="apiBase">API base</label>
+      <input id="apiBase" value="http://localhost:8000" />
+      <label for="project">Project</label>
+      <select id="project"></select>
+      <label for="startUrl">Start URL (optional)</label>
+      <input id="startUrl" placeholder="https://app.example.com/dashboard" />
+      <label for="plan">Coverage plan (one item per line)</label>
+      <textarea id="plan" rows="5" placeholder="Open the dashboard&#10;Create a new invoice&#10;Fill in the amount and save"></textarea>
+      <label for="transcript">Transcript (spoken narration)</label>
+      <textarea id="transcript" rows="6" placeholder="Welcome to Acme. Let's create your first invoice..."></textarea>
+      <button id="start">● Start Auto Record</button>
+    </div>
+
+    <div id="live" class="hidden">
+      <div>Recording <span id="timer">0:00</span> · step <span id="step">0</span> · <span id="phase"></span></div>
+      <ul id="plan"></ul>
+      <div class="row">
+        <button id="pause">Pause</button>
+        <button id="abort">Stop</button>
+      </div>
+      <div id="logbox"></div>
+    </div>
+
+    <div id="status"></div>
+    <script type="module" src="sidepanel.js"></script>
+  </body>
+</html>

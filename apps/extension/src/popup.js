@@ -76,6 +76,18 @@ stopEl.addEventListener("click", async () => {
   }
 });
 
+$("autorec").addEventListener("click", async () => {
+  // Open the persistent side panel (the popup dies on focus change; a multi-minute
+  // AI-driven run needs a surface that survives switching to the recorded tab).
+  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  try {
+    if (tab && tab.windowId != null) await chrome.sidePanel.open({ windowId: tab.windowId });
+    window.close();
+  } catch (e) {
+    setStatus(`Could not open side panel: ${e}`, true);
+  }
+});
+
 (async () => {
   const cfg = await chrome.storage.local.get("apiBase");
   if (cfg.apiBase) apiBaseEl.value = cfg.apiBase;

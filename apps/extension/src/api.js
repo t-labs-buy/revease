@@ -48,3 +48,35 @@ export async function listProjects(apiBase) {
   if (!r.ok) throw new Error(`listProjects ${r.status}`);
   return r.json();
 }
+
+// ---- Auto Record (AI-driven) ----
+
+export async function createAgentRun(apiBase, body) {
+  const r = await fetch(`${apiBase}/auto-record/runs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(`createAgentRun ${r.status}: ${await r.text()}`);
+  return r.json();
+}
+
+export async function postAgentStep(apiBase, runId, body) {
+  const r = await fetch(`${apiBase}/auto-record/runs/${runId}/step`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(`postAgentStep ${r.status}: ${await r.text()}`);
+  return r.json();
+}
+
+export async function completeAgentRun(apiBase, runId, status, durationMs) {
+  const r = await fetch(`${apiBase}/auto-record/runs/${runId}/complete`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status, duration_ms: durationMs ?? null }),
+  });
+  if (!r.ok) throw new Error(`completeAgentRun ${r.status}`);
+  return r.json();
+}
