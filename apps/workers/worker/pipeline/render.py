@@ -330,7 +330,7 @@ def run_render(render_job_id: str) -> dict:
         # Motion/mouse auto-zoom: for each scene, find where the on-screen activity
         # (cursor movement / clicks cause localized UI change) is and zoom toward it.
         # Only touches scenes that don't already have an explicit (bbox/user) zoom.
-        if spec.get("motion_zoom") and src_video is not None:
+        if spec.get("motion_zoom", True) and src_video is not None:
             from worker.pipeline.autoedit import _motion_centroid, probe_dims
 
             vdims = probe_dims(src_video)

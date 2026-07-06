@@ -233,6 +233,10 @@ export default function VideoEditor({ params }: { params: Promise<{ id: string }
     );
   }, []);
 
+  const patchSpec = useCallback((patch: Partial<EditSpec>) => {
+    setSpec((s) => (s ? { ...s, ...patch } : s));
+  }, []);
+
   const setSegText = useCallback(
     (idx: number, text: string) => mutateSeg(idx, { words: tokenize(text), removed: [] }),
     [mutateSeg],
@@ -937,6 +941,7 @@ export default function VideoEditor({ params }: { params: Promise<{ id: string }
                 setZoomIdx={setZoomIdx}
                 activeIdx={activeIdx}
                 mutateSeg={mutateSeg}
+                patchSpec={patchSpec}
                 seekTo={seekTo}
                 onSuggest={aiZooms}
                 suggesting={zoomBusy}
@@ -1232,6 +1237,7 @@ function ZoomPanel({
   setZoomIdx,
   activeIdx,
   mutateSeg,
+  patchSpec,
   seekTo,
   onSuggest,
   suggesting,
@@ -1241,10 +1247,12 @@ function ZoomPanel({
   setZoomIdx: (n: number) => void;
   activeIdx: number;
   mutateSeg: (i: number, p: Partial<EditSegment>) => void;
+  patchSpec: (p: Partial<EditSpec>) => void;
   seekTo: (s: number) => void;
   onSuggest: () => void;
   suggesting: boolean;
 }) {
+  const motionZoom = spec.motion_zoom ?? true;
   const zi = zoomIdx ?? (activeIdx >= 0 ? activeIdx : 0);
   const seg = spec.segments[zi];
   if (!seg) return <p className="text-sm text-[var(--text-3)]">No scenes to zoom.</p>;
@@ -1262,6 +1270,20 @@ function ZoomPanel({
   const speed = z.speed ?? 3;
   return (
     <div className="space-y-5">
+      <label className="flex cursor-pointer items-start justify-between gap-3 rounded-xl border border-[var(--border)] bg-[var(--card)] p-3">
+        <span>
+          <span className="text-sm font-medium">Auto-zoom on mouse clicks</span>
+          <span className="mt-0.5 block text-xs text-[var(--text-2)]">
+            Track cursor/click activity and zoom toward it on scenes without a manual zoom.
+          </span>
+        </span>
+        <input
+          type="checkbox"
+          checked={motionZoom}
+          onChange={(e) => patchSpec({ motion_zoom: e.target.checked })}
+          className="mt-0.5 h-4 w-8 flex-none accent-[#6d5dfb]"
+        />
+      </label>
       <button
         onClick={onSuggest}
         disabled={suggesting}

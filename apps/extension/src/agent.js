@@ -99,13 +99,16 @@ export async function startRun({ apiBase, projectId, coveragePlan, transcript, s
   await attach(tab.id);
   await sleep(500);
 
-  if (startUrl) {
-    try { await chrome.tabs.update(tab.id, { url: startUrl }); await sleep(1500); } catch { /* ignore */ }
-  }
-
+  // Start recording FIRST, while the activeTab grant from invoking the extension is
+  // still fresh — getMediaStreamId needs it. Navigating the tab (startUrl) revokes
+  // that grant, so it must come AFTER capture has begun.
   status({ phase: "recording" });
   await startRecording(tab.id, apiBase, created.session_id);
   run.startTs = Date.now();
+
+  if (startUrl) {
+    try { await chrome.tabs.update(tab.id, { url: startUrl }); await sleep(1500); } catch { /* ignore */ }
+  }
   status({ phase: "driving" });
 
   _loop().catch((e) => { log("loop error: " + e); void finalize("failed"); });

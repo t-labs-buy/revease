@@ -94,6 +94,9 @@ def build_edit_spec(graph_json: dict[str, Any], viewport: dict[str, int] | None)
         "intro": {"enabled": True, "title": graph_json.get("title", "Workflow"), "duration_ms": 2000},
         "outro": {"enabled": True, "title": "Thanks for watching", "duration_ms": 1500},
         "captions": {"enabled": True},
+        # auto-zoom toward mouse/cursor activity (clicks) per scene at render time,
+        # for scenes without an explicit click/user zoom. On by default.
+        "motion_zoom": True,
         "music": {"enabled": False, "storage_key": None, "gain_db": -18},
         # crop: reframe the whole video to a normalized (0..1) region.
         "crop": {"enabled": False, "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},

@@ -4,7 +4,33 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Rnd } from "react-rnd";
 import { mediaUrl, type EditSegment, type EditSpec } from "@/lib/api";
 
-const mmss = (t: number) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
+const mmss = (t: number) =>
+  Number.isFinite(t) && t >= 0
+    ? `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`
+    : "0:00";
+
+/**
+ * MediaRecorder WebM/blob videos often report `duration === Infinity` until the
+ * browser is forced to seek to the end. Resolve the real duration, then reset
+ * the playhead. Falls back gracefully if metadata is already valid.
+ */
+export function resolveDuration(video: HTMLVideoElement, set: (d: number) => void) {
+  const d = video.duration;
+  if (Number.isFinite(d) && d > 0) {
+    set(d);
+    return;
+  }
+  const onChange = () => {
+    if (Number.isFinite(video.duration) && video.duration > 0) {
+      video.removeEventListener("durationchange", onChange);
+      video.currentTime = 0;
+      set(video.duration);
+    }
+  };
+  video.addEventListener("durationchange", onChange);
+  // Nudge the browser to scan to the actual end so `duration` gets computed.
+  video.currentTime = 1e7;
+}
 
 export function ModalShell({
   title,
@@ -39,6 +65,8 @@ export function ModalShell({
 /* ------------------------------------------------------------------ */
 /* Trim: block timeline with waveform — split at playhead, delete block */
 /* ------------------------------------------------------------------ */
+type TrimBlock = EditSegment & { _deleted?: boolean };
+
 export function TrimModal({
   source,
   segments,
@@ -50,49 +78,235 @@ export function TrimModal({
   onCancel: () => void;
   onSave: (segs: EditSegment[]) => void;
 }) {
-  const [segs, setSegs] = useState<EditSegment[]>(() => segments.map((s) => ({ ...s })));
+  // Working blocks, ordered by source time. Deletions are marked (not dropped)
+  // so the removed region can show as a white gap until the user saves.
+  const [blocks, setBlocks] = useState<TrimBlock[]>(() =>
+    [...segments].sort((a, b) => a.source_start_ms - b.source_start_ms).map((s) => ({ ...s })),
+  );
   const [sel, setSel] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
-  const [cur, setCur] = useState(0);
+  const trackRef = useRef<HTMLDivElement>(null);
+  const [curEff, setCurEff] = useState(0); // playhead in *effective* (timeline) ms
   const [dur, setDur] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [zoom, setZoom] = useState(1);
 
-  const totalMs = useMemo(
-    () => Math.max(dur * 1000, ...segs.map((s) => s.source_end_ms), 1),
-    [dur, segs],
-  );
-  const keptMs = segs.reduce((a, s) => a + Math.max(0, s.source_end_ms - s.source_start_ms), 0);
+  // Lay blocks out contiguously in "effective" time: kept + deleted both take a
+  // slot, so a fresh (contiguous) spec fills the bar fully with blue, and a
+  // delete carves a white gap in place. On reopen only kept blocks arrive → full blue again.
+  const layout = useMemo(() => {
+    let off = 0;
+    const items = blocks.map((b) => {
+      const d = Math.max(0, b.source_end_ms - b.source_start_ms);
+      const it = { b, start: off, end: off + d, d };
+      off += d;
+      return it;
+    });
+    return { items, total: Math.max(off, 1) };
+  }, [blocks]);
+
+  const keptMs = layout.items.reduce((a, it) => a + (it.b._deleted ? 0 : it.d), 0);
+  const selDeleted = layout.items.find((it) => it.b.step_id === sel)?.b._deleted ?? false;
+
+  const effToItem = (eff: number) =>
+    layout.items.find((it) => eff >= it.start && eff < it.end) ?? layout.items[layout.items.length - 1] ?? null;
+  const effToSource = (eff: number) => {
+    const it = effToItem(eff);
+    return it ? { it, source: it.b.source_start_ms + (eff - it.start) } : { it: null, source: 0 };
+  };
+  const effAtClientX = (clientX: number) => {
+    const r = trackRef.current?.getBoundingClientRect();
+    if (!r) return 0;
+    return Math.max(0, Math.min(1, (clientX - r.left) / r.width)) * layout.total;
+  };
 
   function togglePlay() {
     const v = videoRef.current;
     if (!v) return;
-    if (v.paused) void v.play();
-    else v.pause();
-  }
-  function seekTo(sec: number) {
-    if (videoRef.current) videoRef.current.currentTime = Math.max(0, Math.min(sec, dur || sec));
+    if (v.paused) {
+      // If parked past the end, restart from the first kept block.
+      if (curEff >= layout.total - 20) {
+        const first = layout.items.find((it) => !it.b._deleted);
+        if (first) {
+          v.currentTime = first.b.source_start_ms / 1000;
+          setCurEff(first.start);
+        }
+      }
+      void v.play();
+    } else v.pause();
   }
 
-  // Split the block containing the playhead into two (words split proportionally).
+  // Playback engine: keep the <video> (which holds the *original* footage) on the
+  // kept blocks only — skip any deleted block or removed-source gap.
+  function onFrame() {
+    const v = videoRef.current;
+    if (!v) return;
+    const t = v.currentTime * 1000; // source ms
+    const here = layout.items.find((it) => t + 1 >= it.b.source_start_ms && t < it.b.source_end_ms);
+    if (here && !here.b._deleted) {
+      setCurEff(here.start + (t - here.b.source_start_ms));
+      return;
+    }
+    // Inside a deleted block or a removed gap → jump to the next kept block.
+    const from = here ? here.b.source_end_ms : t;
+    const next = layout.items.find((it) => !it.b._deleted && it.b.source_start_ms >= from - 1);
+    if (next) {
+      v.currentTime = next.b.source_start_ms / 1000;
+      setCurEff(next.start);
+    } else {
+      v.pause();
+      setCurEff(layout.total);
+    }
+  }
+
+  function scrubTo(eff: number) {
+    setCurEff(eff);
+    const { source } = effToSource(eff);
+    if (videoRef.current) videoRef.current.currentTime = Math.max(0, Math.min(source / 1000, dur || source / 1000));
+  }
+
+  // Drag a block edge to reduce/expand its time range. Dragging the boundary
+  // shared with an adjacent kept block redistributes time between the two;
+  // against a gap/edge it trims that block only.
+  const durOf = (b: TrimBlock) => Math.max(0, b.source_end_ms - b.source_start_ms);
+  const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(Math.max(lo, hi), v));
+  const resize = useRef<{ id: string; edge: "l" | "r" } | null>(null);
+  const MIN_MS = 120;
+
+  function beginResize(e: React.PointerEvent, id: string, edge: "l" | "r") {
+    e.stopPropagation();
+    resize.current = { id, edge };
+    setSel(id);
+    trackRef.current?.setPointerCapture?.(e.pointerId);
+  }
+
+  function doResize(clientX: number) {
+    const rz = resize.current;
+    if (!rz) return;
+    const eff = effAtClientX(clientX);
+    setBlocks((arr) => {
+      const i = arr.findIndex((b) => b.step_id === rz.id);
+      if (i < 0) return arr;
+      let off = 0;
+      for (let k = 0; k < i; k++) off += durOf(arr[k]);
+      const b = arr[i];
+      const maxMs = dur * 1000 || b.source_end_ms;
+      const out = [...arr];
+      if (rz.edge === "r") {
+        const next = arr[i + 1];
+        const coupled = next && !next._deleted && Math.abs(next.source_start_ms - b.source_end_ms) < 3;
+        let end = Math.round(b.source_start_ms + (eff - off));
+        if (coupled) {
+          end = clamp(end, b.source_start_ms + MIN_MS, next.source_end_ms - MIN_MS);
+          out[i] = { ...b, source_end_ms: end };
+          out[i + 1] = { ...next, source_start_ms: end };
+        } else {
+          const cap = next && !next._deleted ? next.source_start_ms : maxMs;
+          end = clamp(end, b.source_start_ms + MIN_MS, cap);
+          out[i] = { ...b, source_end_ms: end };
+        }
+      } else {
+        const prev = arr[i - 1];
+        const coupled = prev && !prev._deleted && Math.abs(prev.source_end_ms - b.source_start_ms) < 3;
+        if (coupled) {
+          const offPrev = off - durOf(prev);
+          let start = Math.round(prev.source_start_ms + (eff - offPrev));
+          start = clamp(start, prev.source_start_ms + MIN_MS, b.source_end_ms - MIN_MS);
+          out[i] = { ...b, source_start_ms: start };
+          out[i - 1] = { ...prev, source_end_ms: start };
+        } else {
+          const floor = prev && !prev._deleted ? prev.source_end_ms : 0;
+          let start = Math.round(b.source_start_ms + (eff - off));
+          start = clamp(start, floor, b.source_end_ms - MIN_MS);
+          out[i] = { ...b, source_start_ms: start };
+        }
+      }
+      return out;
+    });
+    // preview the frame under the dragged edge
+    const { source } = effToSource(eff);
+    if (videoRef.current) videoRef.current.currentTime = clamp(source / 1000, 0, dur || source / 1000);
+    setCurEff(Math.max(0, Math.min(eff, layout.total)));
+  }
+
+  // Re-split words across a resized boundary so captions/voice stay aligned.
+  function finalizeResize() {
+    const rz = resize.current;
+    if (!rz) return;
+    setBlocks((arr) => {
+      const i = arr.findIndex((b) => b.step_id === rz.id);
+      if (i < 0) return arr;
+      const [ai, bi] = rz.edge === "r" ? [i, i + 1] : [i - 1, i];
+      const A = arr[ai];
+      const B = arr[bi];
+      if (!A || !B || A._deleted || B._deleted || Math.abs(A.source_end_ms - B.source_start_ms) >= 3) return arr;
+      const words = [...A.words, ...B.words];
+      const removed = [...A.removed, ...B.removed.map((r) => r + A.words.length)];
+      const frac = durOf(A) / Math.max(1, durOf(A) + durOf(B));
+      const wi = Math.round(words.length * frac);
+      const out = [...arr];
+      out[ai] = { ...A, words: words.slice(0, wi), removed: removed.filter((r) => r < wi) };
+      out[bi] = { ...B, words: words.slice(wi), removed: removed.filter((r) => r >= wi).map((r) => r - wi) };
+      return out;
+    });
+  }
+
+  // Pointer scrubbing on the timeline. A click without drag selects the block
+  // under the cursor; a drag scrubs the playhead.
+  const dragging = useRef(false);
+  const moved = useRef(false);
+  function onPointerDown(e: React.PointerEvent) {
+    if (resize.current) return;
+    dragging.current = true;
+    moved.current = false;
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+    scrubTo(effAtClientX(e.clientX));
+  }
+  function onPointerMove(e: React.PointerEvent) {
+    if (resize.current) {
+      doResize(e.clientX);
+      return;
+    }
+    if (!dragging.current) return;
+    moved.current = true;
+    scrubTo(effAtClientX(e.clientX));
+  }
+  function onPointerUp(e: React.PointerEvent) {
+    if (resize.current) {
+      finalizeResize();
+      resize.current = null;
+      return;
+    }
+    if (!dragging.current) return;
+    dragging.current = false;
+    if (!moved.current) {
+      const it = effToItem(effAtClientX(e.clientX));
+      if (it) setSel((p) => (p === it.b.step_id ? null : it.b.step_id));
+    }
+  }
+
+  // Split the block under the playhead into two (words split proportionally).
   function splitAtPlayhead() {
-    const at = cur * 1000;
-    setSegs((arr) => {
-      const idx = arr.findIndex((s) => at > s.source_start_ms + 150 && at < s.source_end_ms - 150);
+    const { it, source } = effToSource(curEff);
+    if (!it) return;
+    const at = Math.round(source);
+    if (at <= it.b.source_start_ms + 150 || at >= it.b.source_end_ms - 150) return;
+    setBlocks((arr) => {
+      const idx = arr.findIndex((b) => b.step_id === it.b.step_id);
       if (idx < 0) return arr;
       const seg = arr[idx];
       const frac = (at - seg.source_start_ms) / (seg.source_end_ms - seg.source_start_ms);
       const wi = Math.round(seg.words.length * frac);
-      const a: EditSegment = {
+      const a: TrimBlock = {
         ...seg,
-        source_end_ms: Math.round(at),
+        source_end_ms: at,
         words: seg.words.slice(0, wi),
         removed: seg.removed.filter((r) => r < wi),
       };
-      const b: EditSegment = {
+      const b: TrimBlock = {
         ...seg,
-        step_id: `split_${Date.now()}`,
-        source_start_ms: Math.round(at),
+        step_id: `split_${idx}_${at}`,
+        source_start_ms: at,
         words: seg.words.slice(wi),
         removed: seg.removed.filter((r) => r >= wi).map((r) => r - wi),
       };
@@ -102,13 +316,22 @@ export function TrimModal({
     });
   }
 
-  function deleteSelected() {
+  // Delete / restore the selected block (toggles the white gap).
+  function toggleDeleteSelected() {
     if (!sel) return;
-    setSegs((arr) => arr.filter((s) => s.step_id !== sel));
-    setSel(null);
+    setBlocks((arr) => arr.map((b) => (b.step_id === sel ? { ...b, _deleted: !b._deleted } : b)));
+  }
+
+  function save() {
+    onSave(
+      blocks
+        .filter((b) => !b._deleted)
+        .map(({ _deleted, ...seg }) => seg),
+    );
   }
 
   const ticks = 9;
+  const playheadPct = Math.min(100, (curEff / layout.total) * 100);
 
   return (
     <ModalShell
@@ -121,7 +344,7 @@ export function TrimModal({
             <button onClick={onCancel} className="btn btn-secondary">
               Cancel
             </button>
-            <button onClick={() => onSave(segs)} className="btn btn-primary">
+            <button onClick={save} className="btn btn-primary">
               Save changes
             </button>
           </div>
@@ -134,8 +357,8 @@ export function TrimModal({
           ref={videoRef}
           src={mediaUrl(source)}
           className="mx-auto max-h-[46vh] w-auto"
-          onLoadedMetadata={(e) => setDur(e.currentTarget.duration || 0)}
-          onTimeUpdate={(e) => setCur(e.currentTarget.currentTime)}
+          onLoadedMetadata={(e) => resolveDuration(e.currentTarget, setDur)}
+          onTimeUpdate={onFrame}
           onPlay={() => setPlaying(true)}
           onPause={() => setPlaying(false)}
         />
@@ -147,24 +370,24 @@ export function TrimModal({
           onClick={splitAtPlayhead}
           className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--card)] px-3 py-1.5 text-sm text-[var(--text)] hover:bg-[var(--hover)]"
         >
-          ✂ Split at {mmss(cur)}
+          ✂ Split at {mmss(curEff / 1000)}
         </button>
         <button
-          onClick={deleteSelected}
+          onClick={toggleDeleteSelected}
           disabled={!sel}
           className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--card)] px-3 py-1.5 text-sm text-[var(--text)] hover:bg-[var(--hover)] disabled:opacity-40"
         >
-          🗑 Delete Block
+          {selDeleted ? "↩ Restore Block" : "🗑 Delete Block"}
         </button>
         <div className="mx-auto flex items-center gap-2">
           <button
             onClick={togglePlay}
-            className="flex h-8 w-8 items-center justify-center rounded-full bg-[#6d5dfb] text-xs text-[var(--text)]"
+            className="flex h-8 w-8 items-center justify-center rounded-full bg-[#6d5dfb] text-xs text-white"
           >
             {playing ? "❚❚" : "▶"}
           </button>
           <span className="font-mono text-xs text-[var(--text-2)]">
-            {mmss(cur)} / {mmss(dur)}
+            {mmss(curEff / 1000)} / {mmss(layout.total / 1000)}
           </span>
         </div>
         <span className="text-xs text-[var(--text-3)]">Zoom</span>
@@ -186,45 +409,47 @@ export function TrimModal({
           <div className="relative h-5 text-[10px] text-[var(--text-3)]">
             {Array.from({ length: ticks + 1 }).map((_, i) => (
               <span key={i} style={{ left: `${(i / ticks) * 100}%` }} className="absolute -translate-x-1/2">
-                {mmss(((totalMs / 1000) * i) / ticks)}
+                {mmss(((layout.total / 1000) * i) / ticks)}
               </span>
             ))}
-            {/* playhead marker */}
-            <span
-              style={{ left: `${Math.min(100, (cur * 1000 * 100) / totalMs)}%` }}
-              className="absolute top-2.5 -translate-x-1/2 text-[#6d5dfb]"
-            >
-              ▼
-            </span>
           </div>
-          {/* blocks with waveform */}
+          {/* blocks with waveform — white background shows through deleted gaps */}
           <div
-            className="relative h-16 cursor-pointer rounded-lg"
-            onClick={(e) => {
-              const r = e.currentTarget.getBoundingClientRect();
-              seekTo((((e.clientX - r.left) / r.width) * totalMs) / 1000);
-            }}
+            ref={trackRef}
+            className="relative h-16 touch-none select-none rounded-lg bg-white ring-1 ring-inset ring-[var(--border)]"
+            onPointerDown={onPointerDown}
+            onPointerMove={onPointerMove}
+            onPointerUp={onPointerUp}
           >
-            {segs.map((s) => {
-              const left = (s.source_start_ms / totalMs) * 100;
-              const width = Math.max(0.8, ((s.source_end_ms - s.source_start_ms) / totalMs) * 100);
-              const active = sel === s.step_id;
+            {layout.items.map((it) => {
+              const left = (it.start / layout.total) * 100;
+              const width = Math.max(0.6, (it.d / layout.total) * 100);
+              const active = sel === it.b.step_id;
               const bars = Math.max(6, Math.round(width * 1.6));
+              if (it.b._deleted) {
+                return (
+                  <div
+                    key={it.b.step_id}
+                    style={{ left: `${left}%`, width: `${width}%` }}
+                    title="Removed — click Restore Block to bring it back"
+                    className={`absolute top-0 flex h-full items-center justify-center overflow-hidden rounded-md border border-dashed bg-[repeating-linear-gradient(45deg,#f4f5fa,#f4f5fa_6px,#e9ebf3_6px,#e9ebf3_12px)] ${
+                      active ? "border-[#6d5dfb] ring-2 ring-[#6d5dfb]" : "border-[var(--border-strong)]"
+                    }`}
+                  >
+                    {width > 6 && <span className="text-[10px] font-medium text-[var(--text-3)]">removed</span>}
+                  </div>
+                );
+              }
               return (
-                <button
-                  key={s.step_id}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setSel(active ? null : s.step_id);
-                    seekTo(s.source_start_ms / 1000);
-                  }}
+                <div
+                  key={it.b.step_id}
                   style={{ left: `${left}%`, width: `${width}%` }}
-                  title={s.words.slice(0, 8).join(" ")}
-                  className={`absolute top-0 h-full overflow-hidden rounded-md border-r border-white/40 ${
-                    active ? "bg-[#4f3fd8] ring-2 ring-[#6d5dfb]" : "bg-[var(--brand-2)]"
+                  title={it.b.words.slice(0, 8).join(" ")}
+                  className={`absolute top-0 h-full rounded-md ${
+                    active ? "bg-[#4f3fd8] ring-2 ring-[#6d5dfb]" : "overflow-hidden bg-[var(--brand-2)]"
                   }`}
                 >
-                  <span className="flex h-full items-center gap-[3px] px-1.5">
+                  <span className="flex h-full items-center gap-[3px] overflow-hidden px-1.5">
                     {Array.from({ length: bars }).map((_, i) => (
                       <span
                         key={i}
@@ -233,19 +458,40 @@ export function TrimModal({
                       />
                     ))}
                   </span>
-                </button>
+                  {active && (
+                    <>
+                      <span
+                        onPointerDown={(e) => beginResize(e, it.b.step_id, "l")}
+                        title="Drag to adjust start"
+                        className="absolute inset-y-0 -left-1 z-10 flex w-3 cursor-ew-resize touch-none items-center justify-center rounded-l-md bg-[#6d5dfb] hover:bg-[#5b4ce6]"
+                      >
+                        <span className="h-6 w-0.5 rounded bg-white" />
+                      </span>
+                      <span
+                        onPointerDown={(e) => beginResize(e, it.b.step_id, "r")}
+                        title="Drag to adjust end"
+                        className="absolute inset-y-0 -right-1 z-10 flex w-3 cursor-ew-resize touch-none items-center justify-center rounded-r-md bg-[#6d5dfb] hover:bg-[#5b4ce6]"
+                      >
+                        <span className="h-6 w-0.5 rounded bg-white" />
+                      </span>
+                    </>
+                  )}
+                </div>
               );
             })}
-            {/* playhead line */}
+            {/* draggable playhead */}
             <span
-              style={{ left: `${Math.min(100, (cur * 1000 * 100) / totalMs)}%` }}
-              className="pointer-events-none absolute top-0 h-full w-0.5 bg-[var(--text)]"
-            />
+              style={{ left: `${playheadPct}%` }}
+              className="pointer-events-none absolute -top-1 bottom-0 w-0.5 -translate-x-1/2 bg-[#111827]"
+            >
+              <span className="absolute -top-1.5 left-1/2 h-3.5 w-3.5 -translate-x-1/2 rounded-full border-2 border-white bg-[#6d5dfb] shadow" />
+            </span>
           </div>
         </div>
       </div>
       <p className="mt-1 text-[11px] text-[var(--text-3)]">
-        Click a block to select it, then Delete Block — or Split at the playhead to cut a block in two.
+        Drag the timeline to scrub. Click a block to select it — drag its side handles to shrink/expand the time range,
+        Split at the playhead to cut it in two, or Delete Block (removed parts turn white and are skipped on playback).
       </p>
     </ModalShell>
   );
@@ -319,7 +565,7 @@ export function RangeTrimModal({
           ref={videoRef}
           src={mediaUrl(source)}
           className="mx-auto max-h-[46vh] w-auto"
-          onLoadedMetadata={(e) => setDur(e.currentTarget.duration || 0)}
+          onLoadedMetadata={(e) => resolveDuration(e.currentTarget, setDur)}
           onTimeUpdate={(e) => setCur(e.currentTarget.currentTime)}
           onPlay={() => setPlaying(true)}
           onPause={() => setPlaying(false)}
@@ -424,13 +670,17 @@ export function RawTrimModal({
   const [sel, setSel] = useState<string | null>(null);
   const seeded = useRef(blocks.length > 0);
 
-  // seed one block spanning the whole video once its duration is known
-  function onMeta(d: number) {
-    setDur(d);
-    if (!seeded.current && d > 0) {
-      setBlocks([{ id: "b0", start: 0, end: Math.round(d * 1000) }]);
-      seeded.current = true;
-    }
+  // seed one block spanning the whole video once its (real) duration is known
+  function onMeta() {
+    const v = videoRef.current;
+    if (!v) return;
+    resolveDuration(v, (d) => {
+      setDur(d);
+      if (!seeded.current && d > 0) {
+        setBlocks([{ id: "b0", start: 0, end: Math.round(d * 1000) }]);
+        seeded.current = true;
+      }
+    });
   }
 
   const totalMs = Math.max(dur * 1000, 1);
@@ -482,7 +732,7 @@ export function RawTrimModal({
           ref={videoRef}
           src={mediaUrl(source)}
           className="mx-auto max-h-[44vh] w-auto"
-          onLoadedMetadata={(e) => onMeta(e.currentTarget.duration || 0)}
+          onLoadedMetadata={() => onMeta()}
           onTimeUpdate={(e) => setCur(e.currentTarget.currentTime)}
           onPlay={() => setPlaying(true)}
           onPause={() => setPlaying(false)}
@@ -628,7 +878,7 @@ export function CropModal({
           ref={videoRef}
           src={mediaUrl(source)}
           className="w-full"
-          onLoadedMetadata={(e) => setDur(e.currentTarget.duration || 0)}
+          onLoadedMetadata={(e) => resolveDuration(e.currentTarget, setDur)}
           onTimeUpdate={(e) => setCur(e.currentTarget.currentTime)}
           onPlay={() => setPlaying(true)}
           onPause={() => setPlaying(false)}

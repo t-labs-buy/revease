@@ -23,7 +23,7 @@ import {
   type SessionStatus,
 } from "@/lib/api";
 import { Spinner, StatusDot } from "@/components/ui";
-import { CropModal, ModalShell, RawTrimModal } from "@/components/EditModals";
+import { CropModal, ModalShell, RawTrimModal, resolveDuration } from "@/components/EditModals";
 import { VoicePanel } from "@/components/VoicePanel";
 
 /* Skills come from the Skills page (/skills). Each carries an AI `instruction`
@@ -85,7 +85,10 @@ function toDocSkill(s: Skill, i: number): DocSkill {
 const FALLBACK_VIDEO: VideoSkill = { key: "std", name: "Standard", grad: GRADS[0], voice_id: "af_sarah", speed: 1, captions: true, motionZoom: false, instruction: "", pkg: "" };
 const FALLBACK_DOC: DocSkill = { key: "std", name: "Standard", grad: GRADS[0], instruction: "" };
 
-const mmss = (t: number) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
+const mmss = (t: number) =>
+  Number.isFinite(t) && t >= 0
+    ? `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`
+    : "0:00";
 const eff = (s: { words: string[]; removed: number[] }) =>
   s.words.filter((_, i) => !s.removed.includes(i)).join(" ");
 
@@ -301,7 +304,7 @@ function PrepareInner({ params }: { params: Promise<{ id: string }> }) {
             <video
               src={mediaUrl(videoAsset.storage_key)}
               controls
-              onLoadedMetadata={(e) => setDur(e.currentTarget.duration || 0)}
+              onLoadedMetadata={(e) => resolveDuration(e.currentTarget, setDur)}
               className="max-h-[62vh] w-full rounded-2xl bg-black"
             />
           ) : (
