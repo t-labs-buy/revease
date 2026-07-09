@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useCallback, useEffect, useRef, useState } from "react";
+import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
   getRender,
@@ -23,6 +23,7 @@ import { VoicePanel } from "@/components/VoicePanel";
 import { ShareButton } from "@/components/ShareButton";
 import { PreviewOverlay } from "@/components/PreviewOverlay";
 import { CropModal, TrimModal } from "@/components/EditModals";
+import { Filmstrip, Waveform, useFilmstrip, useWaveform } from "@/lib/media";
 
 type Tone = "Professional" | "Casual" | "Energetic" | "Concise";
 const TONES: Tone[] = ["Professional", "Casual", "Energetic", "Concise"];
@@ -36,9 +37,19 @@ const ENHANCE_INSTR =
   "Tighten every line: remove filler, redundancy and hedging, fix awkward phrasing, and " +
   "make it crisp, natural to speak, and demo-ready. Keep all product and feature names.";
 
-type Tab = "Script" | "AI Voice" | "Zoom" | "Trim" | "Crop" | "Elements" | "Captions";
-const SIDE_TABS: Tab[] = ["Script", "AI Voice", "Zoom"];
+type Tab = "Script" | "AI Voice" | "Zoom" | "Background" | "Trim" | "Crop" | "Elements" | "Captions";
+const SIDE_TABS: Tab[] = ["Script", "AI Voice", "Zoom", "Background"];
 const TOOL_TABS: Tab[] = ["Elements"];
+
+// Backdrop presets shared with the renderer (same ids in worker render.py).
+const BG_PRESETS: { id: string; label: string; css: string }[] = [
+  { id: "slate", label: "Slate", css: "linear-gradient(135deg,#0b0f1a,#1e2637)" },
+  { id: "indigo", label: "Indigo", css: "linear-gradient(135deg,#6d5dfb,#a855f7)" },
+  { id: "ocean", label: "Ocean", css: "linear-gradient(135deg,#0ea5e9,#6366f1)" },
+  { id: "sunset", label: "Sunset", css: "linear-gradient(135deg,#f97316,#ec4899)" },
+  { id: "forest", label: "Forest", css: "linear-gradient(135deg,#10b981,#0d9488)" },
+  { id: "light", label: "Light", css: "linear-gradient(135deg,#e2e8f0,#f8fafc)" },
+];
 
 const eff = (s: EditSegment) => s.words.filter((_, i) => !s.removed.includes(i)).join(" ");
 const tokenize = (text: string) => text.trim().split(/\s+/).filter(Boolean);
@@ -268,6 +279,14 @@ export default function VideoEditor({ params }: { params: Promise<{ id: string }
     setSpec((s) => (s ? { ...s, segments: s.segments.filter((_, i) => i !== idx) } : s));
   }, []);
 
+  // Skip a scene: it stays in place on the timeline (greyed) but is jumped over
+  // on playback and excluded from the render — distinct from deleting it.
+  const toggleSkip = useCallback((idx: number) => {
+    setSpec((s) =>
+      s ? { ...s, segments: s.segments.map((seg, i) => (i === idx ? { ...seg, skipped: !seg.skipped } : seg)) } : s,
+    );
+  }, []);
+
   const duplicateSegment = useCallback((idx: number) => {
     setSpec((s) => {
       if (!s || !s.segments[idx]) return s;
@@ -443,6 +462,9 @@ export default function VideoEditor({ params }: { params: Promise<{ id: string }
         target: s.target ?? "",
         action: s.action ?? "",
         narration: eff(s),
+        // on-screen duration → the model budgets ~2-2.5 words/sec so the
+        // narration fits the scene and the output length stays correct
+        seconds: Math.max(1, Math.round((s.source_end_ms - s.source_start_ms) / 1000)),
       }));
       const lines = await generateScript(id, scenes, spec.title, TONE_INSTR[tone]);
       setSpec((s) => {
@@ -541,6 +563,7 @@ export default function VideoEditor({ params }: { params: Promise<{ id: string }
     setShowRender(true);
     try {
       await patchVideo(id, spec);
+      const specAtRender = JSON.stringify(spec);
       const job = await renderVideo(id);
       setRender(job);
       pollRef.current = setInterval(async () => {
@@ -549,6 +572,23 @@ export default function VideoEditor({ params }: { params: Promise<{ id: string }
         if (r.status === "done" || r.status === "error") {
           if (pollRef.current) clearInterval(pollRef.current);
           setRendering(false);
+          if (r.status === "done") {
+            // The renderer persists its auto-added zooms into the spec — pull them
+            // in so the Zoom tab shows them for tweaking. Skip the live spec if the
+            // user kept editing while the render ran (their edits win).
+            try {
+              const v = await getVideo(id);
+              if (v?.edit_spec) {
+                setSavedSpec(v.edit_spec);
+                if (JSON.stringify(baseline.current) === specAtRender) {
+                  skipHist.current = true;
+                  setSpec(v.edit_spec);
+                }
+              }
+            } catch {
+              /* non-fatal — reopening the editor shows them */
+            }
+          }
         }
       }, 2000);
     } catch (e) {
@@ -583,6 +623,59 @@ export default function VideoEditor({ params }: { params: Promise<{ id: string }
       )
     : -1;
 
+  // Output timeline: the player clock/scrubber run on the FINAL video's clock
+  // (pace, silent caps, skips applied) — the original length is never shown.
+  // Mirrors the render pipeline's per-scene timing rules.
+  const outMap = useMemo(() => {
+    if (!spec) return null;
+    const WPS = 2.6;
+    const SPEEDUP = 2.5;
+    const CAP = 3500;
+    const pace = Math.min(1.5, Math.max(1, spec.pace ?? 1.1));
+    const useOrig = !!spec.voice.use_original;
+    const kept = spec.segments
+      .filter((s) => !s.skipped)
+      .slice()
+      .sort((a, b) => a.source_start_ms - b.source_start_ms);
+    let acc = 0;
+    const items = kept.map((s) => {
+      const src = Math.max(1, s.source_end_ms - s.source_start_ms);
+      const words = s.words.filter((_, i) => !s.removed.includes(i));
+      const o = !words.length
+        ? Math.max(300, Math.min(CAP, src / (SPEEDUP * pace)))
+        : useOrig
+          ? Math.max(300, src / pace)
+          : Math.max(300, (words.length / (WPS * (spec.voice.speed || 1) * pace)) * 1000);
+      const it = { s0: s.source_start_ms, s1: s.source_end_ms, o0: acc, o1: acc + o };
+      acc += o;
+      return it;
+    });
+    return { items, total: acc };
+  }, [spec]);
+  const outTotalSec = outMap && outMap.items.length ? outMap.total / 1000 : dur;
+  const toOutSec = (srcSec: number) => {
+    if (!outMap || !outMap.items.length) return srcSec;
+    const t = srcSec * 1000;
+    let last = 0;
+    for (const it of outMap.items) {
+      if (t < it.s0) return last / 1000; // inside a dropped gap → hold at previous scene's end
+      if (t < it.s1) return (it.o0 + ((t - it.s0) / (it.s1 - it.s0)) * (it.o1 - it.o0)) / 1000;
+      last = it.o1;
+    }
+    return outMap.total / 1000;
+  };
+  const toSrcSec = (outSec: number) => {
+    if (!outMap || !outMap.items.length) return outSec;
+    const o = outSec * 1000;
+    for (const it of outMap.items) {
+      if (o <= it.o1) {
+        const f = Math.max(0, Math.min(1, (o - it.o0) / Math.max(1, it.o1 - it.o0)));
+        return (it.s0 + f * (it.s1 - it.s0)) / 1000;
+      }
+    }
+    return outMap.items[outMap.items.length - 1].s1 / 1000;
+  };
+
   useEffect(() => {
     if (playing && tab === "Script") activeRef.current?.scrollIntoView({ block: "nearest" });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -610,6 +703,32 @@ export default function VideoEditor({ params }: { params: Promise<{ id: string }
     transition: `transform ${((6 - zoomSpeed) * 0.3).toFixed(2)}s ease`,
   };
   const captionText = spec.captions.enabled && activeSeg ? eff(activeSeg) : "";
+
+  // Backdrop behind the recording (inset), mirrored by the renderer.
+  const bgOn = !!spec.background?.enabled;
+  const bgCss = BG_PRESETS.find((p) => p.id === spec.background?.style)?.css ?? BG_PRESETS[0].css;
+  // Crop reframe: actually show the cropped region filling the frame (the render
+  // does the same), not just a dimmed outline.
+  const cr = spec.crop;
+  // clamp so x+w / y+h can never exceed the frame — an out-of-bounds region makes
+  // the origin math point at the wrong area entirely
+  const cw = Math.min(1, Math.max(0.05, cr?.w ?? 1));
+  const ch = Math.min(1, Math.max(0.05, cr?.h ?? 1));
+  const cx = Math.min(Math.max(0, cr?.x ?? 0), 1 - cw);
+  const cy = Math.min(Math.max(0, cr?.y ?? 0), 1 - ch);
+  // optional time window: crop only applies within [start_ms, end_ms]
+  const crs = cr?.start_ms ?? 0;
+  const cre = cr?.end_ms ?? 0;
+  const cropInRange = cre <= crs || (cur * 1000 >= crs && cur * 1000 <= cre);
+  const cropOn = !!cr?.enabled && cropInRange && (cw < 0.999 || ch < 0.999 || cx > 0.001 || cy > 0.001);
+  const cropStyle: React.CSSProperties = cropOn
+    ? {
+        transform: `scale(${(1 / cw).toFixed(4)}, ${(1 / ch).toFixed(4)})`,
+        transformOrigin: `${cw >= 0.999 ? 0 : ((cx / (1 - cw)) * 100).toFixed(2)}% ${
+          ch >= 0.999 ? 0 : ((cy / (1 - ch)) * 100).toFixed(2)
+        }%`,
+      }
+    : {};
 
   const totalMs =
     (dur ? dur * 1000 : 0) ||
@@ -675,6 +794,18 @@ export default function VideoEditor({ params }: { params: Promise<{ id: string }
         </div>
         <div className="flex items-center gap-2">
           {!dirty && <span className="hidden text-xs text-[var(--text-3)] sm:inline">Saved</span>}
+          <select
+            value={String(spec.pace ?? 1.1)}
+            onChange={(e) => setSpec({ ...spec, pace: Number(e.target.value) })}
+            title="Product-video pace — tempo of narrated scenes; silent stretches always fast-forward"
+            className="rounded-lg border border-[var(--border)] bg-[var(--card)] px-2 py-1.5 text-xs text-[var(--text-2)]"
+          >
+            {[1, 1.1, 1.25, 1.5].map((p) => (
+              <option key={p} value={p}>
+                {p}× pace
+              </option>
+            ))}
+          </select>
           <ShareButton projectId={id} kind="video" />
           <button onClick={doRender} disabled={rendering} className="btn btn-primary btn-sm">
             {rendering ? (
@@ -948,6 +1079,8 @@ export default function VideoEditor({ params }: { params: Promise<{ id: string }
               />
             )}
 
+            {tab === "Background" && <BackgroundPanel spec={spec} patchSpec={patchSpec} />}
+
             {tab === "Elements" && (
               <ElementsPanel
                 spec={spec}
@@ -1005,9 +1138,12 @@ export default function VideoEditor({ params }: { params: Promise<{ id: string }
                 {source ? (
                   <div
                     ref={frameRef}
-                    className="relative flex max-h-full overflow-hidden rounded-2xl bg-black shadow-lg"
+                    className="relative flex max-h-full overflow-hidden rounded-2xl shadow-lg"
+                    style={{ background: bgOn ? bgCss : "#000", padding: bgOn ? "2.6%" : undefined }}
                   >
-                    <video
+                    <div className={`relative flex max-h-full min-h-0 overflow-hidden ${bgOn ? "rounded-xl shadow-lg" : ""}`}>
+                      <div className="flex max-h-full min-h-0" style={cropStyle}>
+                        <video
                       ref={videoRef}
                       src={mediaUrl(source)}
                       className="max-h-full w-auto"
@@ -1020,6 +1156,28 @@ export default function VideoEditor({ params }: { params: Promise<{ id: string }
                       onTimeUpdate={(e) => {
                         const v = e.currentTarget;
                         setCur(v.currentTime);
+                        if (v.paused) return; // free scrubbing while paused
+                        // Preview the PROCESSED video: while playing, stay on kept
+                        // scenes only — skipped scenes AND the dead source gaps
+                        // between scenes (which the render drops) are jumped over.
+                        const nowMs = v.currentTime * 1000;
+                        const kept = spec.segments
+                          .filter((sg) => !sg.skipped)
+                          .sort((a, b) => a.source_start_ms - b.source_start_ms);
+                        if (kept.length) {
+                          const inside = kept.some(
+                            (sg) => nowMs + 40 >= sg.source_start_ms && nowMs < sg.source_end_ms,
+                          );
+                          if (!inside) {
+                            const next = kept.find((sg) => sg.source_start_ms >= nowMs - 1);
+                            if (next) v.currentTime = next.source_start_ms / 1000;
+                            else {
+                              v.pause();
+                              v.currentTime = kept[0].source_start_ms / 1000;
+                            }
+                            return;
+                          }
+                        }
                         const tr = spec.trim;
                         if (tr?.enabled && tr.end_ms > tr.start_ms && v.currentTime * 1000 >= tr.end_ms) {
                           v.pause();
@@ -1042,7 +1200,9 @@ export default function VideoEditor({ params }: { params: Promise<{ id: string }
                         if (aiVoiceActive && audioRef.current)
                           audioRef.current.currentTime = e.currentTarget.currentTime;
                       }}
-                    />
+                        />
+                      </div>
+                    </div>
                     <audio ref={audioRef} src={voiceUrl ?? undefined} preload="auto" />
                     {captionText && (
                       <div className="pointer-events-none absolute inset-x-0 bottom-4 flex justify-center px-6">
@@ -1085,16 +1245,19 @@ export default function VideoEditor({ params }: { params: Promise<{ id: string }
                 >
                   🔊
                 </button>
-                <span className="font-mono text-xs text-[var(--text-2)]">
-                  {clock(cur)} / {clock(dur)}
+                <span
+                  className="font-mono text-xs text-[var(--text-2)]"
+                  title="Final video time (pace & cuts applied)"
+                >
+                  {clock(toOutSec(cur))} / {clock(outTotalSec)}
                 </span>
                 <input
                   type="range"
                   min={0}
-                  max={dur || 1}
+                  max={outTotalSec || 1}
                   step={0.05}
-                  value={cur}
-                  onChange={(e) => seekTo(Number(e.target.value))}
+                  value={Math.min(outTotalSec, toOutSec(cur))}
+                  onChange={(e) => seekTo(toSrcSec(Number(e.target.value)))}
                   className="flex-1 accent-[#6d5dfb]"
                 />
                 <select
@@ -1180,6 +1343,7 @@ export default function VideoEditor({ params }: { params: Promise<{ id: string }
       {/* TIMELINE */}
       <TimelineTracks
         spec={spec}
+        source={source}
         totalMs={totalMs}
         cur={cur}
         dur={dur}
@@ -1192,6 +1356,7 @@ export default function VideoEditor({ params }: { params: Promise<{ id: string }
         onResize={resizeSegment}
         onDelete={() => activeIdx >= 0 && deleteSegment(activeIdx)}
         onDuplicate={() => activeIdx >= 0 && duplicateSegment(activeIdx)}
+        onSkip={() => activeIdx >= 0 && toggleSkip(activeIdx)}
         onSplit={() => activeIdx >= 0 && splitSegment(activeIdx, cur * 1000)}
         onUndo={undo}
         onRedo={redo}
@@ -1254,20 +1419,18 @@ function ZoomPanel({
 }) {
   const motionZoom = spec.motion_zoom ?? true;
   const zi = zoomIdx ?? (activeIdx >= 0 ? activeIdx : 0);
-  const seg = spec.segments[zi];
-  if (!seg) return <p className="text-sm text-[var(--text-3)]">No scenes to zoom.</p>;
-  const z = seg.zoom;
-  const setZoom = (patch: Partial<EditSegment["zoom"]>) => mutateSeg(zi, { zoom: { ...z, ...patch } });
-  const pickPos = (e: React.PointerEvent<HTMLDivElement>) => {
+  if (!spec.segments.length) return <p className="text-sm text-[var(--text-3)]">No scenes to zoom.</p>;
+  // a manual tweak takes ownership of an auto-added zoom (drops the "auto" badge)
+  const setZoomAt = (i: number, patch: Partial<EditSegment["zoom"]>) =>
+    mutateSeg(i, { zoom: { ...spec.segments[i].zoom, ...patch, auto: false } });
+  const pickPosAt = (i: number) => (e: React.PointerEvent<HTMLDivElement>) => {
     const r = e.currentTarget.getBoundingClientRect();
-    setZoom({
+    setZoomAt(i, {
       enabled: true,
       cx: Number(Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)).toFixed(3)),
       cy: Number(Math.min(1, Math.max(0, (e.clientY - r.top) / r.height)).toFixed(3)),
     });
   };
-  const level = Math.round(z.scale * 100);
-  const speed = z.speed ?? 3;
   return (
     <div className="space-y-5">
       <label className="flex cursor-pointer items-start justify-between gap-3 rounded-xl border border-[var(--border)] bg-[var(--card)] p-3">
@@ -1299,76 +1462,218 @@ function ZoomPanel({
         )}
       </button>
       <div>
-        <div className="label mb-1">Scene</div>
-        <select
-          value={zi}
-          onChange={(e) => {
-            const i = Number(e.target.value);
-            setZoomIdx(i);
-            seekTo(spec.segments[i].source_start_ms / 1000);
-          }}
-          className="input"
-        >
-          {spec.segments.map((s, i) => (
-            <option key={s.step_id} value={i}>
-              {i + 1}. {mmss(s.source_start_ms / 1000)} · {s.target ?? "Scene"}
-            </option>
-          ))}
-        </select>
-      </div>
-      <label className="flex items-center justify-between">
-        <span className="text-sm font-medium">Add zoom effects</span>
-        <input
-          type="checkbox"
-          checked={z.enabled}
-          onChange={(e) => setZoom({ enabled: e.target.checked })}
-          className="h-4 w-8 accent-[#6d5dfb]"
-        />
-      </label>
-      <div>
-        <div className="label mb-1.5">Select zoom position</div>
-        <div
-          onPointerDown={(e) => {
-            e.currentTarget.setPointerCapture(e.pointerId);
-            pickPos(e);
-          }}
-          onPointerMove={(e) => e.buttons === 1 && pickPos(e)}
-          className="relative grid aspect-video w-full cursor-crosshair grid-cols-6 grid-rows-4 overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--bg)]"
-        >
-          {Array.from({ length: 24 }).map((_, i) => (
-            <div key={i} className="border border-[var(--border)]/70" />
-          ))}
-          <span
-            style={{ left: `${z.cx * 100}%`, top: `${z.cy * 100}%` }}
-            className="pointer-events-none absolute h-4 w-4 -translate-x-1/2 -translate-y-1/2 rounded-full bg-[#6d5dfb] shadow ring-2 ring-white"
-          />
+        <div className="mb-1 flex items-center justify-between">
+          <span className="label">Scenes</span>
+          <span className="text-xs text-[var(--text-3)]">
+            {spec.segments.filter((s) => s.zoom.enabled || s.zoom.auto !== false).length} of{" "}
+            {spec.segments.length} zoomed
+          </span>
+        </div>
+        {/* one box per scene — click to expand its own position / level / speed editor.
+            Default state is ACTIVE (auto): the generator zooms toward the mouse click
+            unless the user turns the scene off. */}
+        <div className="space-y-2 pr-0.5">
+          {spec.segments.map((s, i) => {
+            const open = zi === i;
+            const displayOn = s.zoom.enabled || s.zoom.auto !== false; // auto is the default
+            return (
+              <div
+                key={s.step_id}
+                onClick={() => {
+                  setZoomIdx(i);
+                  seekTo(s.source_start_ms / 1000);
+                }}
+                className={`cursor-pointer rounded-xl border p-2.5 transition-colors ${
+                  open
+                    ? "border-[#6d5dfb] bg-[#6d5dfb]/5"
+                    : displayOn
+                      ? "border-[var(--border)] bg-[var(--card)] hover:bg-[var(--hover)]"
+                      : "border-dashed border-[var(--border)] bg-[var(--bg)] hover:bg-[var(--hover)]"
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  <span className="w-5 flex-none text-right font-mono text-[11px] text-[var(--text-3)]">{i + 1}</span>
+                  <span className="flex-none font-mono text-[11px] text-[#6d5dfb]">{mmss(s.source_start_ms / 1000)}</span>
+                  <span className="min-w-0 flex-1 truncate text-[13px] font-medium">{s.target ?? "Scene"}</span>
+                  {displayOn && !open && (
+                    <span
+                      className={`badge flex-none ${
+                        s.zoom.enabled && !s.zoom.auto ? "bg-[#6d5dfb]/10 text-[#6d5dfb]" : "bg-amber-100 text-amber-700"
+                      }`}
+                    >
+                      {s.zoom.enabled ? `${s.zoom.auto ? "auto" : "zoom"} ${Math.round(s.zoom.scale * 100)}%` : "auto"}
+                    </span>
+                  )}
+                  <label
+                    onClick={(e) => e.stopPropagation()}
+                    className="flex flex-none cursor-pointer items-center gap-1.5 text-[11px] font-medium text-[var(--text-2)]"
+                    title={displayOn ? "Turn zoom off for this scene" : "Turn zoom back on (auto position)"}
+                  >
+                    {displayOn ? "Active" : "Off"}
+                    <input
+                      type="checkbox"
+                      checked={displayOn}
+                      onChange={(e) =>
+                        // off = explicit opt-out (generator respects it);
+                        // on = back to auto (position picked from the click at generate)
+                        mutateSeg(i, {
+                          zoom: { ...s.zoom, enabled: false, auto: e.target.checked },
+                        })
+                      }
+                      className="h-4 w-8 accent-[#6d5dfb]"
+                    />
+                  </label>
+                </div>
+
+                {/* expanded editor for the selected scene */}
+                {open && s.zoom.enabled && (
+                  <div
+                    onClick={(e) => e.stopPropagation()}
+                    className="mt-2.5 cursor-default space-y-3 border-t border-[var(--border)] pt-2.5"
+                  >
+                    <div className="flex items-center gap-2">
+                      <span
+                        className={`badge ${s.zoom.auto ? "bg-amber-100 text-amber-700" : "bg-[#6d5dfb]/10 text-[#6d5dfb]"}`}
+                      >
+                        {s.zoom.auto ? "auto zoom" : "zoom"}
+                      </span>
+                      <span className="text-[11px] text-[var(--text-3)]">
+                        center {Math.round(s.zoom.cx * 100)},{Math.round(s.zoom.cy * 100)}
+                      </span>
+                    </div>
+                    <div>
+                      <div className="mb-1 text-[11px] font-medium text-[var(--text-2)]">Zoom position — click to aim</div>
+                      <div
+                        onPointerDown={(e) => {
+                          e.currentTarget.setPointerCapture(e.pointerId);
+                          pickPosAt(i)(e);
+                        }}
+                        onPointerMove={(e) => e.buttons === 1 && pickPosAt(i)(e)}
+                        className="relative grid aspect-video w-full cursor-crosshair grid-cols-6 grid-rows-4 overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--bg)]"
+                      >
+                        {Array.from({ length: 24 }).map((_, k) => (
+                          <div key={k} className="border border-[var(--border)]/70" />
+                        ))}
+                        <span
+                          style={{ left: `${s.zoom.cx * 100}%`, top: `${s.zoom.cy * 100}%` }}
+                          className="pointer-events-none absolute h-4 w-4 -translate-x-1/2 -translate-y-1/2 rounded-full bg-[#6d5dfb] shadow ring-2 ring-white"
+                        />
+                      </div>
+                    </div>
+                    {(
+                      [
+                        ["Zoom level", Math.round(s.zoom.scale * 100), 100, 250, 5,
+                         (v: number) => setZoomAt(i, { enabled: true, scale: v / 100 })],
+                        ["Zoom speed", s.zoom.speed ?? 3, 1, 5, 1, (v: number) => setZoomAt(i, { speed: v })],
+                      ] as const
+                    ).map(([label, val, min, max, step, on]) => (
+                      <div key={label}>
+                        <div className="mb-1 flex items-center justify-between">
+                          <span className="text-[11px] font-medium text-[var(--text-2)]">{label}</span>
+                          <span className="rounded border border-[var(--border)] px-1.5 text-xs">{val}</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={min}
+                          max={max}
+                          step={step}
+                          value={val}
+                          onChange={(e) => on(Number(e.target.value))}
+                          className="w-full accent-[#6d5dfb]"
+                        />
+                      </div>
+                    ))}
+                    <button
+                      onClick={() => setZoomAt(i, { enabled: false })}
+                      className="btn btn-secondary btn-sm w-full"
+                    >
+                      🗑 Remove zoom from this scene
+                    </button>
+                  </div>
+                )}
+
+                {open && !s.zoom.enabled && displayOn && (
+                  <div
+                    onClick={(e) => e.stopPropagation()}
+                    className="mt-2.5 cursor-default space-y-2.5 border-t border-[var(--border)] pt-2.5"
+                  >
+                    <p className="text-[11px] text-[var(--text-3)]">
+                      <span className="badge mr-1.5 bg-amber-100 text-amber-700">auto</span>
+                      Position is picked from your mouse click when the video generates. Click the grid to set it
+                      manually instead.
+                    </p>
+                    <div
+                      onPointerDown={(e) => {
+                        e.currentTarget.setPointerCapture(e.pointerId);
+                        pickPosAt(i)(e);
+                      }}
+                      onPointerMove={(e) => e.buttons === 1 && pickPosAt(i)(e)}
+                      className="relative grid aspect-video w-full cursor-crosshair grid-cols-6 grid-rows-4 overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--bg)]"
+                    >
+                      {Array.from({ length: 24 }).map((_, k) => (
+                        <div key={k} className="border border-[var(--border)]/70" />
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {open && !displayOn && (
+                  <p className="mt-2 pl-7 text-[11px] text-[var(--text-3)]">
+                    Zoom is off for this scene — the generator will leave it wide. Switch to Active to zoom again.
+                  </p>
+                )}
+              </div>
+            );
+          })}
         </div>
       </div>
-      {(
-        [
-          ["Select zoom level", level, 100, 250, 5, (v: number) => setZoom({ enabled: true, scale: v / 100 })],
-          ["Select zoom speed", speed, 1, 5, 1, (v: number) => setZoom({ speed: v })],
-        ] as const
-      ).map(([label, val, min, max, step, on]) => (
-        <div key={label}>
-          <div className="mb-1 flex items-center justify-between">
-            <span className="label">{label}</span>
-            <span className="rounded border border-[var(--border)] px-1.5 text-xs">{val}</span>
-          </div>
-          <input
-            type="range"
-            min={min}
-            max={max}
-            step={step}
-            value={val}
-            onChange={(e) => on(Number(e.target.value))}
-            className="w-full accent-[#6d5dfb]"
-          />
-        </div>
-      ))}
-      <button onClick={() => setZoom({ enabled: false })} className="btn btn-secondary btn-sm w-full">
-        🗑 Delete zoom
-      </button>
+    </div>
+  );
+}
+
+function BackgroundPanel({
+  spec,
+  patchSpec,
+}: {
+  spec: EditSpec;
+  patchSpec: (p: Partial<EditSpec>) => void;
+}) {
+  const cur = spec.background?.enabled ? spec.background.style : "none";
+  const pick = (id: string) =>
+    patchSpec({
+      background:
+        id === "none"
+          ? { enabled: false, style: spec.background?.style ?? "indigo" }
+          : { enabled: true, style: id },
+    });
+  return (
+    <div className="space-y-4">
+      <p className="text-xs text-[var(--text-3)]">
+        Put the recording on a colored backdrop — it renders inset with padding instead of full-bleed on black.
+        Applies to the preview and the generated video.
+      </p>
+      <div className="grid grid-cols-2 gap-2">
+        {[{ id: "none", label: "None — full bleed", css: "#0b0f1a" }, ...BG_PRESETS].map((p) => (
+          <button
+            key={p.id}
+            onClick={() => pick(p.id)}
+            className={`rounded-xl border p-2 text-left transition-all ${
+              cur === p.id
+                ? "border-[#6d5dfb] ring-2 ring-[#6d5dfb]/40"
+                : "border-[var(--border)] hover:bg-[var(--hover)]"
+            }`}
+          >
+            <span className="mb-1.5 block h-12 w-full rounded-lg" style={{ background: p.css }}>
+              {p.id !== "none" && (
+                <span className="flex h-full items-center justify-center">
+                  <span className="h-7 w-3/5 rounded-sm bg-white/85 shadow" />
+                </span>
+              )}
+            </span>
+            <span className="text-xs font-medium">{p.label}</span>
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
@@ -1496,6 +1801,7 @@ function ElementsPanel({
 
 function TimelineTracks({
   spec,
+  source,
   totalMs,
   cur,
   dur,
@@ -1508,6 +1814,7 @@ function TimelineTracks({
   onResize,
   onDelete,
   onDuplicate,
+  onSkip,
   onSplit,
   onUndo,
   onRedo,
@@ -1515,6 +1822,7 @@ function TimelineTracks({
   canRedo,
 }: {
   spec: EditSpec;
+  source: string | null;
   totalMs: number;
   cur: number;
   dur: number;
@@ -1527,12 +1835,16 @@ function TimelineTracks({
   onResize: (i: number, endMs: number) => void;
   onDelete: () => void;
   onDuplicate: () => void;
+  onSkip: () => void;
   onSplit: () => void;
   onUndo: () => void;
   onRedo: () => void;
   canUndo: boolean;
   canRedo: boolean;
 }) {
+  const frames = useFilmstrip(source, 24);
+  const peaks = useWaveform(source, 400);
+  const skipActive = activeIdx >= 0 && !!spec.segments[activeIdx]?.skipped;
   const blocks = spec.segments.map((s, i) => {
     const left = (s.source_start_ms / totalMs) * 100;
     const width = Math.max(
@@ -1544,32 +1856,30 @@ function TimelineTracks({
   const ROWS: { label: string; render: () => React.ReactNode }[] = [
     {
       label: "Video",
-      render: () =>
-        blocks.map((b) => (
-          <DraggableBlock
-            key={b.s.step_id}
-            b={b}
-            totalMs={totalMs}
-            active={activeIdx === b.i}
-            onSeek={() => seekTo(b.s.source_start_ms / 1000)}
-            onMove={(startMs) => onMove(b.i, startMs)}
-            onResize={(endMs) => onResize(b.i, endMs)}
-          />
-        )),
+      render: () => (
+        <>
+          {/* real frame thumbnails behind the selectable/draggable scene blocks */}
+          <Filmstrip frames={frames} className="rounded-md opacity-90" />
+          {blocks.map((b) => (
+            <DraggableBlock
+              key={b.s.step_id}
+              b={b}
+              totalMs={totalMs}
+              active={activeIdx === b.i}
+              skipped={!!b.s.skipped}
+              onSeek={() => seekTo(b.s.source_start_ms / 1000)}
+              onMove={(startMs) => onMove(b.i, startMs)}
+              onResize={(endMs) => onResize(b.i, endMs)}
+            />
+          ))}
+        </>
+      ),
     },
     {
       label: "Audio",
       render: () => (
-        <div className="absolute inset-x-1 top-1/2 h-6 -translate-y-1/2">
-          <div className="flex h-full items-center gap-[2px] overflow-hidden opacity-70">
-            {Array.from({ length: 120 }).map((_, i) => (
-              <span
-                key={i}
-                className="w-[2px] rounded bg-[var(--brand-2)]"
-                style={{ height: `${20 + Math.abs(Math.sin(i * 1.7)) * 70}%` }}
-              />
-            ))}
-          </div>
+        <div className="absolute inset-x-1 top-1/2 h-7 -translate-y-1/2 text-[var(--brand-2)]">
+          <Waveform peaks={peaks} className="opacity-80" />
         </div>
       ),
     },
@@ -1622,6 +1932,13 @@ function TimelineTracks({
         </button>
         <button onClick={onSplit} className="btn btn-ghost btn-sm" title="Split scene at playhead">
           ✂ Split
+        </button>
+        <button
+          onClick={onSkip}
+          className={`btn btn-ghost btn-sm ${skipActive ? "text-[#6d5dfb]" : ""}`}
+          title="Skip scene — kept on the timeline but jumped over on playback & render"
+        >
+          {skipActive ? "↩ Unskip" : "⤼ Skip"}
         </button>
         <button onClick={onDuplicate} className="btn btn-ghost btn-sm" title="Duplicate scene">
           ⧉ Duplicate
@@ -1689,6 +2006,7 @@ function DraggableBlock({
   b,
   totalMs,
   active,
+  skipped,
   onSeek,
   onMove,
   onResize,
@@ -1696,6 +2014,7 @@ function DraggableBlock({
   b: { s: EditSegment; i: number; left: number; width: number; text: string };
   totalMs: number;
   active: boolean;
+  skipped?: boolean;
   onSeek: () => void;
   onMove: (startMs: number) => void;
   onResize: (endMs: number) => void;
@@ -1743,17 +2062,21 @@ function DraggableBlock({
       onPointerMove={move}
       onPointerUp={end}
       style={{ left: `${b.left}%`, width: `${b.width}%` }}
-      className={`absolute top-1/2 flex h-8 -translate-y-1/2 cursor-grab items-center overflow-hidden rounded-md bg-[#6d5dfb]/15 px-1.5 text-[10px] text-[#6d5dfb] ring-1 ring-[#6d5dfb]/25 active:cursor-grabbing ${
-        active ? "ring-2 ring-[#6d5dfb]" : ""
-      }`}
-      title={b.text}
+      className={`group/blk absolute inset-y-0 flex cursor-grab items-end overflow-hidden rounded-md px-1 pb-0.5 text-[10px] font-medium text-white ring-1 ring-inset active:cursor-grabbing ${
+        skipped
+          ? "bg-[repeating-linear-gradient(45deg,rgba(17,24,39,.55),rgba(17,24,39,.55)_6px,rgba(154,161,178,.55)_6px,rgba(154,161,178,.55)_12px)] ring-[var(--border-strong)]"
+          : "bg-[#6d5dfb]/10 ring-[#6d5dfb]/30 hover:bg-[#6d5dfb]/20"
+      } ${active ? "ring-2 ring-[#6d5dfb]" : ""}`}
+      title={skipped ? `Skipped — ${b.text}` : b.text}
     >
-      <span className="pointer-events-none truncate">{b.text}</span>
+      <span className="pointer-events-none truncate rounded bg-black/45 px-1 leading-tight backdrop-blur-[1px]">
+        {skipped ? "⤼ skipped" : b.text}
+      </span>
       <span
         onPointerDown={begin("resize")}
         onPointerMove={move}
         onPointerUp={end}
-        className="absolute right-0 top-0 h-full w-2 cursor-ew-resize rounded-r-md bg-[#6d5dfb]/40"
+        className="absolute right-0 top-0 h-full w-2 cursor-ew-resize rounded-r-md bg-[#6d5dfb]/50 opacity-0 transition-opacity group-hover/blk:opacity-100"
         title="Resize"
       />
     </div>

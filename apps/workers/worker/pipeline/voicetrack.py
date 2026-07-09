@@ -33,6 +33,8 @@ def build_voice_track(project_id: str, voice_id: str, speed: float) -> dict:
         # Synth each non-empty line, remembering where it sits on the timeline.
         placed: list[tuple[int, object]] = []
         for s in spec.get("segments", []):
+            if s.get("skipped"):
+                continue  # skipped scenes are excluded from the render + voice
             script = effective_script(s.get("words", []), s.get("removed", []))
             if not script.strip():
                 continue

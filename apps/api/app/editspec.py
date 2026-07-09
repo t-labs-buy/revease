@@ -64,7 +64,8 @@ def _zoom_from_bbox(bbox: Any, vw: int, vh: int) -> dict[str, Any]:
     x, y, w, h = bbox
     cx = min(1.0, max(0.0, (x + w / 2) / vw))
     cy = min(1.0, max(0.0, (y + h / 2) / vh))
-    return {"enabled": True, "scale": 1.6, "cx": round(cx, 4), "cy": round(cy, 4), "speed": 3}
+    # auto: derived from the click — user-tweakable in the Zoom tab (drops the flag)
+    return {"enabled": True, "scale": 1.6, "cx": round(cx, 4), "cy": round(cy, 4), "speed": 3, "auto": True}
 
 
 def build_edit_spec(graph_json: dict[str, Any], viewport: dict[str, int] | None) -> dict[str, Any]:
@@ -72,7 +73,9 @@ def build_edit_spec(graph_json: dict[str, Any], viewport: dict[str, int] | None)
     vh = (viewport or {}).get("h", 720)
     segments = []
     for step in graph_json.get("steps", []):
-        words = tokenize(step.get("narration") or step.get("target") or "")
+        # Script strictly from the spoken narration — no target-label fallback, so
+        # a silent step has an empty script rather than invented text.
+        words = tokenize(step.get("narration") or "")
         segments.append(
             {
                 "step_id": step["id"],
@@ -97,6 +100,11 @@ def build_edit_spec(graph_json: dict[str, Any], viewport: dict[str, int] | None)
         # auto-zoom toward mouse/cursor activity (clicks) per scene at render time,
         # for scenes without an explicit click/user zoom. On by default.
         "motion_zoom": True,
+        # product-video pacing: narrated scenes run at this tempo (1.0–1.5); silent
+        # stretches are fast-forwarded by the renderer regardless.
+        "pace": 1.1,
+        # backdrop behind the recording (inset with padding) instead of full-bleed.
+        "background": {"enabled": False, "style": "indigo"},
         "music": {"enabled": False, "storage_key": None, "gain_db": -18},
         # crop: reframe the whole video to a normalized (0..1) region.
         "crop": {"enabled": False, "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},

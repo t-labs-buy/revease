@@ -216,6 +216,13 @@ def run_pipeline(session_id: str) -> dict[str, Any]:
         job.status = "done"
         db.commit()
 
+        # Precompute auto-zooms into the edit spec so the editor shows real zooms
+        # (preview, Zoom tab, timeline row) — the render then reuses them directly.
+        try:
+            _precompute_zooms(db, sess, version)
+        except Exception:
+            log.exception("zoom precompute failed; render-time fallback still applies")
+
         # Give the project a meaningful name from the transcript (replaces the
         # placeholder "Screen Recording · …" / uploaded file name). Skipped when
         # there's no speech to title from.
@@ -356,6 +363,91 @@ def _load_screenshots(db, session_id: str) -> dict[int, str]:
         if seq is not None:
             out[int(seq)] = a.storage_key
     return out
+
+
+def _precompute_zooms(db, sess: CaptureSession, version: int) -> None:
+    """Materialize click/motion auto-zooms into the project's edit spec right after
+    processing, so the editor previews real zooms and the render reuses them.
+    Scenes with a manual zoom or an explicit opt-out (auto=False) are untouched."""
+    from sqlalchemy.orm.attributes import flag_modified
+
+    from app.diff import migrate_edit_spec
+    from app.editspec import build_edit_spec
+    from app.models import VideoProject
+    from worker.pipeline.autoedit import _motion_centroid, probe_dims
+    from worker.pipeline.render import _click_points
+
+    video = db.scalar(
+        select(MediaAsset).where(MediaAsset.session_id == sess.id, MediaAsset.kind == "raw_video")
+    )
+    video_path = store.local_path(video.storage_key) if video else None
+    if video_path is None or not video_path.exists():
+        return
+    graph = db.scalar(
+        select(WorkflowGraphRow).where(
+            WorkflowGraphRow.project_id == sess.project_id, WorkflowGraphRow.version == version
+        )
+    )
+    if graph is None:
+        return
+
+    # Build (or migrate) the video project spec — mirrors the API's lazy build so
+    # the editor and this stage always agree on the spec version.
+    vp = db.scalar(select(VideoProject).where(VideoProject.project_id == sess.project_id))
+    if vp is None:
+        vp = VideoProject(
+            project_id=sess.project_id,
+            graph_version=version,
+            edit_spec_json=build_edit_spec(graph.graph_json, sess.viewport_json),
+        )
+        db.add(vp)
+        db.commit()
+        db.refresh(vp)
+    elif vp.graph_version != version:
+        old = db.scalar(
+            select(WorkflowGraphRow).where(
+                WorkflowGraphRow.project_id == sess.project_id,
+                WorkflowGraphRow.version == vp.graph_version,
+            )
+        )
+        vp.edit_spec_json = (
+            migrate_edit_spec(vp.edit_spec_json, old.graph_json, graph.graph_json, sess.viewport_json)
+            if old is not None
+            else build_edit_spec(graph.graph_json, sess.viewport_json)
+        )
+        vp.graph_version = version
+        flag_modified(vp, "edit_spec_json")
+        db.commit()
+
+    spec = vp.edit_spec_json
+    clicks = _click_points(db, sess.id)
+    vdims = probe_dims(video_path)
+    zoomed = 0
+    for s in spec.get("segments", []):
+        z = s.get("zoom") or {}
+        if z.get("enabled") or z.get("auto") is False:
+            continue  # manual zoom, already computed, or explicit user opt-out
+        t0ms = s.get("source_start_ms", 0)
+        t1ms = max(s.get("source_end_ms", 0), t0ms + 600)
+        hit = next((c for c in clicks if t0ms - 250 <= c[0] <= t1ms), None)
+        if hit:
+            cx, cy, scale = hit[1], hit[2], 1.6
+        else:
+            cx, cy, scale = _motion_centroid(video_path, t0ms / 1000.0, t1ms / 1000.0, vdims)
+        if scale > 1.0:
+            s["zoom"] = {
+                "enabled": True,
+                "scale": round(min(1.8, scale), 3),
+                "cx": cx,
+                "cy": cy,
+                "speed": 3,
+                "auto": True,
+            }
+            zoomed += 1
+    if zoomed:
+        flag_modified(vp, "edit_spec_json")
+        db.commit()
+    log.info("zoom precompute: %d/%d scenes zoomed", zoomed, len(spec.get("segments", [])))
 
 
 def _persist_graph(db, project_id: str, version: int, graph: dict[str, Any]) -> None:

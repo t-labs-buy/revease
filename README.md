@@ -11,6 +11,7 @@ apps/api         FastAPI (3.12) — SQLite, local media store, no auth
 apps/workers     Celery + Redis — AI pipeline (media/ml/llm/render)
 apps/extension   MV3 capture extension (P1)
 packages/workflow-graph  IR JSON Schema + Python & TS validators (single source of truth)
+infra/docker     Dockerfiles (api / worker / web); shift.py + docker-compose.prod.yml deploy the stack
 ```
 
 ## Running on a new machine
@@ -72,6 +73,56 @@ The app runs fully local with keyless defaults (Kokoro TTS, local Whisper). To e
 
 ### GPU (optional)
 For fast transcription on an NVIDIA GPU (CUDA 12.x), set `REFRACT_WHISPER_DEVICE=cuda` and `REFRACT_WHISPER_COMPUTE=float16` in `.env`.
+
+## Docker deployment
+
+Run the whole stack as containers — no Node/Python/uv toolchain needed on the target box, only Docker. See [DOCKER.md](DOCKER.md) for the full guide.
+
+### Registry & images
+All three services publish to one Docker Hub repo, distinguished by a tag prefix:
+
+| Service | Image | Port |
+|---------|-------|------|
+| Web (Next.js) | `tlabsdoc/revease:web-<tag>` | 3000 |
+| API (FastAPI) | `tlabsdoc/revease:api-<tag>` | 8000 |
+| Worker (Celery + FFmpeg) | `tlabsdoc/revease:worker-<tag>` | — |
+| Redis (broker) | `redis:7-alpine` | 6379 |
+
+API + worker share one named volume (`refract-data` — SQLite + media + TTS model), so they must run on the **same host**.
+
+### Build & push to Docker Hub
+From a machine with the source + Docker:
+```bash
+docker login                      # as the tlabsdoc user (once)
+python shift.py --tag v1          # build + push api-/worker-/web-v1 (and *-latest)
+```
+`shift.py` wraps `docker build` + `docker push tlabsdoc/revease:<service>-<tag>`. Useful flags:
+```bash
+python shift.py --service web --tag v1                 # one service only
+python shift.py --tag v1 --api-base http://10.0.0.5:8000   # bake browser→API URL into web
+python shift.py --tag v1 --no-whisper                  # lighter worker image
+python shift.py --tag v1 --platform linux/amd64,linux/arm64   # multi-arch (buildx)
+python shift.py --tag v1 --no-push                     # build only
+```
+
+### Run on another system
+Copy `docker-compose.prod.yml` + `.env.docker.example` to the target host (Docker only) — images are pulled from Docker Hub:
+```bash
+cp .env.docker.example .env       # add REFRACT_ANTHROPIC_API_KEY etc. (optional — degrades gracefully)
+TAG=v1 docker compose -f docker-compose.prod.yml up -d
+```
+Open **http://localhost:3000**.
+
+To build from source on the host instead of pulling: `docker compose -f docker-compose.prod.yml build`.
+
+**Accessing from another machine (LAN/remote):** the browser calls the API directly, and that URL is baked into the web image at build time. Rebuild web with the host's address, set CORS to match, and redeploy:
+```bash
+python shift.py --service web --tag v1 --api-base http://<host-ip>:8000
+# in .env on the host:  CORS_ORIGINS=http://<host-ip>:3000
+TAG=v1 docker compose -f docker-compose.prod.yml up -d
+```
+
+**Notes:** the worker downloads the ~350MB Kokoro TTS model into the volume on first start (`REFRACT_FETCH_KOKORO=0` to skip → Piper fallback). Data persists in the `refract-data` volume; `docker compose down -v` wipes it.
 
 ## Tests
 ```bash

@@ -101,21 +101,24 @@ def _fallback_label(step: dict) -> dict:
         "scroll": "Scroll",
         "keydown": "Press a shortcut on",
     }.get(action, "Interact with")
-    narration = step.get("narration_span") or f"{verb} {target}."
+    # Narration is ONLY ever the transcript span — never an invented sentence —
+    # so the script always matches the spoken audio word-for-word. A silent step
+    # gets an empty script (the render plays it at natural speed, silent).
+    narration = (step.get("narration_span") or "").strip()
     return {
         "action": action,
         "target": target[:120],
         "intent": f"{verb} {target}"[:160],
         "screen_name": step.get("screen_name") or "Screen",
-        "narration": narration[:400],
+        "narration": narration,
     }
 
 
 def _label_prompt(steps: list[dict]) -> str:
     return (
         "Label these workflow steps. Reply ONLY with a JSON array (no prose, no code "
-        'fences); each item: {"action","target","intent","screen_name","narration"}. '
-        "Keep narration to one friendly, present-tense sentence.\n\n"
+        'fences); each item: {"action","target","intent","screen_name"}. '
+        "Do NOT write narration — the narration comes verbatim from the transcript.\n\n"
         + json.dumps(steps, ensure_ascii=False)
     )
 
@@ -183,10 +186,9 @@ def label_steps(steps: list[dict]) -> list[dict]:
         for s, lab in zip(steps, labeled):
             row = {**_fallback_label(s), **{k: v for k, v in lab.items() if v}}
             # Narration stays VERBATIM from the transcript so the on-screen script
-            # matches the spoken audio word-for-word. The LLM may relabel the
-            # action/target/intent/screen_name, but it must not paraphrase speech.
-            if s.get("narration_span"):
-                row["narration"] = s["narration_span"]
+            # matches the spoken audio word-for-word — ALWAYS, even when the span is
+            # empty. The LLM may relabel action/target/intent/screen_name only.
+            row["narration"] = (s.get("narration_span") or "").strip()
             merged.append(row)
         return merged
     except Exception as e:

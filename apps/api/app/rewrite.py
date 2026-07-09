@@ -13,10 +13,19 @@ from app.tracing import observe
 log = logging.getLogger("refract.rewrite")
 
 SYSTEM = (
-    "You are a scriptwriter polishing narration for a screen-recording product demo. "
-    "Rewrite each line to be clear, concise, and natural to speak aloud, in a friendly, "
-    "professional voice. Preserve the meaning and keep any product, feature, or proper "
-    "names exactly as written. Keep roughly the same length (one or two sentences). "
+    "You are a senior scriptwriter for professional SaaS product-demo videos, polishing "
+    "narration lines that a TTS voice speaks over a screen recording.\n\n"
+    "Rewrite each line to broadcast quality:\n"
+    "- Confident, warm, professional. Speak to the viewer as 'you', present tense, active "
+    "voice, natural rhythm when read aloud; keep sentences under about 18 words.\n"
+    "- Lead with the action or benefit. Cut filler ('as you can see', 'basically', "
+    "'simply', 'just', 'go ahead and'), hedging, and repetition.\n"
+    "- TTS-safe: plain spoken words only — no emojis, markdown, parentheses, or stage "
+    "directions; expand awkward abbreviations; keep numbers easy to say.\n"
+    "- Preserve the exact meaning and every product, feature, and proper name exactly as "
+    "written.\n"
+    "- Each rewrite must be the same length or SHORTER than its original — never longer; "
+    "the video's timing depends on it.\n"
     "Return exactly one rewrite per input line, in the same order — never merge, split, "
     "add, or drop lines."
 )
@@ -40,20 +49,39 @@ def _parse(text: str, n: int) -> list[str]:
 
 
 GEN_SYSTEM = (
-    "You write the spoken narration script for a screen-recording product demo. Given the "
-    "video title and an ordered list of scenes (each with a UI target/action and an optional "
-    "existing note), write ONE natural, friendly spoken line (one or two sentences) of "
-    "narration per scene, forming a coherent walkthrough that flows from start to finish. "
-    "Introduce the product in the first line and wrap up naturally at the end. Keep any "
-    "product or feature names. Return exactly one line per scene, in order."
+    "You are a senior product-marketing scriptwriter creating the voiceover for a "
+    "professional SaaS product-demo video. The script is spoken by a TTS voice over a "
+    "screen recording — one line per scene, in scene order.\n\n"
+    "Write a production-ready walkthrough:\n"
+    "- Scene 1 is the hook: name the product or workflow and the outcome the viewer gets, "
+    "in one tight sentence. Never open with 'In this video we will'.\n"
+    "- Each middle scene narrates what is happening on screen (its action/target) and why "
+    "it matters — action first, benefit second.\n"
+    "- The final scene closes in one sentence with the result achieved — a natural wrap, "
+    "not a sales pitch.\n"
+    "- Voice: confident, warm, professional. Speak to the viewer as 'you'. Present tense, "
+    "active voice. Vary sentence openers so scenes flow as one continuous demo, never a "
+    "list of captions.\n"
+    "- TTS-safe: plain spoken words only — no emojis, markdown, parentheses, stage "
+    "directions, or camera notes. Expand awkward abbreviations; keep numbers easy to say.\n"
+    "- Timing budget: each scene includes its on-screen duration in seconds. Write about "
+    "2 to 2.5 words per second for that scene and NEVER more — the video's final length "
+    "depends on it. Minimum one short sentence.\n"
+    "- Ground truth only: never invent features, results, or UI the scene data does not "
+    "mention. Keep every product and feature name exactly as given.\n"
+    "- Banned words/phrases: 'simply', 'just', 'easy', 'basically', 'as you can see', "
+    "'go ahead', 'now let's'.\n"
+    "Return exactly one narration line per scene, in order."
 )
 
 
 def _gen_prompt(scenes: list[dict], title: str, instruction: str | None) -> str:
     extra = f"\nAlso follow this instruction: {instruction}\n" if instruction else ""
     return (
-        f'Video title: "{title}". Write the narration script. Reply with ONLY a JSON array of '
-        "strings (no prose, no code fences) — exactly one narration line per scene, same order."
+        f'Video title: "{title}". Write the narration script. Respect each scene\'s '
+        '"seconds" budget (about 2 to 2.5 words per second, never more). Reply with ONLY a '
+        "JSON array of strings (no prose, no code fences) — exactly one narration line per "
+        "scene, same order."
         + extra
         + "\n\nScenes:\n"
         + json.dumps(scenes, ensure_ascii=False)

@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Rnd } from "react-rnd";
 import { mediaUrl, type EditSegment, type EditSpec } from "@/lib/api";
+import { useFilmstrip, useWaveform, type Frame } from "@/lib/media";
 
 const mmss = (t: number) =>
   Number.isFinite(t) && t >= 0
@@ -37,16 +38,18 @@ export function ModalShell({
   onClose,
   children,
   footer,
+  maxWidth = "max-w-4xl",
 }: {
   title: string;
   onClose: () => void;
   children: React.ReactNode;
   footer: React.ReactNode;
+  maxWidth?: string;
 }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
       <div
-        className="flex max-h-[92vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl bg-[var(--card)] shadow-2xl"
+        className={`flex max-h-[94vh] w-full flex-col overflow-hidden rounded-2xl bg-[var(--card)] shadow-2xl ${maxWidth}`}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-6 py-4">
@@ -90,6 +93,27 @@ export function TrimModal({
   const [dur, setDur] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [zoom, setZoom] = useState(1);
+  const frames = useFilmstrip(source, 48);
+  const peaks = useWaveform(source, 400);
+
+  // Real frames / audio peaks that fall inside a block's *source* time range.
+  // A short block with no sampled frame gets its nearest neighbour, so every
+  // block shows real footage instead of a flat color.
+  const framesInRange = (a: number, b: number): Frame[] => {
+    const inR = frames.filter((f) => f.t >= a - 1 && f.t <= b + 1);
+    if (inR.length) return inR;
+    const mid = (a + b) / 2;
+    let nearest: Frame | null = null;
+    for (const f of frames) if (!nearest || Math.abs(f.t - mid) < Math.abs(nearest.t - mid)) nearest = f;
+    return nearest ? [nearest] : [];
+  };
+  const peaksInRange = (a: number, b: number): number[] => {
+    const total = dur * 1000;
+    if (!peaks.length || total <= 0) return [];
+    const i0 = Math.max(0, Math.floor((a / total) * peaks.length));
+    const i1 = Math.min(peaks.length, Math.ceil((b / total) * peaks.length));
+    return peaks.slice(i0, i1);
+  };
 
   // Lay blocks out contiguously in "effective" time: kept + deleted both take a
   // slot, so a fresh (contiguous) spec fills the bar fully with blue, and a
@@ -105,8 +129,10 @@ export function TrimModal({
     return { items, total: Math.max(off, 1) };
   }, [blocks]);
 
-  const keptMs = layout.items.reduce((a, it) => a + (it.b._deleted ? 0 : it.d), 0);
-  const selDeleted = layout.items.find((it) => it.b.step_id === sel)?.b._deleted ?? false;
+  const keptMs = layout.items.reduce((a, it) => a + (it.b._deleted || it.b.skipped ? 0 : it.d), 0);
+  const selIt = layout.items.find((it) => it.b.step_id === sel) ?? null;
+  const selIdx = selIt ? layout.items.indexOf(selIt) : -1;
+  const selDeleted = selIt?.b._deleted ?? false;
 
   const effToItem = (eff: number) =>
     layout.items.find((it) => eff >= it.start && eff < it.end) ?? layout.items[layout.items.length - 1] ?? null;
@@ -126,7 +152,7 @@ export function TrimModal({
     if (v.paused) {
       // If parked past the end, restart from the first kept block.
       if (curEff >= layout.total - 20) {
-        const first = layout.items.find((it) => !it.b._deleted);
+        const first = layout.items.find((it) => !it.b._deleted && !it.b.skipped);
         if (first) {
           v.currentTime = first.b.source_start_ms / 1000;
           setCurEff(first.start);
@@ -143,13 +169,13 @@ export function TrimModal({
     if (!v) return;
     const t = v.currentTime * 1000; // source ms
     const here = layout.items.find((it) => t + 1 >= it.b.source_start_ms && t < it.b.source_end_ms);
-    if (here && !here.b._deleted) {
+    if (here && !here.b._deleted && !here.b.skipped) {
       setCurEff(here.start + (t - here.b.source_start_ms));
       return;
     }
-    // Inside a deleted block or a removed gap → jump to the next kept block.
+    // Inside a deleted/skipped block or a removed gap → jump to the next kept block.
     const from = here ? here.b.source_end_ms : t;
-    const next = layout.items.find((it) => !it.b._deleted && it.b.source_start_ms >= from - 1);
+    const next = layout.items.find((it) => !it.b._deleted && !it.b.skipped && it.b.source_start_ms >= from - 1);
     if (next) {
       v.currentTime = next.b.source_start_ms / 1000;
       setCurEff(next.start);
@@ -322,6 +348,13 @@ export function TrimModal({
     setBlocks((arr) => arr.map((b) => (b.step_id === sel ? { ...b, _deleted: !b._deleted } : b)));
   }
 
+  // Skip / unskip the selected block: kept in place (greyed), excluded from render.
+  function toggleSkipSelected() {
+    if (!sel) return;
+    setBlocks((arr) => arr.map((b) => (b.step_id === sel ? { ...b, skipped: !b.skipped } : b)));
+  }
+  const selSkipped = layout.items.find((it) => it.b.step_id === sel)?.b.skipped ?? false;
+
   function save() {
     onSave(
       blocks
@@ -337,6 +370,7 @@ export function TrimModal({
     <ModalShell
       title="Trim"
       onClose={onCancel}
+      maxWidth="max-w-6xl"
       footer={
         <>
           <span className="text-sm text-[var(--text-2)]">Total duration: {mmss(keptMs / 1000)} min</span>
@@ -351,12 +385,12 @@ export function TrimModal({
         </>
       }
     >
-      {/* video */}
-      <div className="overflow-hidden rounded-xl bg-black">
+      {/* video — sized to its own aspect (no full-width black bars) */}
+      <div className="flex items-center justify-center">
         <video
           ref={videoRef}
           src={mediaUrl(source)}
-          className="mx-auto max-h-[46vh] w-auto"
+          className="max-h-[52vh] w-auto rounded-xl bg-black shadow"
           onLoadedMetadata={(e) => resolveDuration(e.currentTarget, setDur)}
           onTimeUpdate={onFrame}
           onPlay={() => setPlaying(true)}
@@ -371,6 +405,16 @@ export function TrimModal({
           className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--card)] px-3 py-1.5 text-sm text-[var(--text)] hover:bg-[var(--hover)]"
         >
           ✂ Split at {mmss(curEff / 1000)}
+        </button>
+        <button
+          onClick={toggleSkipSelected}
+          disabled={!sel}
+          className={`inline-flex items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--card)] px-3 py-1.5 text-sm hover:bg-[var(--hover)] disabled:opacity-40 ${
+            selSkipped ? "text-[#6d5dfb]" : "text-[var(--text)]"
+          }`}
+          title="Skip — keeps the block in place but excludes it from playback & render"
+        >
+          {selSkipped ? "↩ Unskip Block" : "⤼ Skip Block"}
         </button>
         <button
           onClick={toggleDeleteSelected}
@@ -402,6 +446,27 @@ export function TrimModal({
         />
       </div>
 
+      {/* selection info — which block, its time range and duration */}
+      <div className="mt-2 flex items-center gap-3 rounded-lg bg-[var(--hover)] px-3 py-1.5 text-xs">
+        {selIt ? (
+          <>
+            <span className="font-semibold text-[var(--text)]">Block {selIdx + 1}</span>
+            <span className="font-mono text-[var(--text-2)]">
+              {mmss(selIt.b.source_start_ms / 1000)} – {mmss(selIt.b.source_end_ms / 1000)}
+            </span>
+            <span className="font-mono text-[var(--text-2)]">· {(selIt.d / 1000).toFixed(1)}s</span>
+            {selIt.b.skipped && <span className="badge bg-slate-200 text-slate-600">skipped</span>}
+            {selIt.b._deleted && <span className="badge bg-red-100 text-red-600">deleted</span>}
+            <span className="text-[var(--text-3)]">drag its side handles to adjust the range</span>
+          </>
+        ) : (
+          <span className="text-[var(--text-3)]">
+            No block selected — click a block to Split / Skip / Delete it, or drag the timeline to scrub.
+          </span>
+        )}
+        <span className="ml-auto font-mono text-[var(--text-2)]">▶ {mmss(curEff / 1000)}</span>
+      </div>
+
       {/* block timeline */}
       <div className="mt-3 overflow-x-auto pb-2">
         <div style={{ width: `${zoom * 100}%`, minWidth: "100%" }}>
@@ -416,7 +481,7 @@ export function TrimModal({
           {/* blocks with waveform — white background shows through deleted gaps */}
           <div
             ref={trackRef}
-            className="relative h-16 touch-none select-none rounded-lg bg-white ring-1 ring-inset ring-[var(--border)]"
+            className="relative h-24 touch-none select-none rounded-lg bg-white ring-1 ring-inset ring-[var(--border)]"
             onPointerDown={onPointerDown}
             onPointerMove={onPointerMove}
             onPointerUp={onPointerUp}
@@ -425,7 +490,8 @@ export function TrimModal({
               const left = (it.start / layout.total) * 100;
               const width = Math.max(0.6, (it.d / layout.total) * 100);
               const active = sel === it.b.step_id;
-              const bars = Math.max(6, Math.round(width * 1.6));
+              const blkFrames = framesInRange(it.b.source_start_ms, it.b.source_end_ms);
+              const blkPeaks = peaksInRange(it.b.source_start_ms, it.b.source_end_ms);
               if (it.b._deleted) {
                 return (
                   <div
@@ -444,20 +510,46 @@ export function TrimModal({
                 <div
                   key={it.b.step_id}
                   style={{ left: `${left}%`, width: `${width}%` }}
-                  title={it.b.words.slice(0, 8).join(" ")}
-                  className={`absolute top-0 h-full rounded-md ${
-                    active ? "bg-[#4f3fd8] ring-2 ring-[#6d5dfb]" : "overflow-hidden bg-[var(--brand-2)]"
+                  title={it.b.skipped ? `Skipped — ${it.b.words.slice(0, 8).join(" ")}` : it.b.words.slice(0, 8).join(" ")}
+                  className={`absolute top-0 h-full overflow-hidden rounded-md bg-[#0e1116] ring-1 ring-inset ${
+                    active ? "ring-2 ring-[#6d5dfb]" : "ring-black/20"
                   }`}
                 >
-                  <span className="flex h-full items-center gap-[3px] overflow-hidden px-1.5">
-                    {Array.from({ length: bars }).map((_, i) => (
-                      <span
-                        key={i}
-                        className="w-[2px] flex-none rounded bg-white/70"
-                        style={{ height: `${18 + Math.abs(Math.sin(i * 2.1 + width)) * 55}%` }}
-                      />
-                    ))}
+                  {/* real frames */}
+                  <span className="absolute inset-0 flex">
+                    {blkFrames.length ? (
+                      blkFrames.map((f, i) => (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img key={i} src={f.url} alt="" draggable={false} className="h-full flex-1 object-cover" style={{ minWidth: 0 }} />
+                      ))
+                    ) : (
+                      <span className="h-full w-full bg-[var(--brand-2)]" />
+                    )}
                   </span>
+                  {/* start time · duration chip */}
+                  {width > 5 && (
+                    <span className="pointer-events-none absolute left-1 top-1 z-10 rounded bg-black/60 px-1 py-px font-mono text-[9px] leading-snug text-white">
+                      {mmss(it.b.source_start_ms / 1000)} · {(it.d / 1000).toFixed(0)}s
+                    </span>
+                  )}
+                  {/* real audio peaks along the bottom */}
+                  {blkPeaks.length > 0 && (
+                    <span className="absolute inset-x-0 bottom-0 flex h-5 items-end gap-[1px] bg-gradient-to-t from-black/70 to-transparent px-0.5">
+                      {blkPeaks.map((p, i) => (
+                        <span
+                          key={i}
+                          className="flex-1 rounded-t-sm bg-white/80"
+                          style={{ height: `${Math.max(8, p * 100)}%`, minWidth: 1 }}
+                        />
+                      ))}
+                    </span>
+                  )}
+                  {/* skipped overlay */}
+                  {it.b.skipped && (
+                    <span className="absolute inset-0 flex items-center justify-center bg-[repeating-linear-gradient(45deg,rgba(17,24,39,.55),rgba(17,24,39,.55)_6px,rgba(154,161,178,.55)_6px,rgba(154,161,178,.55)_12px)]">
+                      {width > 6 && <span className="rounded bg-black/50 px-1 text-[10px] font-medium text-white">⤼ skipped</span>}
+                    </span>
+                  )}
                   {active && (
                     <>
                       <span
@@ -491,7 +583,8 @@ export function TrimModal({
       </div>
       <p className="mt-1 text-[11px] text-[var(--text-3)]">
         Drag the timeline to scrub. Click a block to select it — drag its side handles to shrink/expand the time range,
-        Split at the playhead to cut it in two, or Delete Block (removed parts turn white and are skipped on playback).
+        Split at the playhead to cut it in two, Skip Block to grey it out (kept in place, excluded from the render), or
+        Delete Block (removed parts turn white and are dropped on save).
       </p>
     </ModalShell>
   );
@@ -521,6 +614,7 @@ export function RangeTrimModal({
   const [inMs, setInMs] = useState(initialStartMs);
   const [outMs, setOutMs] = useState(initialEndMs);
   const drag = useRef<null | "in" | "out">(null);
+  const peaks = useWaveform(source, 300); // real voice amplitudes
 
   const totalMs = Math.max(dur * 1000, outMs, 1);
   const effOut = outMs || totalMs;
@@ -530,8 +624,17 @@ export function RangeTrimModal({
     if (!r) return 0;
     return Math.max(0, Math.min(1, (clientX - r.left) / r.width)) * totalMs;
   }
+  function onDown(e: React.PointerEvent) {
+    if (drag.current) return; // a handle grabbed the pointer first
+    // click/drag on the strip itself scrubs the playhead to that time
+    const v = videoRef.current;
+    if (v) v.currentTime = Math.max(0, Math.min(posToMs(e.clientX) / 1000, dur || 0));
+  }
   function onMove(e: React.PointerEvent) {
-    if (!drag.current) return;
+    if (!drag.current) {
+      if (e.buttons === 1) onDown(e); // drag-to-scrub
+      return;
+    }
     const ms = posToMs(e.clientX);
     if (drag.current === "in") setInMs(Math.min(ms, effOut - 500));
     else setOutMs(Math.max(ms, inMs + 500));
@@ -589,20 +692,21 @@ export function RangeTrimModal({
         </span>
       </div>
 
-      {/* waveform strip with drag handles */}
+      {/* waveform strip with drag handles — click anywhere to jump to that time */}
       <div
         ref={stripRef}
+        onPointerDown={onDown}
         onPointerMove={onMove}
         onPointerUp={() => (drag.current = null)}
-        className="relative mt-3 h-16 select-none overflow-hidden rounded-lg bg-[var(--hover)]"
+        className="relative mt-3 h-16 cursor-pointer touch-none select-none overflow-hidden rounded-lg bg-[var(--hover)]"
       >
-        {/* waveform */}
-        <span className="flex h-full items-center gap-[3px] px-1.5">
-          {Array.from({ length: 140 }).map((_, i) => (
+        {/* real voice waveform */}
+        <span className="flex h-full items-center gap-[1px] px-1.5">
+          {(peaks.length ? peaks : Array.from({ length: 140 }, () => 0.15)).map((p, i) => (
             <span
               key={i}
-              className="w-[2px] flex-none rounded bg-[var(--brand-2)]/80"
-              style={{ height: `${18 + Math.abs(Math.sin(i * 1.7)) * 55}%` }}
+              className="flex-1 rounded bg-[var(--brand-2)]/80"
+              style={{ height: `${Math.max(8, p * 82)}%`, minWidth: 1 }}
             />
           ))}
         </span>
@@ -640,7 +744,8 @@ export function RangeTrimModal({
         />
       </div>
       <p className="mt-1 text-[11px] text-[var(--text-3)]">
-        Drag the purple handles to choose which part of the recording to keep.
+        Drag the purple handles to choose which part of the recording to keep. Click anywhere on the waveform to jump
+        the playhead to that time.
       </p>
     </ModalShell>
   );
@@ -685,9 +790,67 @@ export function RawTrimModal({
 
   const totalMs = Math.max(dur * 1000, 1);
   const keptMs = blocks.reduce((a, b) => a + (b.end - b.start), 0);
+  const peaks = useWaveform(source, 400); // real voice amplitudes, not a pattern
+  const frames = useFilmstrip(source, 32);
+
+  // Playback engine: keep the playhead on KEPT blocks only — a deleted (white)
+  // area is jumped over instead of playing through.
+  function onFrame(e: React.SyntheticEvent<HTMLVideoElement>) {
+    const v = e.currentTarget;
+    const t = v.currentTime * 1000;
+    setCur(v.currentTime);
+    if (v.paused) return;
+    const here = blocks.find((b) => t + 1 >= b.start && t < b.end);
+    if (here) return; // inside a kept block — play on
+    const next = [...blocks].sort((a, b) => a.start - b.start).find((b) => b.start >= t - 1);
+    if (next) {
+      v.currentTime = next.start / 1000;
+    } else {
+      v.pause();
+      const first = [...blocks].sort((a, b) => a.start - b.start)[0];
+      if (first) v.currentTime = first.start / 1000;
+    }
+  }
+  const peaksIn = (a: number, b: number): number[] => {
+    if (!peaks.length || totalMs <= 1) return [];
+    const i0 = Math.max(0, Math.floor((a / totalMs) * peaks.length));
+    const i1 = Math.min(peaks.length, Math.ceil((b / totalMs) * peaks.length));
+    return peaks.slice(i0, i1);
+  };
 
   function seek(sec: number) {
     if (videoRef.current) videoRef.current.currentTime = Math.max(0, Math.min(sec, dur || sec));
+  }
+
+  // Timeline scrubbing: drag anywhere to move the playhead; a plain click seeks
+  // to that exact time AND toggles selection of the block under the cursor.
+  const stripRef = useRef<HTMLDivElement>(null);
+  const scrubbing = useRef(false);
+  const scrubMoved = useRef(false);
+  const msAtX = (clientX: number) => {
+    const r = stripRef.current?.getBoundingClientRect();
+    if (!r) return 0;
+    return Math.max(0, Math.min(1, (clientX - r.left) / r.width)) * totalMs;
+  };
+  function stripDown(e: React.PointerEvent) {
+    scrubbing.current = true;
+    scrubMoved.current = false;
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+    seek(msAtX(e.clientX) / 1000);
+  }
+  function stripMove(e: React.PointerEvent) {
+    if (!scrubbing.current) return;
+    scrubMoved.current = true;
+    seek(msAtX(e.clientX) / 1000);
+  }
+  function stripUp(e: React.PointerEvent) {
+    if (!scrubbing.current) return;
+    scrubbing.current = false;
+    if (!scrubMoved.current) {
+      const at = msAtX(e.clientX);
+      const b = blocks.find((x) => at >= x.start && at < x.end);
+      setSel((p) => (b && p !== b.id ? b.id : null));
+    }
   }
   function splitAtPlayhead() {
     const at = cur * 1000;
@@ -710,6 +873,7 @@ export function RawTrimModal({
     <ModalShell
       title="Trim"
       onClose={onCancel}
+      maxWidth="max-w-6xl"
       footer={
         <>
           <span className="text-sm text-[#6b7280]">Keeps {mmss(keptMs / 1000)} of {mmss(totalMs / 1000)} min</span>
@@ -727,13 +891,14 @@ export function RawTrimModal({
         </>
       }
     >
-      <div className="overflow-hidden rounded-xl bg-black">
+      {/* video — sized to its own aspect (no full-width black bars); playback skips deleted areas */}
+      <div className="flex items-center justify-center">
         <video
           ref={videoRef}
           src={mediaUrl(source)}
-          className="mx-auto max-h-[44vh] w-auto"
+          className="max-h-[52vh] w-auto rounded-xl bg-black shadow"
           onLoadedMetadata={() => onMeta()}
-          onTimeUpdate={(e) => setCur(e.currentTarget.currentTime)}
+          onTimeUpdate={onFrame}
           onPlay={() => setPlaying(true)}
           onPause={() => setPlaying(false)}
         />
@@ -763,35 +928,75 @@ export function RawTrimModal({
         </div>
       </div>
 
-      {/* block timeline */}
-      <div className="relative mt-3 h-16 overflow-hidden rounded-lg bg-[#f4f5fa]">
+      {/* block timeline — click/drag anywhere to pick a playback time */}
+      <div
+        ref={stripRef}
+        onPointerDown={stripDown}
+        onPointerMove={stripMove}
+        onPointerUp={stripUp}
+        className="relative mt-3 h-24 cursor-pointer touch-none select-none overflow-hidden rounded-lg bg-[#f4f5fa] ring-1 ring-inset ring-[var(--border)]"
+      >
         {blocks.map((b) => {
           const left = (b.start / totalMs) * 100;
           const width = Math.max(0.8, ((b.end - b.start) / totalMs) * 100);
           const active = sel === b.id;
-          const bars = Math.max(6, Math.round(width * 1.6));
+          const blkPeaks = peaksIn(b.start, b.end);
+          const blkFrames = (() => {
+            const inR = frames.filter((f) => f.t >= b.start - 1 && f.t <= b.end + 1);
+            if (inR.length) return inR;
+            const mid = (b.start + b.end) / 2;
+            let nearest: Frame | null = null;
+            for (const f of frames) if (!nearest || Math.abs(f.t - mid) < Math.abs(nearest.t - mid)) nearest = f;
+            return nearest ? [nearest] : [];
+          })();
           return (
-            <button
+            <div
               key={b.id}
-              onClick={() => {
-                setSel(active ? null : b.id);
-                seek(b.start / 1000);
-              }}
               style={{ left: `${left}%`, width: `${width}%` }}
-              className={`absolute top-0 h-full overflow-hidden rounded-md border-r border-white/50 ${active ? "bg-[#4f3fd8] ring-2 ring-[#6d5dfb]" : "bg-[#8b7cff]"}`}
+              className={`pointer-events-none absolute top-0 h-full overflow-hidden rounded-md bg-[#0e1116] ring-1 ring-inset ${
+                active ? "ring-2 ring-[#6d5dfb]" : "ring-black/20"
+              }`}
             >
-              <span className="flex h-full items-center gap-[3px] px-1.5">
-                {Array.from({ length: bars }).map((_, i) => (
-                  <span key={i} className="w-[2px] flex-none rounded bg-white/70" style={{ height: `${18 + Math.abs(Math.sin(i * 2.1 + width)) * 55}%` }} />
-                ))}
+              {/* real frames */}
+              <span className="absolute inset-0 flex">
+                {blkFrames.length ? (
+                  blkFrames.map((f, i) => (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img key={i} src={f.url} alt="" draggable={false} className="h-full flex-1 object-cover" style={{ minWidth: 0 }} />
+                  ))
+                ) : (
+                  <span className="h-full w-full bg-[#8b7cff]" />
+                )}
               </span>
-            </button>
+              {/* start · duration chip */}
+              {width > 5 && (
+                <span className="absolute left-1 top-1 z-10 rounded bg-black/60 px-1 py-px font-mono text-[9px] leading-snug text-white">
+                  {mmss(b.start / 1000)} · {((b.end - b.start) / 1000).toFixed(0)}s
+                </span>
+              )}
+              {/* real audio peaks along the bottom */}
+              {blkPeaks.length > 0 && (
+                <span className="absolute inset-x-0 bottom-0 flex h-5 items-end gap-[1px] bg-gradient-to-t from-black/70 to-transparent px-0.5">
+                  {blkPeaks.map((p, i) => (
+                    <span key={i} className="flex-1 rounded-t-sm bg-white/80" style={{ height: `${Math.max(8, p * 100)}%`, minWidth: 1 }} />
+                  ))}
+                </span>
+              )}
+              {active && <span className="absolute inset-0 bg-[#6d5dfb]/25" />}
+            </div>
           );
         })}
-        <span style={{ left: `${Math.min(100, (cur * 1000 * 100) / totalMs)}%` }} className="pointer-events-none absolute top-0 h-full w-0.5 bg-[#111827]" />
+        {/* draggable playhead */}
+        <span
+          style={{ left: `${Math.min(100, (cur * 1000 * 100) / totalMs)}%` }}
+          className="pointer-events-none absolute top-0 h-full w-0.5 -translate-x-1/2 bg-[#111827]"
+        >
+          <span className="absolute -top-0.5 left-1/2 h-3 w-3 -translate-x-1/2 rounded-full border-2 border-white bg-[#6d5dfb] shadow" />
+        </span>
       </div>
       <p className="mt-1 text-[11px] text-[#9aa1b2]">
-        Split at the playhead to cut the video, then select a block and Delete to remove it.
+        Click or drag the timeline to jump to any time. Split at the playhead to cut the video, then click a block to
+        select it and Delete to remove it.
       </p>
     </ModalShell>
   );
@@ -826,6 +1031,10 @@ export function CropModal({
   const [cur, setCur] = useState(0);
   const [dur, setDur] = useState(0);
   const [playing, setPlaying] = useState(false);
+  // optional time window — crop applies only within [rStart, rEnd]
+  const [rangeOn, setRangeOn] = useState(!!(crop && (crop.end_ms ?? 0) > (crop.start_ms ?? 0)));
+  const [rStart, setRStart] = useState(crop?.start_ms ?? 0);
+  const [rEnd, setREnd] = useState(crop?.end_ms ?? 0);
 
   useEffect(() => {
     const el = wrapRef.current;
@@ -864,7 +1073,21 @@ export function CropModal({
               Cancel
             </button>
             <button
-              onClick={() => onSave({ enabled: true, x: clamp(box.x), y: clamp(box.y), w: clamp(box.w), h: clamp(box.h) })}
+              onClick={() => {
+                // clamp so the region always stays inside the frame (x+w ≤ 1) —
+                // otherwise the reframe math shows a different area than selected
+                const w = Math.min(1, Math.max(0.05, box.w));
+                const h = Math.min(1, Math.max(0.05, box.h));
+                onSave({
+                  enabled: true,
+                  x: Math.min(Math.max(0, box.x), 1 - w),
+                  y: Math.min(Math.max(0, box.y), 1 - h),
+                  w,
+                  h,
+                  start_ms: rangeOn ? Math.round(rStart) : 0,
+                  end_ms: rangeOn ? Math.round(rEnd || dur * 1000) : 0,
+                });
+              }}
               className="btn btn-primary"
             >
               Save changes
@@ -937,6 +1160,67 @@ export function CropModal({
           }}
           className="flex-1 accent-[#6d5dfb]"
         />
+      </div>
+
+      {/* optional time window — crop only part of the video */}
+      <div className="mt-3 rounded-xl border border-[var(--border)] p-3">
+        <label className="flex cursor-pointer items-center justify-between">
+          <span>
+            <span className="text-sm font-medium">Crop only a time range</span>
+            <span className="mt-0.5 block text-xs text-[var(--text-3)]">
+              The rest of the video stays uncropped.
+            </span>
+          </span>
+          <input
+            type="checkbox"
+            checked={rangeOn}
+            onChange={(e) => {
+              setRangeOn(e.target.checked);
+              if (e.target.checked && rEnd <= rStart) {
+                setRStart(Math.round(cur * 1000));
+                setREnd(Math.round(Math.min(dur, cur + 10) * 1000));
+              }
+            }}
+            className="h-4 w-8 accent-[#6d5dfb]"
+          />
+        </label>
+        {rangeOn && (
+          <div className="mt-2 space-y-2">
+            {(["From", "To"] as const).map((which) => {
+              const val = which === "From" ? rStart : rEnd;
+              return (
+                <div key={which} className="flex items-center gap-2">
+                  <span className="w-9 text-xs text-[var(--text-3)]">{which}</span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={(dur || 1) * 1000}
+                    step={100}
+                    value={val}
+                    onChange={(e) => {
+                      const v = Number(e.target.value);
+                      if (which === "From") setRStart(Math.min(v, rEnd - 500));
+                      else setREnd(Math.max(v, rStart + 500));
+                    }}
+                    className="flex-1 accent-[#6d5dfb]"
+                  />
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    title="Use the playhead position"
+                    onClick={() =>
+                      which === "From"
+                        ? setRStart(Math.min(Math.round(cur * 1000), rEnd - 500))
+                        : setREnd(Math.max(Math.round(cur * 1000), rStart + 500))
+                    }
+                  >
+                    ⤓
+                  </button>
+                  <span className="w-11 text-right font-mono text-xs text-[var(--text-2)]">{mmss(val / 1000)}</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
     </ModalShell>
   );

@@ -17,6 +17,11 @@ export async function setKeepRanges(sessionId: string, ranges: number[][]): Prom
   if (!r.ok) throw new Error(`setKeepRanges failed: ${r.status}`);
 }
 
+export async function deleteProject(projectId: string): Promise<void> {
+  const r = await fetch(`${API_BASE}/projects/${projectId}`, { method: "DELETE" });
+  if (!r.ok) throw new Error(`deleteProject failed: ${r.status}`);
+}
+
 export async function toggleFavorite(projectId: string): Promise<Project> {
   const r = await fetch(`${API_BASE}/projects/${projectId}/favorite`, { method: "POST" });
   if (!r.ok) throw new Error(`toggleFavorite failed: ${r.status}`);
@@ -222,15 +227,30 @@ export async function setTrim(
   return r.json();
 }
 
-/** Approximate AI-generated output duration (ms) from an edit-spec: ~2.6 words/sec
- * of effective narration per step, plus intro/outro. Mirrors the TTS estimator. */
+/** Approximate AI-generated output duration (ms) from an edit-spec. Mirrors the
+ * render pipeline's timing rules exactly:
+ *  - silent scene → fast-forwarded (2.5x · pace), hard-capped at 3.5s
+ *  - narrated scene, AI voice → ~2.6 words/sec at voice speed · pace
+ *  - narrated scene, original voice → source length ÷ pace
+ *  - plus intro/outro; skipped scenes excluded. */
 export function estimateOutputMs(spec: EditSpec): number {
   const WPS = 2.6;
+  const SILENT_SPEEDUP = 2.5;
+  const SILENT_MAX_MS = 3500;
+  const pace = Math.min(1.5, Math.max(1, spec.pace ?? 1.1));
+  const useOriginal = !!spec.voice.use_original;
   let body = 0;
   for (const s of spec.segments) {
+    if (s.skipped) continue; // excluded from the render
+    const srcMs = Math.max(0, s.source_end_ms - s.source_start_ms);
     const words = s.words.filter((_, i) => !s.removed.includes(i));
-    const secs = Math.max(0.3, words.length / (WPS * (spec.voice.speed || 1)));
-    body += secs * 1000;
+    if (words.length === 0) {
+      body += Math.max(300, Math.min(SILENT_MAX_MS, srcMs / (SILENT_SPEEDUP * pace)));
+    } else if (useOriginal) {
+      body += Math.max(300, srcMs / pace);
+    } else {
+      body += Math.max(300, (words.length / (WPS * (spec.voice.speed || 1) * pace)) * 1000);
+    }
   }
   const intro = spec.intro.enabled ? spec.intro.duration_ms : 0;
   const outro = spec.outro.enabled ? spec.outro.duration_ms : 0;
@@ -455,7 +475,7 @@ export async function rewriteLines(
 
 export async function generateScript(
   projectId: string,
-  scenes: { target?: string; action?: string; narration?: string }[],
+  scenes: { target?: string; action?: string; narration?: string; seconds?: number }[],
   title: string,
   instruction?: string,
 ): Promise<string[]> {
@@ -647,11 +667,12 @@ export interface EditSegment {
   target?: string;
   words: string[];
   removed: number[];
-  zoom: { enabled: boolean; scale: number; cx: number; cy: number; speed?: number };
+  zoom: { enabled: boolean; scale: number; cx: number; cy: number; speed?: number; auto?: boolean };
   source_start_ms: number;
   source_end_ms: number;
   screenshot?: string | null;
   dirty?: boolean;
+  skipped?: boolean; // greyed-out: kept in place on the timeline but skipped on playback + excluded from render
 }
 
 export interface EditElement {
@@ -677,9 +698,19 @@ export interface EditSpec {
   outro: { enabled: boolean; title: string; duration_ms: number };
   captions: { enabled: boolean };
   music: { enabled: boolean; storage_key: string | null; gain_db: number };
-  crop?: { enabled: boolean; x: number; y: number; w: number; h: number };
+  crop?: {
+    enabled: boolean;
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    start_ms?: number; // optional time window: crop applies only within
+    end_ms?: number; //   [start_ms, end_ms] when end>start, else whole video
+  };
   trim?: { enabled: boolean; start_ms: number; end_ms: number };
   motion_zoom?: boolean; // auto-zoom on mouse/click activity at render time
+  pace?: number; // product-video tempo for narrated scenes (1.0–1.5, default 1.1)
+  background?: { enabled: boolean; style: string }; // backdrop behind the (inset) recording
   brand?: {
     logo_url?: string;
     primary_color?: string;

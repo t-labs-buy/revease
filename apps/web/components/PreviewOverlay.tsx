@@ -57,8 +57,9 @@ export function PreviewOverlay({
 
   return (
     <div className="pointer-events-none absolute inset-0 overflow-hidden">
-      {/* crop: darken outside + a draggable box */}
-      {crop.enabled && (
+      {/* crop: darken outside + a draggable box — only while EDITING the crop.
+          Otherwise the preview video itself is reframed to the crop region. */}
+      {cropEdit && (
         <>
           <div className="absolute bg-black/50" style={{ left: 0, top: 0, width: "100%", height: `${T}%` }} />
           <div className="absolute bg-black/50" style={{ left: 0, top: `${B}%`, width: "100%", bottom: 0 }} />

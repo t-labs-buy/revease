@@ -24,12 +24,39 @@ from app.editspec import effective_script
 from app.models import MediaAsset, RenderJob, VideoProject, WorkflowGraphRow
 from app.storage import store
 from worker.pipeline.timeline import StepInput, build_timeline
-from worker.pipeline.tts import synth_step
+from worker.pipeline.tts import _silent_wav, synth_step
 
 log = logging.getLogger("refract.pipeline.render")
 
 ASPECTS = {"16:9": (1280, 720), "9:16": (720, 1280), "1:1": (720, 720)}
 FPS = 30
+# Product-video pacing: scenes with no narration are idle/boring stretches —
+# fast-forward them instead of playing them out in real time, and NEVER let one
+# idle stretch (no voice, often no motion) occupy more than SILENT_MAX_MS of the
+# output regardless of how long it ran in the source.
+SILENT_SPEEDUP = 2.5
+SILENT_MAX_MS = 3500
+DEFAULT_PACE = 1.1  # global tempo for narrated scenes (voice + footage together)
+
+# Backdrop presets behind the (inset) recording — ids match the web editor.
+BG_PRESETS: dict[str, tuple[str, str | None]] = {
+    "slate": ("0b0f1a", "1e2637"),
+    "indigo": ("6d5dfb", "a855f7"),
+    "ocean": ("0ea5e9", "6366f1"),
+    "sunset": ("f97316", "ec4899"),
+    "forest": ("10b981", "0d9488"),
+    "light": ("e2e8f0", "f8fafc"),
+}
+BG_INSET = 0.88  # recording occupies 88% of the frame when a backdrop is on
+
+
+def _bg_source(style: str | None, dims: tuple[int, int]) -> str:
+    """lavfi source for the backdrop (gradient or flat color)."""
+    w, h = dims
+    c0, c1 = BG_PRESETS.get(style or "", ("0b0f1a", "1e2637"))
+    if not c1:
+        return f"color=c=0x{c0}:s={w}x{h}"
+    return f"gradients=s={w}x{h}:c0=0x{c0}:c1=0x{c1}:x0=0:y0=0:x1={w}:y1={h}"
 _FONT_CANDIDATES = [
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
@@ -85,12 +112,45 @@ def _make_still(seg: dict, src_video: Path | None, dims: tuple[int, int], out: P
     _run(["ffmpeg", "-y", "-f", "lavfi", "-i", f"color=c=0x0b0f1a:s={w}x{h}", "-frames:v", "1", str(out)])
 
 
-def _crop_filter(crop: dict | None, dims: tuple[int, int]) -> str | None:
-    """Reframe the WxH still to a normalized (0..1) region, then scale back to fill."""
+def _crop_for_segment(crop: dict | None, seg: dict) -> dict | None:
+    """The crop that applies to THIS scene: honours the optional time window
+    (crop.start_ms/end_ms) — scenes outside the window render uncropped."""
     if not crop or not crop.get("enabled"):
         return None
-    cw, ch = float(crop.get("w", 1.0)), float(crop.get("h", 1.0))
-    cx, cy = float(crop.get("x", 0.0)), float(crop.get("y", 0.0))
+    s_ms, e_ms = int(crop.get("start_ms") or 0), int(crop.get("end_ms") or 0)
+    if e_ms > s_ms:
+        if seg.get("source_end_ms", 0) <= s_ms or seg.get("source_start_ms", 0) >= e_ms:
+            return None
+    return crop
+
+
+def _remap_zoom_into_crop(zoom: dict | None, crop: dict | None) -> dict | None:
+    """Zoom centers (click positions) are normalized to the ORIGINAL frame; when a
+    crop reframes the scene first, remap the center into cropped coordinates so
+    the zoom still aims at the same on-screen spot."""
+    if not zoom or not zoom.get("enabled") or not crop:
+        return zoom
+    cw = min(1.0, max(0.05, float(crop.get("w", 1.0))))
+    ch = min(1.0, max(0.05, float(crop.get("h", 1.0))))
+    cx = min(max(0.0, float(crop.get("x", 0.0))), 1.0 - cw)
+    cy = min(max(0.0, float(crop.get("y", 0.0))), 1.0 - ch)
+    return {
+        **zoom,
+        "cx": min(1.0, max(0.0, (float(zoom.get("cx", 0.5)) - cx) / cw)),
+        "cy": min(1.0, max(0.0, (float(zoom.get("cy", 0.5)) - cy) / ch)),
+    }
+
+
+def _crop_filter(crop: dict | None, dims: tuple[int, int]) -> str | None:
+    """Reframe the WxH still to a normalized (0..1) region, then scale back to fill.
+    The region is clamped inside the frame (x+w ≤ 1) so a crop dragged slightly
+    past the edge still shows exactly the selected area."""
+    if not crop or not crop.get("enabled"):
+        return None
+    cw = min(1.0, max(0.05, float(crop.get("w", 1.0))))
+    ch = min(1.0, max(0.05, float(crop.get("h", 1.0))))
+    cx = min(max(0.0, float(crop.get("x", 0.0))), 1.0 - cw)
+    cy = min(max(0.0, float(crop.get("y", 0.0))), 1.0 - ch)
     if cw >= 0.999 and ch >= 0.999 and cx <= 0.001 and cy <= 0.001:
         return None
     w, h = dims
@@ -141,45 +201,76 @@ def _element_filters(elements, dims: tuple[int, int], font: str | None, work: Pa
     return out
 
 
-def _zoom_filter(zoom: dict | None, dims: tuple[int, int]) -> str:
-    """Constant click-centered zoom via scale+crop (robust; ease-in is a V2 nicety)."""
+def _zoom_filter(zoom: dict | None, dims: tuple[int, int], dur_s: float = 3.0) -> str:
+    """Animated click-centered zoom: the viewport eases in toward (cx, cy) like a
+    camera move, then holds — the production 'pan + zoom' feel. `speed` (1 slow …
+    5 snappy) sets how fast the ease-in lands."""
     w, h = dims
     if not zoom or not zoom.get("enabled"):
         return f"scale={w}:{h}"
     scale = max(1.0, float(zoom.get("scale", 1.6)))
-    sw, sh = int(w * scale), int(h * scale)
-    cx, cy = float(zoom.get("cx", 0.5)), float(zoom.get("cy", 0.5))
-    # crop offset toward the click, clamped inside the scaled frame
-    x = f"min(max({cx}*{sw}-{w}/2\\,0)\\,{sw}-{w})"
-    y = f"min(max({cy}*{sh}-{h}/2\\,0)\\,{sh}-{h})"
-    return f"scale={sw}:{sh},crop={w}:{h}:{x}:{y}"
+    cx = min(1.0, max(0.0, float(zoom.get("cx", 0.5))))
+    cy = min(1.0, max(0.0, float(zoom.get("cy", 0.5))))
+    ease_s = {1: 2.0, 2: 1.5, 3: 1.1, 4: 0.7, 5: 0.4}.get(int(zoom.get("speed", 3) or 3), 1.1)
+    ease_frames = max(1, int(FPS * min(ease_s, max(0.3, dur_s))))
+    step = max(0.0005, round((scale - 1.0) / ease_frames, 5))
+    z = f"min(zoom+{step},{scale})"
+    x = f"iw*{cx}-(iw/zoom/2)"
+    y = f"ih*{cy}-(ih/zoom/2)"
+    return f"scale={w}:{h},zoompan=z='{z}':x='{x}':y='{y}':d=1:s={w}x{h}:fps={FPS}"
 
 
 def _render_segment(seg, seg_tl, src_video, dims, captions, font, work: Path,
                     crop=None, elements=None, logo: Path | None = None,
-                    logo_pos: str = "Top Right") -> tuple[Path, bool]:
+                    logo_pos: str = "Top Right", background: dict | None = None) -> tuple[Path, bool]:
     """Return (clip_path, rendered_now). Reuses a cached clip when the content hash
-    matches — this is what makes regenerate touch only changed segments."""
+    matches — this is what makes regenerate touch only changed segments.
+
+    The clip shows the REAL source footage for the scene's window, retimed to fit
+    the narration slot (sped up when the window is longer than the narration;
+    played at natural pace + last-frame freeze when shorter). A still is only the
+    fallback when there is no usable footage."""
     script = effective_script(seg.get("words", []), seg.get("removed", []))
     tts_path = Path(seg["_audio_path"])  # precomputed in run_render (TTS or original audio)
     dur_s = max(0.3, seg_tl.out_duration_ms / 1000.0)
+    src_len_s = max(0.0, (seg_tl.source_end_ms - seg_tl.source_start_ms) / 1000.0)
+    use_footage = (
+        src_video is not None and src_video.exists() and not seg_tl.hold and src_len_s >= 0.2
+    )
 
-    clip_hash = _sha(seg.get("step_id"), script, tts_path.name, seg.get("zoom"),
+    # crop honours its optional time window, and the zoom center is remapped into
+    # the cropped frame so it still points at the same on-screen spot
+    crop_eff = _crop_for_segment(crop, seg)
+    zoom_eff = _remap_zoom_into_crop(seg.get("zoom"), crop_eff)
+
+    clip_hash = _sha("v3", seg.get("step_id"), script, tts_path.name, zoom_eff,
                      dims, captions, seg.get("screenshot"), seg.get("source_start_ms"),
-                     crop, elements, str(logo), logo_pos)
+                     seg.get("source_end_ms"), round(dur_s, 3), use_footage,
+                     crop_eff, elements, str(logo), logo_pos, background)
     clip = work / f"seg_{seg_tl.index:03d}_{clip_hash}.mp4"
     if clip.exists():
         return clip, False  # reused — unchanged since last render
 
-    still = work / f"still_{clip_hash}.png"
-    _make_still(seg, src_video, dims, still)
+    w, h = dims
+    parts: list[str] = []
+    if use_footage:
+        # normalize footage to cover WxH (same framing as the still path)
+        parts.append(f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}")
+        speed = src_len_s / dur_s
+        if speed >= 1.02:
+            parts.append(f"setpts=PTS/{speed:.6f}")  # play faster to fit the slot
+        elif dur_s > src_len_s + 0.05:
+            # narration outlasts the window: natural pace, then hold the last frame
+            parts.append(f"tpad=stop_mode=clone:stop_duration={dur_s - src_len_s:.3f}")
+    else:
+        still = work / f"still_{clip_hash}.png"
+        _make_still(seg, src_video, dims, still)
 
     # crop (reframe) -> zoom -> captions -> overlay elements -> normalize
-    parts: list[str] = []
-    cf = _crop_filter(crop, dims)
+    cf = _crop_filter(crop_eff, dims)
     if cf:
         parts.append(cf)
-    parts.append(_zoom_filter(seg.get("zoom"), dims))
+    parts.append(_zoom_filter(zoom_eff, dims, dur_s))
     if captions and script:
         capfile = work / f"cap_{clip_hash}.txt"
         capfile.write_text(script)
@@ -191,14 +282,39 @@ def _render_segment(seg, seg_tl, src_video, dims, captions, font, work: Path,
     parts += ["format=yuv420p", f"fps={FPS}", "setsar=1"]
     vf = ",".join(parts)
 
-    cmd = ["ffmpeg", "-y", "-loop", "1", "-t", f"{dur_s:.3f}", "-i", str(still), "-i", str(tts_path)]
-    if logo is not None:
-        cmd += ["-i", str(logo)]  # index 2
-        lh = int(dims[1] / 9)
-        fc = f"[0:v]{vf}[base];[2:v]scale=-1:{lh}[lg];[base][lg]overlay={_overlay_xy(logo_pos)}[v]"
+    if use_footage:
+        ss = seg_tl.source_start_ms / 1000.0
+        cmd = ["ffmpeg", "-y", "-ss", f"{ss:.3f}", "-t", f"{src_len_s:.3f}",
+               "-i", str(src_video), "-i", str(tts_path)]
     else:
-        fc = f"[0:v]{vf}[v]"
-    cmd += ["-filter_complex", fc, "-map", "[v]", "-map", "1:a",
+        cmd = ["ffmpeg", "-y", "-loop", "1", "-t", f"{dur_s:.3f}", "-i", str(still), "-i", str(tts_path)]
+
+    # Compose: main video -> (inset on backdrop) -> (logo watermark).
+    bg_on = bool(background and background.get("enabled"))
+    idx = 2  # next ffmpeg input index (0 = video/still, 1 = narration audio)
+    logo_idx = bg_idx = None
+    if logo is not None:
+        logo_idx = idx
+        idx += 1
+        cmd += ["-i", str(logo)]
+    if bg_on:
+        bg_idx = idx
+        idx += 1
+        cmd += ["-f", "lavfi", "-i", _bg_source(background.get("style"), dims)]
+
+    steps = [f"[0:v]{vf}[main]"]
+    last = "main"
+    if bg_on:
+        steps.append(f"[{last}]scale=iw*{BG_INSET}:ih*{BG_INSET}[inset]")
+        steps.append(f"[{bg_idx}:v][inset]overlay=(W-w)/2:(H-h)/2[backed]")
+        last = "backed"
+    if logo_idx is not None:
+        lh = int(dims[1] / 9)
+        steps.append(f"[{logo_idx}:v]scale=-1:{lh}[lg]")
+        steps.append(f"[{last}][lg]overlay={_overlay_xy(logo_pos)}[branded]")
+        last = "branded"
+    fc = ";".join(steps)
+    cmd += ["-filter_complex", fc, "-map", f"[{last}]", "-map", "1:a",
             "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-ar", "24000", "-shortest", "-t", f"{dur_s:.3f}", str(clip)]
     ok = _run(cmd)
@@ -277,15 +393,19 @@ def _render_titlecard(text, dur_ms, dims, font, work, tag, brand: dict | None = 
     return clip
 
 
-def _extract_audio(src_video: Path, start_ms: int, end_ms: int, out: Path) -> int:
-    """Extract the original narration for a step's source window. Returns duration ms."""
+def _extract_audio(src_video: Path, start_ms: int, end_ms: int, out: Path, tempo: float = 1.0) -> int:
+    """Extract the original narration for a step's source window, optionally
+    time-compressed (atempo) for pacing. Returns the OUTPUT duration ms."""
     dur_ms = max(300, end_ms - start_ms)
     out.parent.mkdir(parents=True, exist_ok=True)
-    _run([
-        "ffmpeg", "-y", "-ss", f"{start_ms / 1000:.3f}", "-t", f"{dur_ms / 1000:.3f}",
-        "-i", str(src_video), "-vn", "-ac", "1", "-ar", "24000", "-c:a", "pcm_s16le", str(out),
-    ])
-    return dur_ms
+    cmd = ["ffmpeg", "-y", "-ss", f"{start_ms / 1000:.3f}", "-t", f"{dur_ms / 1000:.3f}",
+           "-i", str(src_video), "-vn", "-ac", "1", "-ar", "24000"]
+    if tempo > 1.001:
+        cmd += ["-af", f"atempo={min(2.0, tempo):.3f}"]
+        dur_ms = int(dur_ms / min(2.0, tempo))
+    cmd += ["-c:a", "pcm_s16le", str(out)]
+    _run(cmd)
+    return max(300, dur_ms)
 
 
 def run_render(render_job_id: str) -> dict:
@@ -311,9 +431,11 @@ def run_render(render_job_id: str) -> dict:
             .where(WorkflowGraphRow.project_id == vp.project_id)
             .order_by(WorkflowGraphRow.version.desc())
         )
-        src_video = _find_source_video(db, vp.project_id)
+        src_video, src_session_id = _find_source_video(db, vp.project_id)
 
         segs = spec.get("segments", [])
+        # skip: scenes flagged "skipped" are dropped from the render entirely.
+        segs = [s for s in segs if not s.get("skipped")]
         crop = spec.get("crop")
         elements = spec.get("elements")
         # trim: keep only scenes whose source start falls inside [start, end].
@@ -327,21 +449,31 @@ def run_render(render_job_id: str) -> dict:
         work = store.local_path(f"renders/{vp.id}")
         work.mkdir(parents=True, exist_ok=True)
 
-        # Motion/mouse auto-zoom: for each scene, find where the on-screen activity
-        # (cursor movement / clicks cause localized UI change) is and zoom toward it.
-        # Only touches scenes that don't already have an explicit (bbox/user) zoom.
+        # Click/motion auto-zoom, for scenes without an explicit (bbox/user) zoom:
+        # 1) recorded click telemetry — zoom EXACTLY where the mouse clicked;
+        # 2) else frame-diff motion centroid (visual approximation of the click).
+        zoomed_click = zoomed_motion = 0
         if spec.get("motion_zoom", True) and src_video is not None:
             from worker.pipeline.autoedit import _motion_centroid, probe_dims
 
+            clicks = _click_points(db, src_session_id)
             vdims = probe_dims(src_video)
-            zoomed_auto = 0
             for s in segs:
                 z = s.get("zoom") or {}
                 if z.get("enabled"):
                     continue  # keep an existing bbox / user zoom
-                t0 = s.get("source_start_ms", 0) / 1000.0
-                t1 = max(s.get("source_end_ms", 0) / 1000.0, t0 + 0.6)
-                cx, cy, scale = _motion_centroid(src_video, t0, t1, vdims)
+                if z.get("auto") is False:
+                    continue  # user explicitly turned zoom OFF for this scene
+                t0ms = s.get("source_start_ms", 0)
+                t1ms = max(s.get("source_end_ms", 0), t0ms + 600)
+                # the click that opens the scene (scene windows start at click time)
+                hit = next((c for c in clicks if t0ms - 250 <= c[0] <= t1ms), None)
+                if hit:
+                    cx, cy, scale = hit[1], hit[2], 1.6
+                    zoomed_click += 1
+                else:
+                    cx, cy, scale = _motion_centroid(src_video, t0ms / 1000.0, t1ms / 1000.0, vdims)
+                    zoomed_motion += int(scale > 1.0)
                 if scale > 1.0:
                     s["zoom"] = {
                         "enabled": True,
@@ -349,24 +481,49 @@ def run_render(render_job_id: str) -> dict:
                         "cx": cx,
                         "cy": cy,
                         "speed": 3,
+                        "auto": True,  # added by the renderer; user-tweakable in the Zoom tab
                     }
-                    zoomed_auto += 1
-            log.info("motion auto-zoom: %d/%d scenes", zoomed_auto, len(segs))
+            log.info("auto-zoom: %d click-centered, %d motion-centered of %d scenes",
+                     zoomed_click, zoomed_motion, len(segs))
+            # Persist the auto-added zooms into the edit spec so they show up in the
+            # editor's Zoom tab, where the user can tweak, remove, or add to them.
+            if zoomed_click or zoomed_motion:
+                from sqlalchemy.orm.attributes import flag_modified
+
+                flag_modified(vp, "edit_spec_json")
+                db.commit()
+
+        # Product-video pacing: narrated scenes run at `pace` (voice + footage
+        # together), silent scenes fast-forward at SILENT_SPEEDUP. This is what
+        # turns a 15-min raw capture into a tight demo.
+        pace = min(1.5, max(1.0, float(spec.get("pace") or DEFAULT_PACE)))
 
         # per-step audio (TTS, or the original narration if "use original voice") -> timeline
         step_inputs = []
         tts_synth = tts_cached = 0
         for s in segs:
             script = effective_script(s.get("words", []), s.get("removed", []))
-            if use_original:
-                apath = work / f"orig_{s['step_id']}.wav"
+            src_ms = max(0, s.get("source_end_ms", 0) - s.get("source_start_ms", 0))
+            if not script.strip():
+                # No spoken words in this scene: it's an idle stretch — fast-forward
+                # it silently instead of playing it out (or speaking a placeholder),
+                # capped so a long dead stretch can't bloat the output.
+                dur_ms = max(300, min(SILENT_MAX_MS, int(src_ms / (SILENT_SPEEDUP * pace))))
+                apath = work / f"sil_{s['step_id']}_{dur_ms}.wav"
+                if not apath.exists():
+                    _silent_wav(apath, dur_ms)
+                s["_audio_path"] = str(apath)
+            elif use_original:
+                apath = work / f"orig_{s['step_id']}_{pace:.2f}.wav"
                 dur_ms = _extract_audio(
-                    src_video, s.get("source_start_ms", 0), s.get("source_end_ms", 0), apath
+                    src_video, s.get("source_start_ms", 0), s.get("source_end_ms", 0), apath,
+                    tempo=pace,
                 )
                 s["_audio_path"] = str(apath)
             else:
                 r = synth_step(script, media_root=store.root,
-                               voice_id=voice["voice_id"], speed=voice.get("speed", 1.0))
+                               voice_id=voice["voice_id"],
+                               speed=voice.get("speed", 1.0) * pace)
                 tts_cached += int(r.cached)
                 tts_synth += int(not r.cached)
                 dur_ms = r.duration_ms
@@ -403,7 +560,8 @@ def run_render(render_job_id: str) -> dict:
                                            dims, font, work, "intro", brand=brand, logo=logo))
         for s, seg_tl in zip(segs, timeline.segments):
             clip, did = _render_segment(s, seg_tl, src_video, dims, captions, font, work,
-                                        crop=crop, elements=elements, logo=logo, logo_pos=logo_pos)
+                                        crop=crop, elements=elements, logo=logo, logo_pos=logo_pos,
+                                        background=spec.get("background"))
             clips.append(clip)
             rendered += int(did)
             reused += int(not did)
@@ -431,6 +589,9 @@ def run_render(render_job_id: str) -> dict:
             "tts_synth": tts_synth,
             "tts_cached": tts_cached,
             "expected_body_ms": timeline.total_duration_ms,
+            "pace": pace,
+            "zoom_click": zoomed_click,
+            "zoom_motion": zoomed_motion,
             "aspect": spec.get("aspect"),
         }
         job.output_key = out_key
@@ -450,7 +611,9 @@ def run_render(render_job_id: str) -> dict:
         db.close()
 
 
-def _find_source_video(db, project_id: str) -> Path | None:
+def _find_source_video(db, project_id: str) -> tuple[Path | None, str | None]:
+    """Locate the raw source video and the capture session it belongs to (the
+    session carries the click telemetry + viewport used for click-centered zoom)."""
     from app.models import CaptureSession
 
     sess_ids = [
@@ -465,5 +628,29 @@ def _find_source_video(db, project_id: str) -> Path | None:
         if asset:
             p = store.local_path(asset.storage_key)
             if p.exists():
-                return p
-    return None
+                return p, sid
+    return None, None
+
+
+def _click_points(db, session_id: str | None) -> list[tuple[int, float, float]]:
+    """Recorded click positions as [(t_ms, cx, cy)] normalized to the viewport —
+    the ground truth for where to center a zoom. Empty when the session has no
+    telemetry (plain recorder / upload)."""
+    if not session_id:
+        return []
+    from app.models import CaptureSession, Event
+
+    sess = db.get(CaptureSession, session_id)
+    vp = (sess.viewport_json or {}) if sess else {}
+    vw, vh = vp.get("w") or 0, vp.get("h") or 0
+    if not vw or not vh:
+        return []
+    out: list[tuple[int, float, float]] = []
+    for e in db.scalars(select(Event).where(Event.session_id == session_id, Event.type == "click")):
+        b = e.bbox_json
+        if isinstance(b, (list, tuple)) and len(b) == 4:
+            cx = min(1.0, max(0.0, (float(b[0]) + float(b[2]) / 2) / vw))
+            cy = min(1.0, max(0.0, (float(b[1]) + float(b[3]) / 2) / vh))
+            out.append((int(e.t_ms), round(cx, 4), round(cy, 4)))
+    out.sort()
+    return out

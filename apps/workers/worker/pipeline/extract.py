@@ -59,7 +59,9 @@ def build_graph(
                 "selector": cand.get("selector"),
                 "screenshot": cand.get("screenshot"),
                 "bbox": _clean_bbox(cand.get("bbox")),
-                "narration": lab.get("narration") or cand.get("narration_span") or "",
+                # Verbatim invariant: the script is the transcript span, or empty —
+                # never an LLM-invented sentence.
+                "narration": (cand.get("narration_span") or "").strip(),
                 "t_start": cand.get("t_start"),
                 "t_end": cand.get("t_end"),
                 "confidence": confidence,

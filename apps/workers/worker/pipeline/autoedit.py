@@ -140,25 +140,52 @@ def detect_freezes(video: Path, duration: float) -> list[tuple[float, float]]:
 
 
 def _motion_centroid(video: Path, t0: float, t1: float, dims: tuple[int, int]) -> tuple[float, float, float]:
-    """Zoom target from frame-to-frame change within [t0,t1]. Returns (cx,cy,scale)."""
+    """Zoom target from on-screen activity within [t0,t1]. Returns (cx,cy,scale).
+
+    Two-tier detection so telemetry-less desktop recordings still zoom toward the
+    click area:
+    1. UI reaction — a localized burst of change (menu opening, field focusing)
+       right after the scene starts: zoom to that region. A change covering most
+       of the frame is a page transition — stay wide.
+    2. Cursor trail — no UI burst: track the mouse itself at fine resolution
+       (a 1080p cursor is only a few pixels even at 640x360) and zoom to where it
+       worked; the weighted centroid lands where the cursor lingered."""
     try:
         import numpy as np
     except Exception:
         return 0.5, 0.5, 1.0
-    mid = (t0 + t1) / 2
-    a = _grab(video, max(t0, mid - 0.3))
-    b = _grab(video, min(t1, mid + 0.3))
-    if a is None or b is None:
+    span = max(0.0, t1 - t0)
+    times = [t0 + 0.05, t0 + 0.5, t0 + min(1.2, span / 2), t1 - 0.3]
+    times = sorted({max(t0, min(t1, t)) for t in times})
+    imgs = [im for im in (_grab(video, t) for t in times) if im is not None]
+    if len(imgs) < 2:
         return 0.5, 0.5, 1.0
-    ga = np.asarray(a.convert("L").resize((160, 90)), dtype="int16")
-    gb = np.asarray(b.convert("L").resize((160, 90)), dtype="int16")
-    diff = np.abs(ga - gb)
-    mask = diff > 18
-    if mask.sum() < 40:  # little motion -> no zoom
+
+    # Tier 1: UI reaction burst at coarse resolution (compression-noise proof).
+    W, H = 320, 180
+    coarse = [np.asarray(im.convert("L").resize((W, H)), dtype="int16") for im in imgs]
+    for a, b in zip(coarse, coarse[1:]):
+        mask = np.abs(a - b) > 12
+        n = int(mask.sum())
+        if n < 60:
+            continue  # no burst in this pair
+        if n > 0.35 * W * H:
+            return 0.5, 0.5, 1.0  # full-page transition — keep the wide shot
+        ys, xs = np.nonzero(mask)
+        return round(float(xs.mean()) / W, 3), round(float(ys.mean()) / H, 3), ZOOM_SCALE
+
+    # Tier 2: cursor trail at fine resolution with a low threshold.
+    FW, FH = 640, 360
+    fine = [np.asarray(im.convert("L").resize((FW, FH)), dtype="int16") for im in imgs]
+    acc = np.zeros((FH, FW), dtype="float64")
+    for a, b in zip(fine, fine[1:]):
+        acc += (np.abs(a - b) > 8).astype("float64")
+    if acc.sum() < 6:  # truly static — nothing moved, not even the cursor
         return 0.5, 0.5, 1.0
-    ys, xs = np.nonzero(mask)
-    cx = float(xs.mean()) / 160.0
-    cy = float(ys.mean()) / 90.0
+    ys, xs = np.nonzero(acc)
+    wgt = acc[ys, xs]
+    cx = float((xs * wgt).sum() / wgt.sum()) / FW
+    cy = float((ys * wgt).sum() / wgt.sum()) / FH
     return round(cx, 3), round(cy, 3), ZOOM_SCALE
 
 
