@@ -689,6 +689,29 @@ export interface EditElement {
   end_ms?: number; //   element only shows during [start_ms, end_ms], else whole video
 }
 
+export interface CropRegion {
+  enabled: boolean;
+  x: number; // normalized (0..1) region of the ORIGINAL frame
+  y: number;
+  w: number;
+  h: number;
+  start_ms?: number; // optional time window: crop applies only within
+  end_ms?: number; //   [start_ms, end_ms] when end>start, else whole video
+}
+
+/** All crops on a spec, with the legacy single `crop` folded in. */
+export const cropList = (spec: { crop?: CropRegion; crops?: CropRegion[] }): CropRegion[] =>
+  spec.crops ?? (spec.crop?.enabled ? [spec.crop] : []);
+
+/** The crop in effect at a source-time (ms): first enabled region whose window
+ * covers it; a region without a window applies everywhere. */
+export const activeCrop = (crops: CropRegion[], atMs: number): CropRegion | undefined =>
+  crops.find(
+    (c) =>
+      c.enabled &&
+      ((c.end_ms ?? 0) <= (c.start_ms ?? 0) || (atMs >= (c.start_ms ?? 0) && atMs <= (c.end_ms ?? 0))),
+  );
+
 export interface EditSpec {
   graph_version: number;
   title: string;
@@ -698,15 +721,9 @@ export interface EditSpec {
   outro: { enabled: boolean; title: string; duration_ms: number };
   captions: { enabled: boolean };
   music: { enabled: boolean; storage_key: string | null; gain_db: number };
-  crop?: {
-    enabled: boolean;
-    x: number;
-    y: number;
-    w: number;
-    h: number;
-    start_ms?: number; // optional time window: crop applies only within
-    end_ms?: number; //   [start_ms, end_ms] when end>start, else whole video
-  };
+  crop?: CropRegion; // legacy single crop — superseded by `crops`
+  crops?: CropRegion[]; // multi-range crops: first enabled region whose window
+  //   covers a moment wins; a region without a window applies everywhere
   trim?: { enabled: boolean; start_ms: number; end_ms: number };
   motion_zoom?: boolean; // auto-zoom on mouse/click activity at render time
   pace?: number; // product-video tempo for narrated scenes (1.0–1.5, default 1.1)

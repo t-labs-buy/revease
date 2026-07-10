@@ -106,8 +106,11 @@ def build_edit_spec(graph_json: dict[str, Any], viewport: dict[str, int] | None)
         # backdrop behind the recording (inset with padding) instead of full-bleed.
         "background": {"enabled": False, "style": "indigo"},
         "music": {"enabled": False, "storage_key": None, "gain_db": -18},
-        # crop: reframe the whole video to a normalized (0..1) region.
+        # crop: reframe the whole video to a normalized (0..1) region (legacy single).
         "crop": {"enabled": False, "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},
+        # crops: multi-range reframes — each region may carry its own
+        # [start_ms, end_ms] window; the first enabled match per scene wins.
+        "crops": [],
         # trim: keep only the source window [start_ms, end_ms] (scene-level).
         "trim": {"enabled": False, "start_ms": 0, "end_ms": 0},
         # elements: overlay text / highlight boxes, positions normalized (0..1).

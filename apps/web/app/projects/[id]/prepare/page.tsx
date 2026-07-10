@@ -4,6 +4,7 @@ import { Suspense, use, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
+  activeCrop,
   estimateOutputMs,
   getGraph,
   getSessionDetail,
@@ -12,6 +13,7 @@ import {
   mediaUrl,
   patchVideo,
   setKeepRanges,
+  type CropRegion,
   type EditSpec,
   type GraphRow,
   type SessionDetail,
@@ -61,7 +63,8 @@ function PrepareInner({ params }: { params: Promise<{ id: string }> }) {
   const [modal, setModal] = useState<null | "trim" | "crop" | "voice">(null);
 
   // staged edits (applied to the edit spec at generate time)
-  const [crop, setCrop] = useState<EditSpec["crop"]>(undefined);
+  const [crops, setCrops] = useState<CropRegion[]>([]);
+  const [cur, setCur] = useState(0); // preview playhead — picks the active crop
   const [voice, setVoice] = useState<{ voice_id: string; speed: number; use_original?: boolean } | null>(null);
 
   const [generating, setGenerating] = useState(false);
@@ -120,7 +123,7 @@ function PrepareInner({ params }: { params: Promise<{ id: string }> }) {
       const next: EditSpec = {
         ...v.edit_spec,
         ...(voice ? { voice: { ...v.edit_spec.voice, ...voice } } : {}),
-        ...(crop?.enabled ? { crop } : {}),
+        ...(crops.length ? { crops } : {}),
       };
       await patchVideo(id, next);
       router.push(`/projects/${id}/video`);
@@ -135,19 +138,25 @@ function PrepareInner({ params }: { params: Promise<{ id: string }> }) {
     "inline-flex items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--card)] px-3.5 py-2 text-sm font-medium text-[var(--text)] hover:bg-[var(--hover)] disabled:opacity-40";
 
   // Show the staged crop for real: reframe the preview so the cropped region
-  // fills the player (same math the final render uses). Region is clamped so
+  // fills the player (same math the final render uses). Multi-range crops —
+  // the playhead picks which region is in effect. Region is clamped so
   // x+w / y+h can never exceed the frame.
+  const crop = activeCrop(crops, cur * 1000);
   const cw = Math.min(1, Math.max(0.05, crop?.w ?? 1));
   const ch = Math.min(1, Math.max(0.05, crop?.h ?? 1));
   const cx = Math.min(Math.max(0, crop?.x ?? 0), 1 - cw);
   const cy = Math.min(Math.max(0, crop?.y ?? 0), 1 - ch);
-  const cropOn = !!crop?.enabled && (cw < 0.999 || ch < 0.999 || cx > 0.001 || cy > 0.001);
+  const cropOn = !!crop && (cw < 0.999 || ch < 0.999 || cx > 0.001 || cy > 0.001);
+  // Uniform cover-scale about the region center, then shift that center to the
+  // middle of the frame — same "crop, then cover" the render does, so the
+  // preview shows exactly the selected content with no stretch and no padding.
+  const cropScale = Math.max(1 / cw, 1 / ch);
   const cropStyle: React.CSSProperties = cropOn
     ? {
-        transform: `scale(${(1 / cw).toFixed(4)}, ${(1 / ch).toFixed(4)})`,
-        transformOrigin: `${cw >= 0.999 ? 0 : ((cx / (1 - cw)) * 100).toFixed(2)}% ${
-          ch >= 0.999 ? 0 : ((cy / (1 - ch)) * 100).toFixed(2)
-        }%`,
+        transform: `translate(${((0.5 - (cx + cw / 2)) * 100).toFixed(2)}%, ${(
+          (0.5 - (cy + ch / 2)) * 100
+        ).toFixed(2)}%) scale(${cropScale.toFixed(4)})`,
+        transformOrigin: `${((cx + cw / 2) * 100).toFixed(2)}% ${((cy + ch / 2) * 100).toFixed(2)}%`,
       }
     : {};
 
@@ -194,6 +203,7 @@ function PrepareInner({ params }: { params: Promise<{ id: string }> }) {
                   src={mediaUrl(videoAsset.storage_key)}
                   controls
                   onLoadedMetadata={(e) => resolveDuration(e.currentTarget, setDur)}
+                  onTimeUpdate={(e) => setCur(e.currentTarget.currentTime)}
                   className="max-h-[62vh] w-full"
                 />
               </div>
@@ -207,7 +217,13 @@ function PrepareInner({ params }: { params: Promise<{ id: string }> }) {
           {/* toolbar */}
           <div className="mt-4 inline-flex items-center gap-2 rounded-2xl border border-[var(--border)] bg-[var(--card)] p-2">
             <button onClick={() => setModal("crop")} disabled={!videoAsset} className={toolBtn}>
-              ⛶ Crop {crop?.enabled && <span className="h-1.5 w-1.5 rounded-full bg-[#6d5dfb]" />}
+              ⛶ Crop{" "}
+              {crops.length > 0 && (
+                <span className="inline-flex items-center gap-1">
+                  <span className="h-1.5 w-1.5 rounded-full bg-[#6d5dfb]" />
+                  {crops.length > 1 && <span className="text-xs text-[var(--text-3)]">{crops.length}</span>}
+                </span>
+              )}
             </button>
             <button onClick={() => setModal("trim")} disabled={!videoAsset} className={toolBtn}>
               ✂ Trim {detail?.trim_start_ms != null && <span className="h-1.5 w-1.5 rounded-full bg-[#6d5dfb]" />}
@@ -336,10 +352,10 @@ function PrepareInner({ params }: { params: Promise<{ id: string }> }) {
       {modal === "crop" && videoAsset && (
         <CropModal
           source={videoAsset.storage_key}
-          crop={crop}
+          crops={crops}
           onCancel={() => setModal(null)}
-          onSave={(c) => {
-            setCrop(c);
+          onSave={(cs) => {
+            setCrops(cs);
             setModal(null);
           }}
         />

@@ -3,6 +3,8 @@
 import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
+  activeCrop,
+  cropList,
   getRender,
   getVideo,
   mediaUrl,
@@ -708,25 +710,27 @@ export default function VideoEditor({ params }: { params: Promise<{ id: string }
   const bgOn = !!spec.background?.enabled;
   const bgCss = BG_PRESETS.find((p) => p.id === spec.background?.style)?.css ?? BG_PRESETS[0].css;
   // Crop reframe: actually show the cropped region filling the frame (the render
-  // does the same), not just a dimmed outline.
-  const cr = spec.crop;
+  // does the same), not just a dimmed outline. Multi-range crops — the playhead
+  // picks which region is in effect (legacy single crop folded in).
+  const crops = cropList(spec);
+  const cr = activeCrop(crops, cur * 1000);
   // clamp so x+w / y+h can never exceed the frame — an out-of-bounds region makes
   // the origin math point at the wrong area entirely
   const cw = Math.min(1, Math.max(0.05, cr?.w ?? 1));
   const ch = Math.min(1, Math.max(0.05, cr?.h ?? 1));
   const cx = Math.min(Math.max(0, cr?.x ?? 0), 1 - cw);
   const cy = Math.min(Math.max(0, cr?.y ?? 0), 1 - ch);
-  // optional time window: crop only applies within [start_ms, end_ms]
-  const crs = cr?.start_ms ?? 0;
-  const cre = cr?.end_ms ?? 0;
-  const cropInRange = cre <= crs || (cur * 1000 >= crs && cur * 1000 <= cre);
-  const cropOn = !!cr?.enabled && cropInRange && (cw < 0.999 || ch < 0.999 || cx > 0.001 || cy > 0.001);
+  const cropOn = !!cr && (cw < 0.999 || ch < 0.999 || cx > 0.001 || cy > 0.001);
+  // Uniform cover-scale about the region center, then shift that center to the
+  // middle of the frame — same "crop, then cover" the render does, so the
+  // preview shows exactly the selected content with no stretch and no padding.
+  const cropScale = Math.max(1 / cw, 1 / ch);
   const cropStyle: React.CSSProperties = cropOn
     ? {
-        transform: `scale(${(1 / cw).toFixed(4)}, ${(1 / ch).toFixed(4)})`,
-        transformOrigin: `${cw >= 0.999 ? 0 : ((cx / (1 - cw)) * 100).toFixed(2)}% ${
-          ch >= 0.999 ? 0 : ((cy / (1 - ch)) * 100).toFixed(2)
-        }%`,
+        transform: `translate(${((0.5 - (cx + cw / 2)) * 100).toFixed(2)}%, ${(
+          (0.5 - (cy + ch / 2)) * 100
+        ).toFixed(2)}%) scale(${cropScale.toFixed(4)})`,
+        transformOrigin: `${((cx + cw / 2) * 100).toFixed(2)}% ${((cy + ch / 2) * 100).toFixed(2)}%`,
       }
     : {};
 
@@ -763,10 +767,12 @@ export default function VideoEditor({ params }: { params: Promise<{ id: string }
       {activeTool === "crop" && source && (
         <CropModal
           source={source}
-          crop={spec.crop}
+          crops={cropList(spec)}
           onCancel={() => setActiveTool(null)}
-          onSave={(crop) => {
-            setSpec({ ...spec, crop });
+          onSave={(cs) => {
+            // an explicit [] means "no crops" — also disable the legacy single
+            // crop so the renderer doesn't fall back to it
+            setSpec({ ...spec, crops: cs, crop: { enabled: false, x: 0, y: 0, w: 1, h: 1 } });
             setActiveTool(null);
           }}
         />

@@ -92,11 +92,15 @@ def _drawtext(font: str | None, textfile: Path, size: int, y: str) -> str | None
     )
 
 
-def _make_still(seg: dict, src_video: Path | None, dims: tuple[int, int], out: Path) -> None:
+def _make_still(seg: dict, src_video: Path | None, dims: tuple[int, int], out: Path,
+                crop: dict | None = None) -> None:
     """Best still for a segment: its screenshot, else a frame from the raw video at
-    the step's start, else a slate. Normalized to cover WxH."""
+    the step's start, else a slate. The user crop (normalized to the ORIGINAL
+    frame) is applied first, then the result covers WxH."""
     w, h = dims
+    pre = _crop_filter(crop)
     cover = f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}"
+    cover = f"{pre},{cover}" if pre else cover
     out.parent.mkdir(parents=True, exist_ok=True)
 
     shot = seg.get("screenshot")
@@ -112,16 +116,21 @@ def _make_still(seg: dict, src_video: Path | None, dims: tuple[int, int], out: P
     _run(["ffmpeg", "-y", "-f", "lavfi", "-i", f"color=c=0x0b0f1a:s={w}x{h}", "-frames:v", "1", str(out)])
 
 
-def _crop_for_segment(crop: dict | None, seg: dict) -> dict | None:
-    """The crop that applies to THIS scene: honours the optional time window
-    (crop.start_ms/end_ms) — scenes outside the window render uncropped."""
-    if not crop or not crop.get("enabled"):
-        return None
-    s_ms, e_ms = int(crop.get("start_ms") or 0), int(crop.get("end_ms") or 0)
-    if e_ms > s_ms:
-        if seg.get("source_end_ms", 0) <= s_ms or seg.get("source_start_ms", 0) >= e_ms:
-            return None
-    return crop
+def _crop_for_segment(crops: list[dict] | None, seg: dict) -> dict | None:
+    """The crop that applies to THIS scene. Each crop can carry its own time
+    window (start_ms/end_ms) so different parts of the recording get different
+    reframes — the first enabled crop whose window overlaps the scene wins; a
+    crop without a window applies everywhere. Scenes matching none render
+    uncropped."""
+    for crop in crops or []:
+        if not crop or not crop.get("enabled"):
+            continue
+        s_ms, e_ms = int(crop.get("start_ms") or 0), int(crop.get("end_ms") or 0)
+        if e_ms > s_ms:
+            if seg.get("source_end_ms", 0) <= s_ms or seg.get("source_start_ms", 0) >= e_ms:
+                continue
+        return crop
+    return None
 
 
 def _remap_zoom_into_crop(zoom: dict | None, crop: dict | None) -> dict | None:
@@ -141,8 +150,11 @@ def _remap_zoom_into_crop(zoom: dict | None, crop: dict | None) -> dict | None:
     }
 
 
-def _crop_filter(crop: dict | None, dims: tuple[int, int]) -> str | None:
-    """Reframe the WxH still to a normalized (0..1) region, then scale back to fill.
+def _crop_filter(crop: dict | None) -> str | None:
+    """Cut the normalized (0..1) region out of the ORIGINAL frame — the same frame
+    the crop was drawn on in the editor. It runs BEFORE any cover/scale so the
+    coordinates always line up; the caller then covers the output WxH, so only
+    the selected content ends up in the video (no source padding leaks back in).
     The region is clamped inside the frame (x+w ≤ 1) so a crop dragged slightly
     past the edge still shows exactly the selected area."""
     if not crop or not crop.get("enabled"):
@@ -153,8 +165,7 @@ def _crop_filter(crop: dict | None, dims: tuple[int, int]) -> str | None:
     cy = min(max(0.0, float(crop.get("y", 0.0))), 1.0 - ch)
     if cw >= 0.999 and ch >= 0.999 and cx <= 0.001 and cy <= 0.001:
         return None
-    w, h = dims
-    return f"crop=iw*{cw:.4f}:ih*{ch:.4f}:iw*{cx:.4f}:ih*{cy:.4f},scale={w}:{h}"
+    return f"crop=iw*{cw:.4f}:ih*{ch:.4f}:iw*{cx:.4f}:ih*{cy:.4f}"
 
 
 def _hex(color: str, default: str) -> str:
@@ -221,7 +232,7 @@ def _zoom_filter(zoom: dict | None, dims: tuple[int, int], dur_s: float = 3.0) -
 
 
 def _render_segment(seg, seg_tl, src_video, dims, captions, font, work: Path,
-                    crop=None, elements=None, logo: Path | None = None,
+                    crops=None, elements=None, logo: Path | None = None,
                     logo_pos: str = "Top Right", background: dict | None = None) -> tuple[Path, bool]:
     """Return (clip_path, rendered_now). Reuses a cached clip when the content hash
     matches — this is what makes regenerate touch only changed segments.
@@ -238,12 +249,12 @@ def _render_segment(seg, seg_tl, src_video, dims, captions, font, work: Path,
         src_video is not None and src_video.exists() and not seg_tl.hold and src_len_s >= 0.2
     )
 
-    # crop honours its optional time window, and the zoom center is remapped into
-    # the cropped frame so it still points at the same on-screen spot
-    crop_eff = _crop_for_segment(crop, seg)
+    # each crop honours its optional time window, and the zoom center is remapped
+    # into the cropped frame so it still points at the same on-screen spot
+    crop_eff = _crop_for_segment(crops, seg)
     zoom_eff = _remap_zoom_into_crop(seg.get("zoom"), crop_eff)
 
-    clip_hash = _sha("v3", seg.get("step_id"), script, tts_path.name, zoom_eff,
+    clip_hash = _sha("v4", seg.get("step_id"), script, tts_path.name, zoom_eff,
                      dims, captions, seg.get("screenshot"), seg.get("source_start_ms"),
                      seg.get("source_end_ms"), round(dur_s, 3), use_footage,
                      crop_eff, elements, str(logo), logo_pos, background)
@@ -253,8 +264,13 @@ def _render_segment(seg, seg_tl, src_video, dims, captions, font, work: Path,
 
     w, h = dims
     parts: list[str] = []
+    cf = _crop_filter(crop_eff)
     if use_footage:
-        # normalize footage to cover WxH (same framing as the still path)
+        # crop the ORIGINAL frame first (the frame the crop was drawn on), then
+        # normalize the remaining content to cover WxH — only the selected
+        # region reaches the output, so source padding can't leak back in
+        if cf:
+            parts.append(cf)
         parts.append(f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}")
         speed = src_len_s / dur_s
         if speed >= 1.02:
@@ -264,12 +280,9 @@ def _render_segment(seg, seg_tl, src_video, dims, captions, font, work: Path,
             parts.append(f"tpad=stop_mode=clone:stop_duration={dur_s - src_len_s:.3f}")
     else:
         still = work / f"still_{clip_hash}.png"
-        _make_still(seg, src_video, dims, still)
+        _make_still(seg, src_video, dims, still, crop=crop_eff)  # crop baked into the still
 
-    # crop (reframe) -> zoom -> captions -> overlay elements -> normalize
-    cf = _crop_filter(crop_eff, dims)
-    if cf:
-        parts.append(cf)
+    # zoom -> captions -> overlay elements -> normalize
     parts.append(_zoom_filter(zoom_eff, dims, dur_s))
     if captions and script:
         capfile = work / f"cap_{clip_hash}.txt"
@@ -436,7 +449,12 @@ def run_render(render_job_id: str) -> dict:
         segs = spec.get("segments", [])
         # skip: scenes flagged "skipped" are dropped from the render entirely.
         segs = [s for s in segs if not s.get("skipped")]
-        crop = spec.get("crop")
+        # multi-range crops; a spec saved before `crops` existed falls back to the
+        # legacy single crop. An explicit empty list means "no crops" (do NOT
+        # resurrect the legacy one — the user removed them all).
+        crops = spec.get("crops")
+        if crops is None:
+            crops = [spec["crop"]] if spec.get("crop") else []
         elements = spec.get("elements")
         # trim: keep only scenes whose source start falls inside [start, end].
         trim = spec.get("trim") or {}
@@ -560,7 +578,7 @@ def run_render(render_job_id: str) -> dict:
                                            dims, font, work, "intro", brand=brand, logo=logo))
         for s, seg_tl in zip(segs, timeline.segments):
             clip, did = _render_segment(s, seg_tl, src_video, dims, captions, font, work,
-                                        crop=crop, elements=elements, logo=logo, logo_pos=logo_pos,
+                                        crops=crops, elements=elements, logo=logo, logo_pos=logo_pos,
                                         background=spec.get("background"))
             clips.append(clip)
             rendered += int(did)

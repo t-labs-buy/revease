@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Rnd } from "react-rnd";
-import { mediaUrl, type EditSegment, type EditSpec } from "@/lib/api";
+import { mediaUrl, type CropRegion, type EditSegment, type EditSpec } from "@/lib/api";
 import { useFilmstrip, useWaveform, type Frame } from "@/lib/media";
 
 const mmss = (t: number) =>
@@ -1009,32 +1009,38 @@ const Dot = () => (
   <span className="block h-3 w-3 -translate-x-0 rounded-full border-2 border-white bg-[#374151] shadow" />
 );
 
+const DEFAULT_CROP: CropRegion = { enabled: true, x: 0.12, y: 0.12, w: 0.76, h: 0.76, start_ms: 0, end_ms: 0 };
+
 export function CropModal({
   source,
-  crop,
+  crops,
   onCancel,
   onSave,
 }: {
   source: string;
-  crop: EditSpec["crop"];
+  crops: CropRegion[];
   onCancel: () => void;
-  onSave: (crop: NonNullable<EditSpec["crop"]>) => void;
+  onSave: (crops: CropRegion[]) => void;
 }) {
-  const init =
-    crop?.enabled && crop.w > 0 && crop.h > 0
-      ? crop
-      : { enabled: true, x: 0.12, y: 0.12, w: 0.76, h: 0.76 };
-  const [box, setBox] = useState({ x: init.x, y: init.y, w: init.w, h: init.h });
+  // one crop per "angle": each region can carry its own time window, so parts
+  // of the recording where the content sits somewhere else get their own box
+  const [list, setList] = useState<CropRegion[]>(() =>
+    crops.length ? crops.map((c) => ({ ...c })) : [{ ...DEFAULT_CROP }],
+  );
+  const [sel, setSel] = useState(0);
+  const box = list[Math.min(sel, list.length - 1)];
+  const patchSel = (patch: Partial<CropRegion>) =>
+    setList((l) => l.map((c, i) => (i === sel ? { ...c, ...patch } : c)));
   const wrapRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const [frame, setFrame] = useState({ w: 0, h: 0 });
   const [cur, setCur] = useState(0);
   const [dur, setDur] = useState(0);
   const [playing, setPlaying] = useState(false);
-  // optional time window — crop applies only within [rStart, rEnd]
-  const [rangeOn, setRangeOn] = useState(!!(crop && (crop.end_ms ?? 0) > (crop.start_ms ?? 0)));
-  const [rStart, setRStart] = useState(crop?.start_ms ?? 0);
-  const [rEnd, setREnd] = useState(crop?.end_ms ?? 0);
+  // optional time window — the selected crop applies only within [rStart, rEnd]
+  const rStart = box.start_ms ?? 0;
+  const rEnd = box.end_ms ?? 0;
+  const rangeOn = rEnd > rStart;
 
   useEffect(() => {
     const el = wrapRef.current;
@@ -1060,12 +1066,12 @@ export function CropModal({
       onClose={onCancel}
       footer={
         <>
-          {crop?.enabled && (
+          {crops.length > 0 && (
             <button
-              onClick={() => onSave({ enabled: false, x: 0, y: 0, w: 1, h: 1 })}
+              onClick={() => onSave([])}
               className="btn btn-ghost btn-sm text-[var(--text-2)]"
             >
-              Remove crop
+              Remove all crops
             </button>
           )}
           <div className="ml-auto flex items-center gap-2">
@@ -1074,19 +1080,25 @@ export function CropModal({
             </button>
             <button
               onClick={() => {
-                // clamp so the region always stays inside the frame (x+w ≤ 1) —
-                // otherwise the reframe math shows a different area than selected
-                const w = Math.min(1, Math.max(0.05, box.w));
-                const h = Math.min(1, Math.max(0.05, box.h));
-                onSave({
-                  enabled: true,
-                  x: Math.min(Math.max(0, box.x), 1 - w),
-                  y: Math.min(Math.max(0, box.y), 1 - h),
-                  w,
-                  h,
-                  start_ms: rangeOn ? Math.round(rStart) : 0,
-                  end_ms: rangeOn ? Math.round(rEnd || dur * 1000) : 0,
-                });
+                // clamp each region inside the frame (x+w ≤ 1) — otherwise the
+                // reframe math shows a different area than selected
+                onSave(
+                  list.map((c) => {
+                    const w = Math.min(1, Math.max(0.05, c.w));
+                    const h = Math.min(1, Math.max(0.05, c.h));
+                    const s = Math.round(c.start_ms ?? 0);
+                    const e = Math.round(c.end_ms ?? 0);
+                    return {
+                      enabled: true,
+                      x: Math.min(Math.max(0, c.x), 1 - w),
+                      y: Math.min(Math.max(0, c.y), 1 - h),
+                      w,
+                      h,
+                      start_ms: e > s ? s : 0,
+                      end_ms: e > s ? e : 0,
+                    };
+                  }),
+                );
               }}
               className="btn btn-primary"
             >
@@ -1118,9 +1130,9 @@ export function CropModal({
             bounds="parent"
             size={{ width: box.w * frame.w, height: box.h * frame.h }}
             position={{ x: box.x * frame.w, y: box.y * frame.h }}
-            onDrag={(_e, d) => setBox((b) => ({ ...b, x: clamp(d.x / frame.w), y: clamp(d.y / frame.h) }))}
+            onDrag={(_e, d) => patchSel({ x: clamp(d.x / frame.w), y: clamp(d.y / frame.h) })}
             onResize={(_e, _dir, ref, _delta, pos) =>
-              setBox({
+              patchSel({
                 w: clamp(ref.offsetWidth / frame.w),
                 h: clamp(ref.offsetHeight / frame.h),
                 x: clamp(pos.x / frame.w),
@@ -1162,25 +1174,85 @@ export function CropModal({
         />
       </div>
 
-      {/* optional time window — crop only part of the video */}
+      {/* crop list — one region per "angle"; each can carry its own time range */}
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        {list.map((c, i) => {
+          const ranged = (c.end_ms ?? 0) > (c.start_ms ?? 0);
+          return (
+            <span
+              key={i}
+              className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs ${
+                i === sel
+                  ? "border-[#6d5dfb] bg-[#6d5dfb]/10 text-[var(--text)]"
+                  : "border-[var(--border)] text-[var(--text-2)]"
+              }`}
+            >
+              <button
+                onClick={() => {
+                  setSel(i);
+                  const v = videoRef.current;
+                  if (v && ranged) v.currentTime = (c.start_ms ?? 0) / 1000; // jump to its footage
+                }}
+              >
+                Crop {i + 1}
+                <span className="ml-1 font-mono text-[10px] text-[var(--text-3)]">
+                  {ranged ? `${mmss((c.start_ms ?? 0) / 1000)}–${mmss((c.end_ms ?? 0) / 1000)}` : "whole video"}
+                </span>
+              </button>
+              {list.length > 1 && (
+                <button
+                  title="Remove this crop"
+                  onClick={() => {
+                    setList((l) => l.filter((_, j) => j !== i));
+                    setSel((s) => Math.max(0, Math.min(s > i ? s - 1 : s, list.length - 2)));
+                  }}
+                  className="text-[var(--text-3)] hover:text-[var(--text)]"
+                >
+                  ×
+                </button>
+              )}
+            </span>
+          );
+        })}
+        <button
+          onClick={() => {
+            // new crop for the footage from the playhead onward — when windows
+            // overlap, the first crop in the list wins at render time
+            const start = Math.round(cur * 1000);
+            const end = Math.max(Math.round((dur || cur + 10) * 1000), start + 500);
+            setList((l) => [...l, { ...DEFAULT_CROP, start_ms: start, end_ms: end }]);
+            setSel(list.length);
+          }}
+          className="btn btn-ghost btn-sm"
+        >
+          ＋ Add crop
+        </button>
+      </div>
+
+      {/* optional time window — the selected crop only applies within it */}
       <div className="mt-3 rounded-xl border border-[var(--border)] p-3">
         <label className="flex cursor-pointer items-center justify-between">
           <span>
-            <span className="text-sm font-medium">Crop only a time range</span>
+            <span className="text-sm font-medium">
+              Crop {list.length > 1 ? `${sel + 1} ` : ""}only a time range
+            </span>
             <span className="mt-0.5 block text-xs text-[var(--text-3)]">
-              The rest of the video stays uncropped.
+              Outside it the video stays uncropped — add another crop to cover it.
             </span>
           </span>
           <input
             type="checkbox"
             checked={rangeOn}
-            onChange={(e) => {
-              setRangeOn(e.target.checked);
-              if (e.target.checked && rEnd <= rStart) {
-                setRStart(Math.round(cur * 1000));
-                setREnd(Math.round(Math.min(dur, cur + 10) * 1000));
-              }
-            }}
+            onChange={(e) =>
+              patchSel(
+                e.target.checked
+                  ? {
+                      start_ms: Math.round(cur * 1000),
+                      end_ms: Math.round(Math.min(dur, cur + 10) * 1000),
+                    }
+                  : { start_ms: 0, end_ms: 0 },
+              )
+            }
             className="h-4 w-8 accent-[#6d5dfb]"
           />
         </label>
@@ -1199,8 +1271,8 @@ export function CropModal({
                     value={val}
                     onChange={(e) => {
                       const v = Number(e.target.value);
-                      if (which === "From") setRStart(Math.min(v, rEnd - 500));
-                      else setREnd(Math.max(v, rStart + 500));
+                      if (which === "From") patchSel({ start_ms: Math.min(v, rEnd - 500) });
+                      else patchSel({ end_ms: Math.max(v, rStart + 500) });
                     }}
                     className="flex-1 accent-[#6d5dfb]"
                   />
@@ -1209,8 +1281,8 @@ export function CropModal({
                     title="Use the playhead position"
                     onClick={() =>
                       which === "From"
-                        ? setRStart(Math.min(Math.round(cur * 1000), rEnd - 500))
-                        : setREnd(Math.max(Math.round(cur * 1000), rStart + 500))
+                        ? patchSel({ start_ms: Math.min(Math.round(cur * 1000), rEnd - 500) })
+                        : patchSel({ end_ms: Math.max(Math.round(cur * 1000), rStart + 500) })
                     }
                   >
                     ⤓

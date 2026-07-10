@@ -11,7 +11,6 @@ import {
   getVideo,
   mediaUrl,
   reprocessSession,
-  setTrim,
   type EditSpec,
   type GraphRow,
   type SessionDetail,
@@ -55,11 +54,6 @@ function SessionPageInner({ params }: { params: Promise<{ id: string; sid: strin
   const [spec, setSpec] = useState<EditSpec | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const [vidDur, setVidDur] = useState(0);
-  const [trimIn, setTrimIn] = useState(0);
-  const [trimOut, setTrimOut] = useState(0);
-  const [applying, setApplying] = useState(false);
   const [autoGen, setAutoGen] = useState(false); // user clicked AI Generate -> open editor when ready
 
   const refresh = useCallback(async () => {
@@ -73,8 +67,6 @@ function SessionPageInner({ params }: { params: Promise<{ id: string; sid: strin
       setStatus(st);
       setGraph(g);
       if (g) getVideo(id).then((v) => setSpec(v?.edit_spec ?? null)).catch(() => {});
-      if (d.trim_start_ms != null) setTrimIn(d.trim_start_ms / 1000);
-      if (d.trim_end_ms != null) setTrimOut(d.trim_end_ms / 1000);
       setError(null);
     } catch (e) {
       setError(String(e));
@@ -104,18 +96,6 @@ function SessionPageInner({ params }: { params: Promise<{ id: string; sid: strin
   const videoAsset = detail?.assets.find((a) => a.kind === "raw_video");
   const jobFor = (stage: string) => status?.jobs.find((j) => j.stage === stage);
 
-  async function applyTrim() {
-    setApplying(true);
-    try {
-      await setTrim(sid, trimIn * 1000, trimOut * 1000);
-      await refresh();
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setApplying(false);
-    }
-  }
-
   const processing = status?.status === "processing" || status?.status === "captured";
 
   // Single "AI Generate": open the editor if ready; otherwise start/track the
@@ -139,22 +119,17 @@ function SessionPageInner({ params }: { params: Promise<{ id: string; sid: strin
         ← Project
       </Link>
 
-      <div className="mt-3 flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Session</h1>
-          <p className="mt-0.5 flex items-center gap-2 text-sm text-zinc-500">
-            {detail?.source_type}
-            {status && (
-              <Badge tone={status.status === "ready" ? "green" : processing ? "amber" : "zinc"}>
-                {status.status}
-                {status.latest_version ? ` · v${status.latest_version}` : ""}
-              </Badge>
-            )}
-          </p>
-        </div>
-        <button onClick={() => reprocessSession(sid).then(refresh)} className="btn btn-secondary btn-sm">
-          Re-process
-        </button>
+      <div className="mt-3">
+        <h1 className="text-2xl font-semibold tracking-tight">Session</h1>
+        <p className="mt-0.5 flex items-center gap-2 text-sm text-zinc-500">
+          {detail?.source_type}
+          {status && (
+            <Badge tone={status.status === "ready" ? "green" : processing ? "amber" : "zinc"}>
+              {status.status}
+              {status.latest_version ? ` · v${status.latest_version}` : ""}
+            </Badge>
+          )}
+        </p>
       </div>
 
       {error && (
@@ -172,71 +147,18 @@ function SessionPageInner({ params }: { params: Promise<{ id: string; sid: strin
       )}
 
       <div className="mt-6 grid gap-4 lg:grid-cols-5">
-        {/* left: video + trim */}
+        {/* left: video */}
         {videoAsset && (
           <section className="card overflow-hidden lg:col-span-3">
             <div className="border-b border-zinc-800/60 px-4 py-3">
               <div className="label">Original recording</div>
             </div>
             <video
-              ref={videoRef}
               src={mediaUrl(videoAsset.storage_key)}
               poster={detail?.poster ? mediaUrl(detail.poster) : undefined}
               controls
-              onLoadedMetadata={(e) => {
-                // Header-less WebM reports Infinity until it's normalized to MP4;
-                // treat only a finite, positive duration as real.
-                const raw = e.currentTarget.duration;
-                const d = Number.isFinite(raw) && raw > 0 ? raw : 0;
-                setVidDur(d);
-                if (d && (!trimOut || !Number.isFinite(trimOut) || trimOut > d)) setTrimOut(d);
-              }}
               className="aspect-video w-full bg-black"
             />
-            <div className="space-y-3 p-4">
-              {(["In", "Out"] as const).map((which) => {
-                const val = which === "In" ? trimIn : trimOut;
-                const set = which === "In" ? setTrimIn : setTrimOut;
-                return (
-                  <div key={which} className="flex items-center gap-3 text-sm">
-                    <span className="w-8 text-zinc-500">{which}</span>
-                    <input
-                      type="range"
-                      min={0}
-                      max={vidDur || 1}
-                      step={0.1}
-                      value={val}
-                      onChange={(e) => {
-                        const v = Number(e.target.value);
-                        set(which === "In" ? Math.min(v, trimOut) : Math.max(v, trimIn));
-                      }}
-                      className="flex-1 accent-violet-500"
-                    />
-                    <button
-                      className="btn btn-ghost btn-sm"
-                      onClick={() => videoRef.current && set(videoRef.current.currentTime)}
-                    >
-                      ⤓ playhead
-                    </button>
-                    <span className="w-14 text-right font-mono text-xs text-zinc-400">
-                      {val.toFixed(1)}s
-                    </span>
-                  </div>
-                );
-              })}
-              <div className="flex items-center justify-between border-t border-zinc-800/60 pt-3">
-                <span className="text-xs text-zinc-500">
-                  Keeps {fmt((trimOut - trimIn) * 1000)} for AI generation
-                </span>
-                <button
-                  onClick={applyTrim}
-                  disabled={applying || trimOut <= trimIn}
-                  className="btn btn-secondary btn-sm"
-                >
-                  {applying ? "Applying…" : "Apply trim & regenerate"}
-                </button>
-              </div>
-            </div>
           </section>
         )}
 
