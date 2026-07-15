@@ -1645,6 +1645,7 @@ function BackgroundPanel({
   patchSpec: (p: Partial<EditSpec>) => void;
 }) {
   const cur = spec.background?.enabled ? spec.background.style : "none";
+  const music = spec.music ?? { enabled: false, storage_key: null, gain_db: -18 };
   const pick = (id: string) =>
     patchSpec({
       background:
@@ -1679,6 +1680,40 @@ function BackgroundPanel({
             <span className="text-xs font-medium">{p.label}</span>
           </button>
         ))}
+      </div>
+
+      {/* background music — soft ambient pad mixed under the narration */}
+      <div className="border-t border-[var(--border)] pt-4">
+        <label className="flex cursor-pointer items-center justify-between">
+          <span>
+            <span className="text-sm font-medium">Background music</span>
+            <span className="mt-0.5 block text-xs text-[var(--text-3)]">
+              A smooth, slow ambient pad under the narration. Mixed into the generated video.
+            </span>
+          </span>
+          <input
+            type="checkbox"
+            checked={music.enabled}
+            onChange={(e) => patchSpec({ music: { ...music, enabled: e.target.checked } })}
+            className="h-4 w-8 accent-[#6d5dfb]"
+          />
+        </label>
+        {music.enabled && (
+          <div className="mt-3 flex items-center gap-3 text-xs">
+            <span className="text-[var(--text-3)]">Quiet</span>
+            <input
+              type="range"
+              min={-30}
+              max={-8}
+              step={1}
+              value={music.gain_db ?? -18}
+              onChange={(e) => patchSpec({ music: { ...music, gain_db: Number(e.target.value) } })}
+              className="flex-1 accent-[#6d5dfb]"
+            />
+            <span className="text-[var(--text-3)]">Loud</span>
+            <span className="w-12 text-right font-mono text-[var(--text-2)]">{music.gain_db ?? -18} dB</span>
+          </div>
+        )}
       </div>
     </div>
   );

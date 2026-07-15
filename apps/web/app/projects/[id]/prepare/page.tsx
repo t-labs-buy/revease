@@ -5,7 +5,6 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   activeCrop,
-  estimateOutputMs,
   getGraph,
   getSessionDetail,
   getSessionStatus,
@@ -27,11 +26,6 @@ const mmss = (t: number) =>
   Number.isFinite(t) && t >= 0
     ? `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`
     : "0:00";
-const minSec = (ms: number) => {
-  const s = Math.max(0, Math.round(ms / 1000));
-  return `${Math.floor(s / 60)} min ${String(s % 60).padStart(2, "0")} sec`;
-};
-
 const STAGES = [
   { key: "media", label: "Analyzing footage" },
   { key: "whisper", label: "Transcribing narration" },
@@ -56,7 +50,6 @@ function PrepareInner({ params }: { params: Promise<{ id: string }> }) {
   const [detail, setDetail] = useState<SessionDetail | null>(null);
   const [status, setStatus] = useState<SessionStatus | null>(null);
   const [graph, setGraph] = useState<GraphRow | null>(null);
-  const [spec, setSpec] = useState<EditSpec | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const [dur, setDur] = useState(0);
@@ -75,12 +68,7 @@ function PrepareInner({ params }: { params: Promise<{ id: string }> }) {
     const refresh = () => {
       getSessionDetail(sid).then(setDetail).catch((e) => setError(String(e)));
       getSessionStatus(sid).then(setStatus).catch(() => {});
-      getGraph(id)
-        .then((g) => {
-          setGraph(g);
-          if (g) getVideo(id).then((v) => setSpec(v?.edit_spec ?? null)).catch(() => {});
-        })
-        .catch(() => {});
+      getGraph(id).then(setGraph).catch(() => {});
     };
     refresh();
     const iv = setInterval(refresh, 2500);
@@ -92,12 +80,6 @@ function PrepareInner({ params }: { params: Promise<{ id: string }> }) {
   const doneStages = STAGES.filter((s) => jobFor(s.key)?.status === "done").length;
   const pct = graph ? 100 : Math.round((doneStages / STAGES.length) * 100);
   const processed = !!graph;
-
-  // Estimated final video length. Only the pipeline estimate (needs the analyzed
-  // spec) is trustworthy — while processing we show a clearly-draft guess so the
-  // number can't be mistaken for the real output length.
-  const estMs = spec ? estimateOutputMs(spec) : null;
-  const draftMs = !spec && dur ? Math.round(dur * 850) : null;
 
   async function generate() {
     if (genRef.current) return;
@@ -264,18 +246,10 @@ function PrepareInner({ params }: { params: Promise<{ id: string }> }) {
               {[
                 ["Source length", dur ? mmss(dur) : "—"],
                 ["Language", "English"],
-                [
-                  "Est. final video",
-                  estMs !== null
-                    ? `≈ ${mmss(estMs / 1000)}`
-                    : draftMs !== null
-                      ? `~ ${mmss(draftMs / 1000)} draft`
-                      : "—",
-                ],
               ].map(([k, v]) => (
                 <div key={k} className="flex items-center justify-between py-2.5">
                   <dt className="text-[var(--text-3)]">{k}</dt>
-                  <dd className={`font-mono font-semibold ${estMs === null ? "text-[var(--text-3)]" : ""}`}>{v}</dd>
+                  <dd className="font-mono font-semibold">{v}</dd>
                 </div>
               ))}
             </dl>
@@ -293,18 +267,6 @@ function PrepareInner({ params }: { params: Promise<{ id: string }> }) {
                 "✦ Generate AI content"
               )}
             </button>
-
-            {estMs !== null ? (
-              <p className="mt-3 flex items-baseline gap-2 text-sm">
-                <span className="text-[var(--text-3)]">Final video</span>
-                <span className="font-semibold">≈ {minSec(estMs)}</span>
-                <span className="text-[var(--text-3)]">· editable after generation</span>
-              </p>
-            ) : (
-              <p className="mt-3 text-sm text-[var(--text-3)]">
-                Exact final length appears once analysis finishes.
-              </p>
-            )}
 
             {generating && (
               <ol className="mt-4 space-y-2 border-t border-[var(--border)] pt-3">

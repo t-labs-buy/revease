@@ -57,6 +57,15 @@ def voice_track_key(project_id: str, voice_id: str, speed: float, spec: dict[str
     return f"voicepreview/{project_id}_{voice_id}_{speed}_{voice_signature(spec)}.wav"
 
 
+# Auto-zoom density: zooming every scene makes the whole video feel like it never
+# stops moving. Keep at least this much SOURCE time between zoom-ins (the output
+# is ~2-3x faster than the source, so this lands around one zoom every ~15-20 s
+# of output), and don't bother zooming scenes too short to complete the ease-in.
+# (Mirrors worker.pipeline.render.)
+ZOOM_COOLDOWN_MS = 45_000
+ZOOM_MIN_SCENE_MS = 1_500
+
+
 def _zoom_from_bbox(bbox: Any, vw: int, vh: int) -> dict[str, Any]:
     # speed: 1 (slow ease-in) .. 5 (snappy); drives the preview transition.
     if not (isinstance(bbox, (list, tuple)) and len(bbox) == 4 and vw and vh):
@@ -72,10 +81,21 @@ def build_edit_spec(graph_json: dict[str, Any], viewport: dict[str, int] | None)
     vw = (viewport or {}).get("w", 1280)
     vh = (viewport or {}).get("h", 720)
     segments = []
+    last_zoom_ms = -ZOOM_COOLDOWN_MS  # so the very first scene may zoom
     for step in graph_json.get("steps", []):
         # Script strictly from the spoken narration — no target-label fallback, so
         # a silent step has an empty script rather than invented text.
         words = tokenize(step.get("narration") or "")
+        t0 = int((step.get("t_start") or 0) * 1000)
+        t1 = int((step.get("t_end") or 0) * 1000)
+        zoom = _zoom_from_bbox(step.get("bbox"), vw, vh)
+        # throttle: a zoom on EVERY step reads as continuous zooming — keep only
+        # one per cooldown window (the target stays, so it's easy to re-enable)
+        if zoom["enabled"]:
+            if t0 - last_zoom_ms >= ZOOM_COOLDOWN_MS and t1 - t0 >= ZOOM_MIN_SCENE_MS:
+                last_zoom_ms = t0
+            else:
+                zoom["enabled"] = False
         segments.append(
             {
                 "step_id": step["id"],
@@ -83,9 +103,9 @@ def build_edit_spec(graph_json: dict[str, Any], viewport: dict[str, int] | None)
                 "target": step.get("target"),
                 "words": words,
                 "removed": detect_filler(words),  # filler struck by default
-                "zoom": _zoom_from_bbox(step.get("bbox"), vw, vh),
-                "source_start_ms": int((step.get("t_start") or 0) * 1000),
-                "source_end_ms": int((step.get("t_end") or 0) * 1000),
+                "zoom": zoom,
+                "source_start_ms": t0,
+                "source_end_ms": t1,
                 "screenshot": step.get("screenshot"),
             }
         )

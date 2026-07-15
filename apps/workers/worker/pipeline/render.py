@@ -38,6 +38,14 @@ SILENT_SPEEDUP = 2.5
 SILENT_MAX_MS = 3500
 DEFAULT_PACE = 1.1  # global tempo for narrated scenes (voice + footage together)
 
+# Auto-zoom density: zooming every scene makes the whole video feel like it never
+# stops moving. Keep at least this much SOURCE time between zoom-ins (the output
+# is ~2-3x faster than the source, so this lands around one zoom every ~15-20 s
+# of output), and don't bother zooming scenes too short to complete the ease-in.
+# (Mirrors app.editspec.)
+ZOOM_COOLDOWN_MS = 45_000
+ZOOM_MIN_SCENE_MS = 1_500
+
 # Backdrop presets behind the (inset) recording — ids match the web editor.
 BG_PRESETS: dict[str, tuple[str, str | None]] = {
     "slate": ("0b0f1a", "1e2637"),
@@ -406,6 +414,35 @@ def _render_titlecard(text, dur_ms, dims, font, work, tag, brand: dict | None = 
     return clip
 
 
+def _music_source(music: dict | None, work: Path) -> Path | None:
+    """The background-music file to loop under the narration: the user's uploaded
+    track when set, else a built-in soft ambient pad synthesized once — two warm
+    chords (A / D major) crossfading on a slow 24 s cycle with a gentle breathing
+    tremolo, low-passed so it sits under speech instead of competing with it."""
+    if not music or not music.get("enabled"):
+        return None
+    key = music.get("storage_key")
+    if key:
+        p = store.local_path(key)
+        if p.exists():
+            return p
+        log.warning("music track %s missing; falling back to the built-in pad", key)
+    pad = work / "ambient_pad.wav"
+    if pad.exists():
+        return pad
+    xa = "(0.5+0.5*sin(2*PI*t/24))"  # chord A weight
+    xb = "(0.5-0.5*sin(2*PI*t/24))"  # chord B weight (complementary)
+    chord_a = f"{xa}*(0.30*sin(2*PI*110*t)+0.22*sin(2*PI*164.81*t)+0.20*sin(2*PI*220*t)+0.12*sin(2*PI*277.18*t))"
+    chord_b = f"{xb}*(0.30*sin(2*PI*146.83*t)+0.22*sin(2*PI*220*t)+0.20*sin(2*PI*293.66*t)+0.12*sin(2*PI*369.99*t))"
+    expr = f"(0.75+0.25*sin(2*PI*0.05*t))*({chord_a}+{chord_b})"
+    ok = _run([
+        "ffmpeg", "-y", "-f", "lavfi", "-i", f"aevalsrc={expr}:s=24000:d=48",
+        "-af", "lowpass=f=1500,afade=t=in:d=2,afade=t=out:st=46:d=2",
+        "-c:a", "pcm_s16le", str(pad),
+    ])
+    return pad if ok and pad.exists() else None
+
+
 def _extract_audio(src_video: Path, start_ms: int, end_ms: int, out: Path, tempo: float = 1.0) -> int:
     """Extract the original narration for a step's source window, optionally
     time-compressed (atempo) for pacing. Returns the OUTPUT duration ms."""
@@ -470,20 +507,37 @@ def run_render(render_job_id: str) -> dict:
         # Click/motion auto-zoom, for scenes without an explicit (bbox/user) zoom:
         # 1) recorded click telemetry — zoom EXACTLY where the mouse clicked;
         # 2) else frame-diff motion centroid (visual approximation of the click).
-        zoomed_click = zoomed_motion = 0
+        # Density is throttled: an auto zoom on every scene reads as continuous
+        # zooming, so keep at least ZOOM_COOLDOWN_MS between zoom-ins (user-set
+        # zooms are always honoured and reset the cooldown). Auto zooms already
+        # in the spec that violate the cooldown are thinned out here too, so an
+        # over-zoomed older project calms down on its next render.
+        zoomed_click = zoomed_motion = zoomed_thinned = 0
         if spec.get("motion_zoom", True) and src_video is not None:
             from worker.pipeline.autoedit import _motion_centroid, probe_dims
 
             clicks = _click_points(db, src_session_id)
             vdims = probe_dims(src_video)
+            last_zoom_ms = -ZOOM_COOLDOWN_MS
             for s in segs:
                 z = s.get("zoom") or {}
-                if z.get("enabled"):
-                    continue  # keep an existing bbox / user zoom
-                if z.get("auto") is False:
-                    continue  # user explicitly turned zoom OFF for this scene
                 t0ms = s.get("source_start_ms", 0)
                 t1ms = max(s.get("source_end_ms", 0), t0ms + 600)
+                if z.get("enabled") and not z.get("auto"):
+                    last_zoom_ms = t0ms  # user zoom: always keep, resets the cooldown
+                    continue
+                due = t0ms - last_zoom_ms >= ZOOM_COOLDOWN_MS and t1ms - t0ms >= ZOOM_MIN_SCENE_MS
+                if z.get("enabled"):  # auto zoom already in the spec
+                    if due:
+                        last_zoom_ms = t0ms
+                    else:
+                        z["enabled"] = False  # too soon after the last one — thin it
+                        zoomed_thinned += 1
+                    continue
+                if z.get("auto") is False:
+                    continue  # user explicitly turned zoom OFF for this scene
+                if not due:
+                    continue
                 # the click that opens the scene (scene windows start at click time)
                 hit = next((c for c in clicks if t0ms - 250 <= c[0] <= t1ms), None)
                 if hit:
@@ -493,6 +547,7 @@ def run_render(render_job_id: str) -> dict:
                     cx, cy, scale = _motion_centroid(src_video, t0ms / 1000.0, t1ms / 1000.0, vdims)
                     zoomed_motion += int(scale > 1.0)
                 if scale > 1.0:
+                    last_zoom_ms = t0ms
                     s["zoom"] = {
                         "enabled": True,
                         "scale": round(min(1.8, scale), 3),
@@ -501,11 +556,11 @@ def run_render(render_job_id: str) -> dict:
                         "speed": 3,
                         "auto": True,  # added by the renderer; user-tweakable in the Zoom tab
                     }
-            log.info("auto-zoom: %d click-centered, %d motion-centered of %d scenes",
-                     zoomed_click, zoomed_motion, len(segs))
-            # Persist the auto-added zooms into the edit spec so they show up in the
-            # editor's Zoom tab, where the user can tweak, remove, or add to them.
-            if zoomed_click or zoomed_motion:
+            log.info("auto-zoom: %d click-centered, %d motion-centered, %d thinned of %d scenes",
+                     zoomed_click, zoomed_motion, zoomed_thinned, len(segs))
+            # Persist the auto-added (and thinned) zooms into the edit spec so they
+            # show up in the editor's Zoom tab, where the user can tweak them.
+            if zoomed_click or zoomed_motion or zoomed_thinned:
                 from sqlalchemy.orm.attributes import flag_modified
 
                 flag_modified(vp, "edit_spec_json")
@@ -591,7 +646,8 @@ def run_render(render_job_id: str) -> dict:
         # concat (re-encode for safe, uniform output)
         list_file = work / "concat.txt"
         list_file.write_text("".join(f"file '{c}'\n" for c in clips))
-        overall = _sha([c.name for c in clips])
+        music_src = _music_source(spec.get("music"), work)
+        overall = _sha([c.name for c in clips], spec.get("music") or {})
         out_key = f"renders/{vp.id}/final_{overall}.mp4"
         out_path = store.local_path(out_key)
         ok = _run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file),
@@ -599,6 +655,26 @@ def run_render(render_job_id: str) -> dict:
                    "-c:a", "aac", str(out_path)])
         if not ok:
             raise RuntimeError("concat failed")
+
+        # background music: loop the track under the narration at gain_db (video
+        # stream copied — only the audio is remixed). Best-effort: a mix failure
+        # still delivers the video, just without music.
+        if music_src is not None:
+            gain = float((spec.get("music") or {}).get("gain_db") or -18)
+            mixed = work / f"final_{overall}_music.mp4"
+            ok = _run([
+                "ffmpeg", "-y", "-i", str(out_path), "-stream_loop", "-1", "-i", str(music_src),
+                "-filter_complex",
+                f"[1:a]volume={gain:.1f}dB[bg];"
+                f"[0:a][bg]amix=inputs=2:duration=first:normalize=0:dropout_transition=3,"
+                f"alimiter=limit=0.95[a]",
+                "-map", "0:v", "-map", "[a]", "-c:v", "copy", "-c:a", "aac", "-ar", "24000",
+                "-shortest", str(mixed),
+            ])
+            if ok and mixed.exists():
+                mixed.replace(out_path)
+            else:
+                log.warning("music mix failed; delivering the video without music")
 
         stats = {
             "segments_total": len(segs),
@@ -610,6 +686,8 @@ def run_render(render_job_id: str) -> dict:
             "pace": pace,
             "zoom_click": zoomed_click,
             "zoom_motion": zoomed_motion,
+            "zoom_thinned": zoomed_thinned,
+            "music": music_src is not None,
             "aspect": spec.get("aspect"),
         }
         job.output_key = out_key

@@ -88,20 +88,25 @@ def _gen_prompt(scenes: list[dict], title: str, instruction: str | None) -> str:
     )
 
 
-def _call_claude(system: str, prompt: str, n: int, budget: int) -> list[str]:
+def _call_claude(system: str, prompt: str, n: int) -> list[str]:
     settings = get_settings()
     if not settings.anthropic_api_key:
         raise RuntimeError("no Anthropic API key configured (set REFRACT_ANTHROPIC_API_KEY in .env)")
     import anthropic
 
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key, timeout=120)
+    # Adaptive thinking spends from the same max_tokens cap as the visible
+    # output, so a budget-scaled cap starves short scripts and truncates the
+    # JSON mid-array. max_tokens is a ceiling, not a spend — keep it high.
     msg = client.messages.create(
         model=settings.anthropic_model,
-        max_tokens=min(16000, 2000 + budget * 2),
+        max_tokens=16000,
         thinking={"type": "adaptive"},
         system=system,
         messages=[{"role": "user", "content": prompt}],
     )
+    if msg.stop_reason == "max_tokens":
+        raise ValueError("model output was truncated (max_tokens reached) — try again")
     text = "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
     return _parse(text, n)
 
@@ -112,8 +117,7 @@ def generate_script(scenes: list[dict], title: str = "Product demo", instruction
     existing note as context)."""
     if not scenes:
         return []
-    budget = sum(len(str(s.get("target", ""))) + len(str(s.get("narration", ""))) for s in scenes) + 120 * len(scenes)
-    return _call_claude(GEN_SYSTEM, _gen_prompt(scenes, title, instruction), len(scenes), budget)
+    return _call_claude(GEN_SYSTEM, _gen_prompt(scenes, title, instruction), len(scenes))
 
 
 SKILL_SYSTEM = (
@@ -202,7 +206,7 @@ def restyle_doc(steps: list[dict], instruction: str) -> list[dict]:
         )
         msg = client.messages.create(
             model=settings.anthropic_model,
-            max_tokens=min(16000, 2000 + sum(len(s.get("body", "")) for s in steps) * 2),
+            max_tokens=16000,
             thinking={"type": "adaptive"},
             system=DOC_SYSTEM,
             messages=[{"role": "user", "content": prompt}],
@@ -251,7 +255,7 @@ def generate_title(text: str) -> str:
         client = anthropic.Anthropic(api_key=settings.anthropic_api_key, timeout=60)
         msg = client.messages.create(
             model=settings.anthropic_model,
-            max_tokens=2000,
+            max_tokens=4000,
             thinking={"type": "adaptive"},
             system=TITLE_SYSTEM,
             messages=[{"role": "user", "content": text[:4000]}],
@@ -291,7 +295,7 @@ def suggest_zooms(scenes: list[dict]) -> list[dict]:
     )
     msg = client.messages.create(
         model=settings.anthropic_model,
-        max_tokens=min(8000, 1500 + len(scenes) * 40),
+        max_tokens=8000,
         thinking={"type": "adaptive"},
         system=ZOOM_SYSTEM,
         messages=[{"role": "user", "content": prompt}],
@@ -321,10 +325,10 @@ def rewrite_lines(lines: list[str], instruction: str | None = None) -> list[str]
     import anthropic
 
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key, timeout=120)
-    max_tokens = min(16000, 2000 + sum(len(ln) for ln in clean) * 2)
+    # thinking tokens count against max_tokens — don't scale the cap to input size
     msg = client.messages.create(
         model=settings.anthropic_model,
-        max_tokens=max_tokens,
+        max_tokens=16000,
         thinking={"type": "adaptive"},
         system=SYSTEM,
         messages=[{"role": "user", "content": _prompt(clean, instruction)}],
