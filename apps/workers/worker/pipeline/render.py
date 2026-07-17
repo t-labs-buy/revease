@@ -30,13 +30,7 @@ log = logging.getLogger("refract.pipeline.render")
 
 ASPECTS = {"16:9": (1280, 720), "9:16": (720, 1280), "1:1": (720, 720)}
 FPS = 30
-# Product-video pacing: scenes with no narration are idle/boring stretches —
-# fast-forward them instead of playing them out in real time, and NEVER let one
-# idle stretch (no voice, often no motion) occupy more than SILENT_MAX_MS of the
-# output regardless of how long it ran in the source.
-SILENT_SPEEDUP = 2.5
-SILENT_MAX_MS = 3500
-DEFAULT_PACE = 1.1  # global tempo for narrated scenes (voice + footage together)
+DEFAULT_PACE = 1.0  # global tempo, applies uniformly whether a scene has voice or not
 
 # Auto-zoom density: zooming every scene makes the whole video feel like it never
 # stops moving. Keep at least this much SOURCE time between zoom-ins (the output
@@ -566,9 +560,8 @@ def run_render(render_job_id: str) -> dict:
                 flag_modified(vp, "edit_spec_json")
                 db.commit()
 
-        # Product-video pacing: narrated scenes run at `pace` (voice + footage
-        # together), silent scenes fast-forward at SILENT_SPEEDUP. This is what
-        # turns a 15-min raw capture into a tight demo.
+        # Pacing: every scene — narrated or silent — runs at the same `pace`
+        # tempo (1.0 = original speed, full source length kept either way).
         pace = min(1.5, max(1.0, float(spec.get("pace") or DEFAULT_PACE)))
 
         # per-step audio (TTS, or the original narration if "use original voice") -> timeline
@@ -578,10 +571,9 @@ def run_render(render_job_id: str) -> dict:
             script = effective_script(s.get("words", []), s.get("removed", []))
             src_ms = max(0, s.get("source_end_ms", 0) - s.get("source_start_ms", 0))
             if not script.strip():
-                # No spoken words in this scene: it's an idle stretch — fast-forward
-                # it silently instead of playing it out (or speaking a placeholder),
-                # capped so a long dead stretch can't bloat the output.
-                dur_ms = max(300, min(SILENT_MAX_MS, int(src_ms / (SILENT_SPEEDUP * pace))))
+                # No spoken words in this scene: keep it at full source length
+                # (scaled only by the same `pace` every other scene uses).
+                dur_ms = max(300, int(src_ms / pace))
                 apath = work / f"sil_{s['step_id']}_{dur_ms}.wav"
                 if not apath.exists():
                     _silent_wav(apath, dur_ms)

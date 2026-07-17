@@ -49,6 +49,9 @@ class Settings(BaseSettings):
     whisper_device: str = "cpu"
     whisper_compute: str = "int8"
     disable_whisper: bool = False
+    # Comma-separated product/feature names or jargon Whisper should recognize
+    # verbatim instead of guessing at (e.g. "RevEase, Auto Record, webhook").
+    whisper_vocab: str = ""
 
     # --- Auto Record (AI-driven tab recording) ---
     # Hard cap on agent decisions per run (server force-ends with `done` when hit).

@@ -198,23 +198,36 @@ def run_pipeline(session_id: str) -> dict[str, Any]:
         job.attempts += 1
         db.commit()
         title = f"Workflow ({len(candidate_steps)} steps)"
-        if is_auto:
-            graph = build_graph_auto(
-                candidate_steps,
-                workflow_id=f"wf_{session_id[:8]}",
-                title=title,
-                version=version,
-            )
-        else:
-            graph = build_graph(
-                candidate_steps,
-                workflow_id=f"wf_{session_id[:8]}",
-                title=title,
-                version=version,
-            )
-        _persist_graph(db, sess.project_id, version, graph)
-        job.status = "done"
-        db.commit()
+        try:
+            if is_auto:
+                graph = build_graph_auto(
+                    candidate_steps,
+                    workflow_id=f"wf_{session_id[:8]}",
+                    title=title,
+                    version=version,
+                )
+            else:
+                graph = build_graph(
+                    candidate_steps,
+                    workflow_id=f"wf_{session_id[:8]}",
+                    title=title,
+                    version=version,
+                )
+            _persist_graph(db, sess.project_id, version, graph)
+            job.status = "done"
+            db.commit()
+        except Exception as e:
+            # Unlike media/whisper, extract has no graceful degradation — without a
+            # graph the project is unusable, so surface a real error instead of
+            # leaving the job stuck at "running" forever (silently, on every retry).
+            log.exception("extract stage error")
+            job.status = "error"
+            job.error_json = {"error": str(e)}
+            sess.status = "error"
+            if auto_run is not None:
+                auto_run.status = "error"
+            db.commit()
+            return {"session_id": session_id, "version": version, "error": str(e)}
 
         # Precompute auto-zooms into the edit spec so the editor shows real zooms
         # (preview, Zoom tab, timeline row) — the render then reuses them directly.

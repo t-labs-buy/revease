@@ -120,9 +120,9 @@ def build_edit_spec(graph_json: dict[str, Any], viewport: dict[str, int] | None)
         # auto-zoom toward mouse/cursor activity (clicks) per scene at render time,
         # for scenes without an explicit click/user zoom. On by default.
         "motion_zoom": True,
-        # product-video pacing: narrated scenes run at this tempo (1.0–1.5); silent
-        # stretches are fast-forwarded by the renderer regardless.
-        "pace": 1.1,
+        # pace: uniform tempo (1.0–1.5) applied to every scene, narrated or
+        # silent alike. 1.0 = original speed, full source length kept.
+        "pace": 1.0,
         # backdrop behind the recording (inset with padding) instead of full-bleed.
         "background": {"enabled": False, "style": "indigo"},
         "music": {"enabled": False, "storage_key": None, "gain_db": -18},

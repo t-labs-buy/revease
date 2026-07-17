@@ -229,15 +229,13 @@ export async function setTrim(
 
 /** Approximate AI-generated output duration (ms) from an edit-spec. Mirrors the
  * render pipeline's timing rules exactly:
- *  - silent scene → fast-forwarded (2.5x · pace), hard-capped at 3.5s
+ *  - silent scene → full source length ÷ pace (same as a narrated scene)
  *  - narrated scene, AI voice → ~2.6 words/sec at voice speed · pace
  *  - narrated scene, original voice → source length ÷ pace
  *  - plus intro/outro; skipped scenes excluded. */
 export function estimateOutputMs(spec: EditSpec): number {
   const WPS = 2.6;
-  const SILENT_SPEEDUP = 2.5;
-  const SILENT_MAX_MS = 3500;
-  const pace = Math.min(1.5, Math.max(1, spec.pace ?? 1.1));
+  const pace = Math.min(1.5, Math.max(1, spec.pace ?? 1.0));
   const useOriginal = !!spec.voice.use_original;
   let body = 0;
   for (const s of spec.segments) {
@@ -245,7 +243,7 @@ export function estimateOutputMs(spec: EditSpec): number {
     const srcMs = Math.max(0, s.source_end_ms - s.source_start_ms);
     const words = s.words.filter((_, i) => !s.removed.includes(i));
     if (words.length === 0) {
-      body += Math.max(300, Math.min(SILENT_MAX_MS, srcMs / (SILENT_SPEEDUP * pace)));
+      body += Math.max(300, srcMs / pace);
     } else if (useOriginal) {
       body += Math.max(300, srcMs / pace);
     } else {

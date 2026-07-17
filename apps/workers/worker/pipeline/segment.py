@@ -15,11 +15,55 @@ from typing import Any
 
 from worker.pipeline.providers import Transcript
 
+# A step's on-screen window can run past where its own speech actually stopped
+# (the next step's window starts right where its speech starts, so the silence
+# between them lives inside the earlier step). Once that dead air exceeds this,
+# split it into its own blank, editable step instead of silently absorbing it.
+MIN_GAP_S = 5.0
+
 
 def _nearest_frame(t: float, keyframes: list[tuple[float, str]]) -> str | None:
     if not keyframes:
         return None
     return min(keyframes, key=lambda kf: abs(kf[0] - t))[1]
+
+
+def _split_silence_gaps(
+    steps: list[dict[str, Any]], transcript: Transcript, keyframes: list[tuple[float, str]]
+) -> list[dict[str, Any]]:
+    """Surface long silences (no spoken word for > MIN_GAP_S) as their own blank
+    step so they show up as an editable, empty narration row instead of just
+    padding out the previous step's clip."""
+    if not transcript.words:
+        return steps
+    out: list[dict[str, Any]] = []
+    for step in steps:
+        t0, t1 = step["t_start"], step["t_end"]
+        words_in = [w for w in transcript.words if t0 <= w.t_start < t1]
+        if not words_in:
+            # Already fully silent — one blank row already, nothing to split off.
+            out.append(step)
+            continue
+        speech_end = words_in[-1].t_end
+        gap = t1 - speech_end
+        if gap > MIN_GAP_S:
+            step = {**step, "t_end": round(speech_end, 3)}
+            out.append(step)
+            out.append(
+                {
+                    "action": "custom",
+                    "target": "Silence — add narration",
+                    "selector": None,
+                    "bbox": None,
+                    "screenshot": _nearest_frame(speech_end, keyframes),
+                    "t_start": round(speech_end, 3),
+                    "t_end": round(t1, 3),
+                    "narration_span": "",
+                }
+            )
+        else:
+            out.append(step)
+    return out
 
 
 def segment(
@@ -35,10 +79,12 @@ def segment(
     )
 
     if telemetry == "present" and clicks:
-        return _segment_by_clicks(clicks, transcript, keyframes, screenshots_by_seq, duration_s)
+        steps = _segment_by_clicks(clicks, transcript, keyframes, screenshots_by_seq, duration_s)
+        return _split_silence_gaps(steps, transcript, keyframes)
 
     if transcript.words:
-        return _segment_by_transcript(transcript, keyframes, duration_s)
+        steps = _segment_by_transcript(transcript, keyframes, duration_s)
+        return _split_silence_gaps(steps, transcript, keyframes)
 
     if keyframes:
         return _segment_by_scenes(keyframes, duration_s)
@@ -91,7 +137,10 @@ def _segment_by_clicks(
     return steps
 
 
-def _sentences(transcript: Transcript, max_words: int = 18) -> list[tuple[float, float, str]]:
+def _sentences(transcript: Transcript, max_words: int = 60) -> list[tuple[float, float, str]]:
+    """Split on real sentence boundaries only. `max_words` is a safety valve for
+    run-on speech with no punctuation — not a normal splitting rule — so a sentence
+    is never chopped mid-thought just because it ran past an arbitrary word count."""
     out: list[tuple[float, float, str]] = []
     buf: list = []
     for w in transcript.words:
@@ -108,8 +157,15 @@ def _sentences(transcript: Transcript, max_words: int = 18) -> list[tuple[float,
 def _segment_by_transcript(
     transcript: Transcript, keyframes: list[tuple[float, str]], duration_s: float
 ) -> list[dict[str, Any]]:
+    sentences = _sentences(transcript)
+    n = len(sentences)
     steps: list[dict[str, Any]] = []
-    for t0, t1, text in _sentences(transcript):
+    for i, (t0, t1, text) in enumerate(sentences):
+        # Stitch to the next sentence's start (like _segment_by_clicks does with
+        # click times) so the silence between/around sentences stays inside a
+        # segment instead of falling into a gap that never gets rendered.
+        t_start = 0.0 if i == 0 else t0
+        t_end = sentences[i + 1][0] if i + 1 < n else max(duration_s, t1)
         steps.append(
             {
                 "action": "custom",
@@ -117,8 +173,8 @@ def _segment_by_transcript(
                 "selector": None,
                 "bbox": None,
                 "screenshot": _nearest_frame(t0, keyframes),
-                "t_start": round(t0, 3),
-                "t_end": round(max(t1, t0), 3),
+                "t_start": round(t_start, 3),
+                "t_end": round(max(t_end, t_start), 3),
                 "narration_span": text,
             }
         )

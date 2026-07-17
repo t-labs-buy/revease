@@ -24,8 +24,8 @@ import { Spinner } from "@/components/ui";
 import { VoicePanel } from "@/components/VoicePanel";
 import { ShareButton } from "@/components/ShareButton";
 import { PreviewOverlay } from "@/components/PreviewOverlay";
-import { CropModal, TrimModal } from "@/components/EditModals";
-import { Filmstrip, Waveform, useFilmstrip, useWaveform } from "@/lib/media";
+import { CropModal, resolveDuration } from "@/components/EditModals";
+import { Filmstrip, Waveform, useFilmstrip, useWaveform, type Frame } from "@/lib/media";
 
 type Tone = "Professional" | "Casual" | "Energetic" | "Concise";
 const TONES: Tone[] = ["Professional", "Casual", "Energetic", "Concise"];
@@ -66,6 +66,24 @@ const clock = (t: number) =>
   `${String(Math.floor(t / 60)).padStart(2, "0")}:${String(Math.floor(t % 60)).padStart(2, "0")}.${String(
     Math.floor((t % 1) * 100),
   ).padStart(2, "0")}`;
+// Slice the full-source waveform peaks down to the portion covering [a, b] source-ms.
+const peaksInRange = (peaks: number[], durSec: number, a: number, b: number): number[] => {
+  const total = durSec * 1000;
+  if (!peaks.length || total <= 0) return [];
+  const i0 = Math.max(0, Math.floor((a / total) * peaks.length));
+  const i1 = Math.min(peaks.length, Math.ceil((b / total) * peaks.length));
+  return peaks.slice(i0, i1);
+};
+// Real frames that fall inside [a, b] source-ms; a short block with no sampled
+// frame gets its nearest neighbour so every block shows real footage.
+const framesInRange = (frames: Frame[], a: number, b: number): Frame[] => {
+  const inR = frames.filter((f) => f.t >= a - 1 && f.t <= b + 1);
+  if (inR.length) return inR;
+  const mid = (a + b) / 2;
+  let nearest: Frame | null = null;
+  for (const f of frames) if (!nearest || Math.abs(f.t - mid) < Math.abs(nearest.t - mid)) nearest = f;
+  return nearest ? [nearest] : [];
+};
 
 export default function VideoEditor({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -90,6 +108,7 @@ export default function VideoEditor({ params }: { params: Promise<{ id: string }
   const [tone, setTone] = useState<Tone>("Professional");
   const [zoomBusy, setZoomBusy] = useState(false);
   const [activeTool, setActiveTool] = useState<null | "trim" | "crop">(null); // inline preview tools
+  const timelineRef = useRef<HTMLElement>(null);
 
   // undo / redo history (coalesced snapshots of the whole edit-spec)
   const past = useRef<EditSpec[]>([]);
@@ -323,6 +342,59 @@ export default function VideoEditor({ params }: { params: Promise<{ id: string }
         ...s,
         segments: s.segments.map((g, i) => (i === idx ? { ...g, source_end_ms: end } : g)),
       };
+    });
+  }, []);
+  const resizeSegmentStart = useCallback((idx: number, startMs: number) => {
+    setSpec((s) => {
+      if (!s || !s.segments[idx]) return s;
+      const seg = s.segments[idx];
+      const start = Math.round(Math.max(0, Math.min(startMs, seg.source_end_ms - 300)));
+      return {
+        ...s,
+        segments: s.segments.map((g, i) => (i === idx ? { ...g, source_start_ms: start } : g)),
+      };
+    });
+  }, []);
+
+  // Trim mode (compressed, gap-free timeline): a boundary sits between two
+  // time-adjacent clips (or at the very start/end, where one side is absent).
+  // Dragging it moves both sides together so clips always stay touching —
+  // matching the old Trim popup's "coupled" edge-drag behavior.
+  const moveBoundary = useCallback((leftIdx: number | null, rightIdx: number | null, ms: number) => {
+    setSpec((s) => {
+      if (!s) return s;
+      const MIN = 120;
+      const segs = [...s.segments];
+      const left = leftIdx != null ? segs[leftIdx] : null;
+      const right = rightIdx != null ? segs[rightIdx] : null;
+      const lo = left ? left.source_start_ms + MIN : 0;
+      const hi = right ? right.source_end_ms - MIN : Infinity;
+      const at = Math.round(Math.max(lo, Math.min(ms, hi)));
+      if (left && leftIdx != null) segs[leftIdx] = { ...left, source_end_ms: at };
+      if (right && rightIdx != null) segs[rightIdx] = { ...right, source_start_ms: at };
+      return { ...s, segments: segs };
+    });
+  }, []);
+
+  // On drag release, re-split the two clips' words proportionally to their new
+  // durations so captions/voice stay aligned with the moved boundary.
+  const finalizeBoundary = useCallback((leftIdx: number | null, rightIdx: number | null) => {
+    if (leftIdx == null || rightIdx == null) return;
+    setSpec((s) => {
+      if (!s) return s;
+      const A = s.segments[leftIdx];
+      const B = s.segments[rightIdx];
+      if (!A || !B) return s;
+      const words = [...A.words, ...B.words];
+      const removed = [...A.removed, ...B.removed.map((r) => r + A.words.length)];
+      const durA = Math.max(0, A.source_end_ms - A.source_start_ms);
+      const durB = Math.max(0, B.source_end_ms - B.source_start_ms);
+      const frac = durA / Math.max(1, durA + durB);
+      const wi = Math.round(words.length * frac);
+      const segs = [...s.segments];
+      segs[leftIdx] = { ...A, words: words.slice(0, wi), removed: removed.filter((r) => r < wi) };
+      segs[rightIdx] = { ...B, words: words.slice(wi), removed: removed.filter((r) => r >= wi).map((r) => r - wi) };
+      return { ...s, segments: segs };
     });
   }, []);
 
@@ -626,14 +698,12 @@ export default function VideoEditor({ params }: { params: Promise<{ id: string }
     : -1;
 
   // Output timeline: the player clock/scrubber run on the FINAL video's clock
-  // (pace, silent caps, skips applied) — the original length is never shown.
-  // Mirrors the render pipeline's per-scene timing rules.
+  // (pace and skips applied) — mirrors the render pipeline's per-scene timing
+  // rules, which keep full source length regardless of voice presence.
   const outMap = useMemo(() => {
     if (!spec) return null;
     const WPS = 2.6;
-    const SPEEDUP = 2.5;
-    const CAP = 3500;
-    const pace = Math.min(1.5, Math.max(1, spec.pace ?? 1.1));
+    const pace = Math.min(1.5, Math.max(1, spec.pace ?? 1.0));
     const useOrig = !!spec.voice.use_original;
     const kept = spec.segments
       .filter((s) => !s.skipped)
@@ -644,7 +714,7 @@ export default function VideoEditor({ params }: { params: Promise<{ id: string }
       const src = Math.max(1, s.source_end_ms - s.source_start_ms);
       const words = s.words.filter((_, i) => !s.removed.includes(i));
       const o = !words.length
-        ? Math.max(300, Math.min(CAP, src / (SPEEDUP * pace)))
+        ? Math.max(300, src / pace)
         : useOrig
           ? Math.max(300, src / pace)
           : Math.max(300, (words.length / (WPS * (spec.voice.speed || 1) * pace)) * 1000);
@@ -752,18 +822,7 @@ export default function VideoEditor({ params }: { params: Promise<{ id: string }
 
   return (
     <div className="flex h-screen flex-col bg-[var(--bg)] text-[var(--text)]">
-      {/* Trim / Crop modal windows */}
-      {activeTool === "trim" && source && (
-        <TrimModal
-          source={source}
-          segments={spec.segments}
-          onCancel={() => setActiveTool(null)}
-          onSave={(segs) => {
-            setSpec({ ...spec, segments: segs });
-            setActiveTool(null);
-          }}
-        />
-      )}
+      {/* Crop modal window — trim now happens inline on the timeline below */}
       {activeTool === "crop" && source && (
         <CropModal
           source={source}
@@ -801,9 +860,9 @@ export default function VideoEditor({ params }: { params: Promise<{ id: string }
         <div className="flex items-center gap-2">
           {!dirty && <span className="hidden text-xs text-[var(--text-3)] sm:inline">Saved</span>}
           <select
-            value={String(spec.pace ?? 1.1)}
+            value={String(spec.pace ?? 1.0)}
             onChange={(e) => setSpec({ ...spec, pace: Number(e.target.value) })}
-            title="Product-video pace — tempo of narrated scenes; silent stretches always fast-forward"
+            title="Video pace — applies the same tempo to every scene, narrated or silent"
             className="rounded-lg border border-[var(--border)] bg-[var(--card)] px-2 py-1.5 text-xs text-[var(--text-2)]"
           >
             {[1, 1.1, 1.25, 1.5].map((p) => (
@@ -1144,18 +1203,20 @@ export default function VideoEditor({ params }: { params: Promise<{ id: string }
                 {source ? (
                   <div
                     ref={frameRef}
-                    className="relative flex max-h-full overflow-hidden rounded-2xl shadow-lg"
-                    style={{ background: bgOn ? bgCss : "#000", padding: bgOn ? "2.6%" : undefined }}
+                    className="relative flex h-full max-h-full items-center justify-center overflow-hidden rounded-2xl shadow-lg"
+                    style={{ background: bgOn ? bgCss : "#000", padding: bgOn ? "1.3% 2.6%" : undefined }}
                   >
-                    <div className={`relative flex max-h-full min-h-0 overflow-hidden ${bgOn ? "rounded-xl shadow-lg" : ""}`}>
-                      <div className="flex max-h-full min-h-0" style={cropStyle}>
+                    <div
+                      className={`relative flex max-h-full min-h-0 items-center justify-center overflow-hidden ${bgOn ? "rounded-xl shadow-lg" : ""}`}
+                    >
+                      <div className="flex max-h-full min-h-0 items-center justify-center" style={cropStyle}>
                         <video
                       ref={videoRef}
                       src={mediaUrl(source)}
                       className="max-h-full w-auto"
                       style={zoomStyle}
                       onLoadedMetadata={(e) => {
-                        setDur(e.currentTarget.duration || 0);
+                        resolveDuration(e.currentTarget, setDur);
                         e.currentTarget.muted = wantAiVoice;
                         e.currentTarget.playbackRate = rate;
                       }}
@@ -1326,8 +1387,11 @@ export default function VideoEditor({ params }: { params: Promise<{ id: string }
                 if (c.key === "enhance") void enhance();
                 else if (c.key === "Captions") setSpec({ ...spec, captions: { enabled: !spec.captions.enabled } });
                 else if (c.key === "trim") {
+                  // Trim swaps the timeline below to a focused single-track view
+                  // (inline, no popup) — click again to go back to the full timeline.
                   videoRef.current?.pause();
-                  setActiveTool("trim");
+                  setActiveTool((t) => (t === "trim" ? null : "trim"));
+                  timelineRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
                 } else if (c.key === "crop") {
                   videoRef.current?.pause();
                   setActiveTool("crop");
@@ -1346,29 +1410,48 @@ export default function VideoEditor({ params }: { params: Promise<{ id: string }
         })}
       </div>
 
-      {/* TIMELINE */}
-      <TimelineTracks
-        spec={spec}
-        source={source}
-        totalMs={totalMs}
-        cur={cur}
-        dur={dur}
-        activeIdx={activeIdx}
-        useOriginal={!!useOriginal}
-        tlZoom={tlZoom}
-        setTlZoom={setTlZoom}
-        seekTo={seekTo}
-        onMove={moveSegment}
-        onResize={resizeSegment}
-        onDelete={() => activeIdx >= 0 && deleteSegment(activeIdx)}
-        onDuplicate={() => activeIdx >= 0 && duplicateSegment(activeIdx)}
-        onSkip={() => activeIdx >= 0 && toggleSkip(activeIdx)}
-        onSplit={() => activeIdx >= 0 && splitSegment(activeIdx, cur * 1000)}
-        onUndo={undo}
-        onRedo={redo}
-        canUndo={histState.canUndo}
-        canRedo={histState.canRedo}
-      />
+      {/* TIMELINE — Trim mode swaps in a focused single-track view; otherwise the
+          full Video/Audio/Voice/Captions/Zoom timeline. Both edit the same spec live. */}
+      {activeTool === "trim" ? (
+        <TrimTrack
+          sectionRef={timelineRef}
+          spec={spec}
+          source={source}
+          cur={cur}
+          dur={dur}
+          activeIdx={activeIdx}
+          tlZoom={tlZoom}
+          setTlZoom={setTlZoom}
+          seekTo={seekTo}
+          onMoveBoundary={moveBoundary}
+          onFinalizeBoundary={finalizeBoundary}
+          onDelete={() => activeIdx >= 0 && deleteSegment(activeIdx)}
+          onDuplicate={() => activeIdx >= 0 && duplicateSegment(activeIdx)}
+          onSkip={() => activeIdx >= 0 && toggleSkip(activeIdx)}
+          onSplit={() => activeIdx >= 0 && splitSegment(activeIdx, cur * 1000)}
+          onUndo={undo}
+          onRedo={redo}
+          canUndo={histState.canUndo}
+          canRedo={histState.canRedo}
+          onDone={() => setActiveTool(null)}
+        />
+      ) : (
+        <TimelineTracks
+          sectionRef={timelineRef}
+          spec={spec}
+          source={source}
+          totalMs={totalMs}
+          cur={cur}
+          dur={dur}
+          activeIdx={activeIdx}
+          useOriginal={!!useOriginal}
+          tlZoom={tlZoom}
+          seekTo={seekTo}
+          onMove={moveSegment}
+          onResize={resizeSegment}
+          onResizeStart={resizeSegmentStart}
+        />
+      )}
     </div>
   );
 }
@@ -1841,6 +1924,7 @@ function ElementsPanel({
 }
 
 function TimelineTracks({
+  sectionRef,
   spec,
   source,
   totalMs,
@@ -1849,19 +1933,12 @@ function TimelineTracks({
   activeIdx,
   useOriginal,
   tlZoom,
-  setTlZoom,
   seekTo,
   onMove,
   onResize,
-  onDelete,
-  onDuplicate,
-  onSkip,
-  onSplit,
-  onUndo,
-  onRedo,
-  canUndo,
-  canRedo,
+  onResizeStart,
 }: {
+  sectionRef?: React.RefObject<HTMLElement>;
   spec: EditSpec;
   source: string | null;
   totalMs: number;
@@ -1870,22 +1947,13 @@ function TimelineTracks({
   activeIdx: number;
   useOriginal: boolean;
   tlZoom: number;
-  setTlZoom: (n: number) => void;
   seekTo: (s: number) => void;
   onMove: (i: number, startMs: number) => void;
   onResize: (i: number, endMs: number) => void;
-  onDelete: () => void;
-  onDuplicate: () => void;
-  onSkip: () => void;
-  onSplit: () => void;
-  onUndo: () => void;
-  onRedo: () => void;
-  canUndo: boolean;
-  canRedo: boolean;
+  onResizeStart: (i: number, startMs: number) => void;
 }) {
   const frames = useFilmstrip(source, 24);
   const peaks = useWaveform(source, 400);
-  const skipActive = activeIdx >= 0 && !!spec.segments[activeIdx]?.skipped;
   const blocks = spec.segments.map((s, i) => {
     const left = (s.source_start_ms / totalMs) * 100;
     const width = Math.max(
@@ -1911,6 +1979,7 @@ function TimelineTracks({
               onSeek={() => seekTo(b.s.source_start_ms / 1000)}
               onMove={(startMs) => onMove(b.i, startMs)}
               onResize={(endMs) => onResize(b.i, endMs)}
+              onResizeStart={(startMs) => onResizeStart(b.i, startMs)}
             />
           ))}
         </>
@@ -1962,52 +2031,9 @@ function TimelineTracks({
   ];
 
   return (
-    <section className="border-t border-[var(--border)] bg-[var(--card)] px-6 py-3">
-      {/* toolbar */}
-      <div className="mb-2 flex items-center gap-1 text-[var(--text-2)]">
-        <button onClick={onUndo} disabled={!canUndo} title="Undo (⌘Z)" className="btn btn-ghost btn-sm">
-          ↶ Undo
-        </button>
-        <button onClick={onRedo} disabled={!canRedo} title="Redo (⌘⇧Z)" className="btn btn-ghost btn-sm">
-          ↷ Redo
-        </button>
-        <button onClick={onSplit} className="btn btn-ghost btn-sm" title="Split scene at playhead">
-          ✂ Split
-        </button>
-        <button
-          onClick={onSkip}
-          className={`btn btn-ghost btn-sm ${skipActive ? "text-[#6d5dfb]" : ""}`}
-          title="Skip scene — kept on the timeline but jumped over on playback & render"
-        >
-          {skipActive ? "↩ Unskip" : "⤼ Skip"}
-        </button>
-        <button onClick={onDuplicate} className="btn btn-ghost btn-sm" title="Duplicate scene">
-          ⧉ Duplicate
-        </button>
-        <button onClick={onDelete} className="btn btn-ghost btn-sm" title="Delete scene">
-          🗑 Delete
-        </button>
-        <div className="mx-2 h-4 w-px bg-[var(--border)]" />
-        <span className="text-xs text-[var(--text-3)]" title="Snap (coming soon)">
-          Snap
-        </span>
-        <div className="ml-auto flex items-center gap-2">
-          <span className="text-xs text-[var(--text-3)]">Zoom</span>
-          <input
-            type="range"
-            min={1}
-            max={4}
-            step={0.5}
-            value={tlZoom}
-            onChange={(e) => setTlZoom(Number(e.target.value))}
-            className="w-28 accent-[#6d5dfb]"
-          />
-          <button onClick={() => setTlZoom(1)} className="btn btn-ghost btn-sm">
-            Fit
-          </button>
-        </div>
-      </div>
-
+    <section ref={sectionRef} className="border-t border-[var(--border)] bg-[var(--card)] px-6 py-3">
+      {/* Undo/Redo/Split/Skip/Duplicate/Delete/Zoom live in Trim mode only — this
+          overview timeline is drag-to-move/resize plus click-to-seek. */}
       {/* ruler */}
       <div className="relative ml-20 h-4 overflow-hidden text-[10px] text-[var(--text-3)]">
         {Array.from({ length: 11 }).map((_, i) => (
@@ -2043,6 +2069,436 @@ function TimelineTracks({
   );
 }
 
+function TimelineToolbar({
+  onUndo,
+  onRedo,
+  canUndo,
+  canRedo,
+  onSplit,
+  onSkip,
+  skipActive,
+  onDuplicate,
+  onDelete,
+  tlZoom,
+  setTlZoom,
+  trailing,
+}: {
+  onUndo: () => void;
+  onRedo: () => void;
+  canUndo: boolean;
+  canRedo: boolean;
+  onSplit: () => void;
+  onSkip: () => void;
+  skipActive: boolean;
+  onDuplicate: () => void;
+  onDelete: () => void;
+  tlZoom: number;
+  setTlZoom: (n: number) => void;
+  trailing?: React.ReactNode;
+}) {
+  return (
+    <div className="mb-2 flex items-center gap-1 text-[var(--text-2)]">
+      <button onClick={onUndo} disabled={!canUndo} title="Undo (⌘Z)" className="btn btn-ghost btn-sm">
+        ↶ Undo
+      </button>
+      <button onClick={onRedo} disabled={!canRedo} title="Redo (⌘⇧Z)" className="btn btn-ghost btn-sm">
+        ↷ Redo
+      </button>
+      <button onClick={onSplit} className="btn btn-ghost btn-sm" title="Split scene at playhead">
+        ✂ Split
+      </button>
+      <button
+        onClick={onSkip}
+        className={`btn btn-ghost btn-sm ${skipActive ? "text-[#6d5dfb]" : ""}`}
+        title="Skip scene — kept on the timeline but jumped over on playback & render"
+      >
+        {skipActive ? "↩ Unskip" : "⤼ Skip"}
+      </button>
+      <button onClick={onDuplicate} className="btn btn-ghost btn-sm" title="Duplicate scene">
+        ⧉ Duplicate
+      </button>
+      <button onClick={onDelete} className="btn btn-ghost btn-sm" title="Delete scene">
+        🗑 Delete
+      </button>
+      <div className="mx-2 h-4 w-px bg-[var(--border)]" />
+      <span className="text-xs text-[var(--text-3)]" title="Snap (coming soon)">
+        Snap
+      </span>
+      <div className="ml-auto flex items-center gap-2">
+        <span className="text-xs text-[var(--text-3)]">Zoom</span>
+        <input
+          type="range"
+          min={1}
+          max={4}
+          step={0.5}
+          value={tlZoom}
+          onChange={(e) => setTlZoom(Number(e.target.value))}
+          className="w-28 accent-[#6d5dfb]"
+        />
+        <button onClick={() => setTlZoom(1)} className="btn btn-ghost btn-sm">
+          Fit
+        </button>
+        {trailing}
+      </div>
+    </div>
+  );
+}
+
+// Trim mode: a focused single track (video + waveform baked into each clip),
+// swapped in for the full multi-row timeline — same inline editing, no popup.
+// A layout item is one segment placed on the compressed (gap-free) effective
+// timeline: `start`/`end` are effective ms, `idx` is its real index in spec.segments.
+type TrimLayoutItem = { s: EditSegment; idx: number; start: number; end: number; d: number };
+
+function TrimTrack({
+  sectionRef,
+  spec,
+  source,
+  cur,
+  dur,
+  activeIdx,
+  tlZoom,
+  setTlZoom,
+  seekTo,
+  onMoveBoundary,
+  onFinalizeBoundary,
+  onDelete,
+  onDuplicate,
+  onSkip,
+  onSplit,
+  onUndo,
+  onRedo,
+  canUndo,
+  canRedo,
+  onDone,
+}: {
+  sectionRef?: React.RefObject<HTMLElement>;
+  spec: EditSpec;
+  source: string | null;
+  cur: number;
+  dur: number;
+  activeIdx: number;
+  tlZoom: number;
+  setTlZoom: (n: number) => void;
+  seekTo: (s: number) => void;
+  onMoveBoundary: (leftIdx: number | null, rightIdx: number | null, ms: number) => void;
+  onFinalizeBoundary: (leftIdx: number | null, rightIdx: number | null) => void;
+  onDelete: () => void;
+  onDuplicate: () => void;
+  onSkip: () => void;
+  onSplit: () => void;
+  onUndo: () => void;
+  onRedo: () => void;
+  canUndo: boolean;
+  canRedo: boolean;
+  onDone: () => void;
+}) {
+  const frames = useFilmstrip(source, 48);
+  const peaks = useWaveform(source, 400);
+  const trackRef = useRef<HTMLDivElement>(null);
+  const skipActive = activeIdx >= 0 && !!spec.segments[activeIdx]?.skipped;
+  const activeSeg = activeIdx >= 0 ? spec.segments[activeIdx] : null;
+
+  // Pack every segment back-to-back in "effective" time — no gaps, even if the
+  // source has silence between them — same feel as the old Trim popup.
+  const layout = useMemo(() => {
+    const sorted = spec.segments.map((s, idx) => ({ s, idx })).sort((a, b) => a.s.source_start_ms - b.s.source_start_ms);
+    let off = 0;
+    const items: TrimLayoutItem[] = sorted.map(({ s, idx }) => {
+      const d = Math.max(0, s.source_end_ms - s.source_start_ms);
+      const it = { s, idx, start: off, end: off + d, d };
+      off += d;
+      return it;
+    });
+    return { items, total: Math.max(off, 1) };
+  }, [spec.segments]);
+
+  const effToItem = (eff: number) =>
+    layout.items.find((it) => eff >= it.start && eff < it.end) ?? layout.items[layout.items.length - 1] ?? null;
+  const effToSource = (eff: number) => {
+    const it = effToItem(eff);
+    return it ? it.s.source_start_ms + (eff - it.start) : 0;
+  };
+  const sourceToEff = (srcMs: number) => {
+    const it =
+      layout.items.find((x) => srcMs >= x.s.source_start_ms && srcMs < x.s.source_end_ms) ??
+      [...layout.items].reverse().find((x) => x.s.source_end_ms <= srcMs);
+    if (!it) return 0;
+    return srcMs >= it.s.source_start_ms && srcMs < it.s.source_end_ms
+      ? it.start + (srcMs - it.s.source_start_ms)
+      : it.end;
+  };
+  const effAtClientX = (clientX: number) => {
+    const r = trackRef.current?.getBoundingClientRect();
+    if (!r) return 0;
+    return Math.max(0, Math.min(1, (clientX - r.left) / r.width)) * layout.total;
+  };
+
+  // Scrub by dragging anywhere on the track background (not a block's edge handle).
+  const scrubbing = useRef(false);
+  const onTrackDown = (e: React.PointerEvent) => {
+    scrubbing.current = true;
+    (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+    seekTo(effToSource(effAtClientX(e.clientX)) / 1000);
+  };
+  const onTrackMove = (e: React.PointerEvent) => {
+    if (!scrubbing.current) return;
+    seekTo(effToSource(effAtClientX(e.clientX)) / 1000);
+  };
+  const onTrackUp = () => {
+    scrubbing.current = false;
+  };
+
+  const playheadPct = Math.min(100, (sourceToEff(cur * 1000) / layout.total) * 100);
+
+  return (
+    <section ref={sectionRef} className="border-t border-[var(--border)] bg-[var(--card)] px-6 py-3">
+      <TimelineToolbar
+        onUndo={onUndo}
+        onRedo={onRedo}
+        canUndo={canUndo}
+        canRedo={canRedo}
+        onSplit={onSplit}
+        onSkip={onSkip}
+        skipActive={skipActive}
+        onDuplicate={onDuplicate}
+        onDelete={onDelete}
+        tlZoom={tlZoom}
+        setTlZoom={setTlZoom}
+        trailing={
+          <button onClick={onDone} className="btn btn-ghost btn-sm text-[#6d5dfb]" title="Back to the full timeline">
+            ✓ Done trimming
+          </button>
+        }
+      />
+
+      {/* selection info */}
+      <div className="mt-2 flex items-center gap-3 rounded-lg bg-[var(--hover)] px-3 py-1.5 text-xs">
+        {activeSeg ? (
+          <>
+            <span className="font-semibold text-[var(--text)]">Block {activeIdx + 1}</span>
+            <span className="font-mono text-[var(--text-2)]">
+              {mmss(activeSeg.source_start_ms / 1000)} – {mmss(activeSeg.source_end_ms / 1000)}
+            </span>
+            <span className="font-mono text-[var(--text-2)]">
+              · {((activeSeg.source_end_ms - activeSeg.source_start_ms) / 1000).toFixed(1)}s
+            </span>
+            {activeSeg.skipped && <span className="badge bg-slate-200 text-slate-600">skipped</span>}
+            <span className="text-[var(--text-3)]">drag its side handles to adjust the range</span>
+          </>
+        ) : (
+          <span className="text-[var(--text-3)]">
+            No block selected — click a block to Split / Skip / Delete it, or drag the timeline to scrub.
+          </span>
+        )}
+        <span className="ml-auto font-mono text-[var(--text-2)]">▶ {mmss(cur)}</span>
+      </div>
+
+      {/* ruler */}
+      <div className="relative mt-2 h-5 text-[10px] text-[var(--text-3)]">
+        {Array.from({ length: 10 }).map((_, i) => (
+          <span key={i} style={{ left: `${(i / 9) * 100}%` }} className="absolute -translate-x-1/2">
+            {mmss(((layout.total / 1000) * i) / 9)}
+          </span>
+        ))}
+      </div>
+
+      {/* single track — clips packed with no gaps, real footage + waveform baked into each one */}
+      <div className="overflow-x-auto pb-2">
+        <div
+          ref={trackRef}
+          data-track
+          className="relative h-32 touch-none select-none rounded-lg bg-white ring-1 ring-inset ring-[var(--border)]"
+          style={{ width: `${tlZoom * 100}%`, minWidth: "100%" }}
+          onPointerDown={onTrackDown}
+          onPointerMove={onTrackMove}
+          onPointerUp={onTrackUp}
+        >
+          {layout.items.map((it, pos) => {
+            const left = layout.items[pos - 1]?.idx ?? null;
+            const right = layout.items[pos + 1]?.idx ?? null;
+            return (
+              <TrimBlock
+                key={it.s.step_id}
+                it={it}
+                layoutTotal={layout.total}
+                active={activeIdx === it.idx}
+                skipped={!!it.s.skipped}
+                frames={frames}
+                peaks={peaks}
+                dur={dur}
+                curSrcMs={cur * 1000}
+                onSeek={() => seekTo(it.s.source_start_ms / 1000)}
+                onResizeStart={(ms) => onMoveBoundary(left, it.idx, ms)}
+                onResizeEnd={(ms) => onMoveBoundary(it.idx, right, ms)}
+                onFinalizeStart={() => onFinalizeBoundary(left, it.idx)}
+                onFinalizeEnd={() => onFinalizeBoundary(it.idx, right)}
+                effAtClientX={effAtClientX}
+              />
+            );
+          })}
+          {/* audio still decoding */}
+          {peaks.length === 0 && (
+            <span className="pointer-events-none absolute bottom-1 right-2 rounded bg-black/55 px-1.5 py-0.5 text-[10px] text-white/80">
+              analyzing audio…
+            </span>
+          )}
+          {/* draggable playhead */}
+          {dur > 0 && (
+            <span
+              style={{ left: `${playheadPct}%` }}
+              className="pointer-events-none absolute -top-1 bottom-0 w-0.5 -translate-x-1/2 bg-[#111827]"
+            >
+              <span className="absolute -top-1.5 left-1/2 h-3.5 w-3.5 -translate-x-1/2 rounded-full border-2 border-white bg-[#6d5dfb] shadow" />
+            </span>
+          )}
+        </div>
+      </div>
+      <p className="mt-1 text-[11px] text-[var(--text-3)]">
+        Drag the timeline to scrub. Click a block to select it — drag its side handles to trim the range; the
+        neighboring clip follows so there's never a gap. Split / Skip / Duplicate / Delete act on the selected clip.
+        Click "Done trimming" to return to the full timeline.
+      </p>
+    </section>
+  );
+}
+
+function TrimBlock({
+  it,
+  layoutTotal,
+  active,
+  skipped,
+  frames,
+  peaks,
+  dur,
+  curSrcMs,
+  onSeek,
+  onResizeStart,
+  onResizeEnd,
+  onFinalizeStart,
+  onFinalizeEnd,
+  effAtClientX,
+}: {
+  it: TrimLayoutItem;
+  layoutTotal: number;
+  active: boolean;
+  skipped: boolean;
+  frames: Frame[];
+  peaks: number[];
+  dur: number;
+  curSrcMs: number;
+  onSeek: () => void;
+  onResizeStart: (ms: number) => void;
+  onResizeEnd: (ms: number) => void;
+  onFinalizeStart: () => void;
+  onFinalizeEnd: () => void;
+  effAtClientX: (clientX: number) => number;
+}) {
+  const left = (it.start / layoutTotal) * 100;
+  const width = Math.max(0.6, (it.d / layoutTotal) * 100);
+  const text = eff(it.s);
+  const blkFrames = framesInRange(frames, it.s.source_start_ms, it.s.source_end_ms);
+  const blkPeaks = dur > 0 ? peaksInRange(peaks, dur, it.s.source_start_ms, it.s.source_end_ms) : [];
+  const dragEdge = useRef<"l" | "r" | null>(null);
+
+  const begin = (edge: "l" | "r") => (e: React.PointerEvent<HTMLElement>) => {
+    e.stopPropagation();
+    dragEdge.current = edge;
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+  };
+  const move = (e: React.PointerEvent<HTMLElement>) => {
+    if (!dragEdge.current) return;
+    e.stopPropagation();
+    // Anchor the drag to this block's own start — effective and source ms move
+    // in lockstep within one block, so this maps the pointer straight to source ms.
+    const ms = Math.round(it.s.source_start_ms + (effAtClientX(e.clientX) - it.start));
+    if (dragEdge.current === "l") onResizeStart(ms);
+    else onResizeEnd(ms);
+  };
+  const end = (e: React.PointerEvent<HTMLElement>) => {
+    e.stopPropagation();
+    if (!dragEdge.current) return;
+    if (dragEdge.current === "l") onFinalizeStart();
+    else onFinalizeEnd();
+    dragEdge.current = null;
+  };
+
+  return (
+    <div
+      onPointerUp={() => {
+        if (!dragEdge.current) onSeek();
+      }}
+      style={{ left: `${left}%`, width: `${width}%` }}
+      title={skipped ? `Skipped — ${text}` : text}
+      className={`absolute top-0 h-full overflow-hidden rounded-md bg-[#0e1116] ring-1 ring-inset ${
+        active ? "ring-2 ring-[#6d5dfb]" : "ring-black/20"
+      }`}
+    >
+      {/* real frames */}
+      <span className="absolute inset-0 flex">
+        {blkFrames.length ? (
+          blkFrames.map((f, i) => (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img key={i} src={f.url} alt="" draggable={false} className="h-full flex-1 object-cover" style={{ minWidth: 0 }} />
+          ))
+        ) : (
+          <span className="h-full w-full bg-[var(--brand-2)]" />
+        )}
+      </span>
+      {/* start time · duration chip */}
+      {width > 5 && (
+        <span className="pointer-events-none absolute left-1 top-1 z-10 rounded bg-black/60 px-1 py-px font-mono text-[9px] leading-snug text-white">
+          {mmss(it.s.source_start_ms / 1000)} · {(it.d / 1000).toFixed(0)}s
+        </span>
+      )}
+      {/* real audio peaks */}
+      {blkPeaks.length > 0 && (
+        <span className="absolute inset-x-0 bottom-0 flex h-10 items-end gap-[1px] bg-gradient-to-t from-black/85 via-black/50 to-transparent px-0.5 pb-0.5">
+          {blkPeaks.map((p, i) => {
+            const barSrc =
+              it.s.source_start_ms + ((i + 0.5) / blkPeaks.length) * (it.s.source_end_ms - it.s.source_start_ms);
+            return (
+              <span
+                key={i}
+                className={`flex-1 rounded-t-sm ${barSrc <= curSrcMs ? "bg-[#8b7dff]" : "bg-white/30"}`}
+                style={{ height: `${Math.max(2, p * 100)}%`, minWidth: 1 }}
+              />
+            );
+          })}
+        </span>
+      )}
+      {/* skipped overlay */}
+      {skipped && (
+        <span className="absolute inset-0 flex items-center justify-center bg-[repeating-linear-gradient(45deg,rgba(17,24,39,.55),rgba(17,24,39,.55)_6px,rgba(154,161,178,.55)_6px,rgba(154,161,178,.55)_12px)]">
+          {width > 6 && <span className="rounded bg-black/50 px-1 text-[10px] font-medium text-white">⤼ skipped</span>}
+        </span>
+      )}
+      {active && (
+        <>
+          <span
+            onPointerDown={begin("l")}
+            onPointerMove={move}
+            onPointerUp={end}
+            title="Drag to adjust start"
+            className="absolute inset-y-0 -left-1.5 z-10 flex w-4 cursor-ew-resize touch-none items-center justify-center rounded-l-md bg-[#6d5dfb] hover:bg-[#5b4ce6]"
+          >
+            <span className="h-6 w-0.5 rounded bg-white" />
+          </span>
+          <span
+            onPointerDown={begin("r")}
+            onPointerMove={move}
+            onPointerUp={end}
+            title="Drag to adjust end"
+            className="absolute inset-y-0 -right-1.5 z-10 flex w-4 cursor-ew-resize touch-none items-center justify-center rounded-r-md bg-[#6d5dfb] hover:bg-[#5b4ce6]"
+          >
+            <span className="h-6 w-0.5 rounded bg-white" />
+          </span>
+        </>
+      )}
+    </div>
+  );
+}
+
 function DraggableBlock({
   b,
   totalMs,
@@ -2051,6 +2507,7 @@ function DraggableBlock({
   onSeek,
   onMove,
   onResize,
+  onResizeStart,
 }: {
   b: { s: EditSegment; i: number; left: number; width: number; text: string };
   totalMs: number;
@@ -2059,19 +2516,24 @@ function DraggableBlock({
   onSeek: () => void;
   onMove: (startMs: number) => void;
   onResize: (endMs: number) => void;
+  onResizeStart: (startMs: number) => void;
 }) {
-  const drag = useRef<{ mode: "move" | "resize"; startX: number; orig: number; trackW: number; moved: boolean } | null>(
-    null,
-  );
+  const drag = useRef<{
+    mode: "move" | "resize" | "resize-start";
+    startX: number;
+    orig: number;
+    trackW: number;
+    moved: boolean;
+  } | null>(null);
 
-  const begin = (mode: "move" | "resize") => (e: React.PointerEvent<HTMLElement>) => {
+  const begin = (mode: "move" | "resize" | "resize-start") => (e: React.PointerEvent<HTMLElement>) => {
     e.stopPropagation();
     const track = e.currentTarget.closest("[data-track]") as HTMLElement | null;
     const trackW = track?.clientWidth || 1;
     drag.current = {
       mode,
       startX: e.clientX,
-      orig: mode === "move" ? b.s.source_start_ms : b.s.source_end_ms,
+      orig: mode === "move" || mode === "resize-start" ? b.s.source_start_ms : b.s.source_end_ms,
       trackW,
       moved: false,
     };
@@ -2086,6 +2548,8 @@ function DraggableBlock({
     const len = b.s.source_end_ms - b.s.source_start_ms;
     if (d.mode === "move") {
       onMove(Math.max(0, Math.min(d.orig + deltaMs, totalMs - len)));
+    } else if (d.mode === "resize-start") {
+      onResizeStart(Math.max(0, Math.min(d.orig + deltaMs, b.s.source_end_ms - 300)));
     } else {
       onResize(Math.max(b.s.source_start_ms + 300, Math.min(d.orig + deltaMs, totalMs)));
     }
@@ -2114,11 +2578,18 @@ function DraggableBlock({
         {skipped ? "⤼ skipped" : b.text}
       </span>
       <span
+        onPointerDown={begin("resize-start")}
+        onPointerMove={move}
+        onPointerUp={end}
+        className="absolute left-0 top-0 h-full w-2 cursor-ew-resize rounded-l-md bg-[#6d5dfb]/50 opacity-0 transition-opacity group-hover/blk:opacity-100"
+        title="Trim start"
+      />
+      <span
         onPointerDown={begin("resize")}
         onPointerMove={move}
         onPointerUp={end}
         className="absolute right-0 top-0 h-full w-2 cursor-ew-resize rounded-r-md bg-[#6d5dfb]/50 opacity-0 transition-opacity group-hover/blk:opacity-100"
-        title="Resize"
+        title="Trim end"
       />
     </div>
   );
