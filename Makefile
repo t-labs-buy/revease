@@ -7,6 +7,11 @@ WORKERS_DIR := apps/workers
 WEB_DIR := apps/web
 GRAPH_PY := packages/workflow-graph/python
 
+# Homebrew's plain ffmpeg is a slim build without drawtext (no libfreetype), which
+# the renderer needs for captions. Prefer the keg-only ffmpeg-full when present;
+# harmless no-op on Linux/Docker where the system ffmpeg already has drawtext.
+export PATH := /opt/homebrew/opt/ffmpeg-full/bin:$(PATH)
+
 .PHONY: help install redis dev api worker web test test-py test-js lint typecheck fmt clean
 
 help: ## Show this help

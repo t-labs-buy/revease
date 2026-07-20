@@ -14,7 +14,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import subprocess
+import textwrap
 from pathlib import Path
 
 from sqlalchemy import select
@@ -28,9 +30,16 @@ from worker.pipeline.tts import _silent_wav, synth_step
 
 log = logging.getLogger("refract.pipeline.render")
 
-ASPECTS = {"16:9": (1280, 720), "9:16": (720, 1280), "1:1": (720, 720)}
+ASPECTS = {"16:9": (1920, 1080), "9:16": (1080, 1920), "1:1": (1080, 1080)}
 FPS = 30
 DEFAULT_PACE = 1.0  # global tempo, applies uniformly whether a scene has voice or not
+# Breathing room after each narrated scene: without it, one script's narration ends
+# and the next starts on the very next frame, which reads as rushed. The pause is
+# baked into the scene's audio (and thus its timeline slot), so nothing drifts.
+SCENE_GAP_MS = 800
+# Screen recordings are mostly text; the x264 default (crf 23) — applied twice,
+# once per segment and again at concat — smears it. 18 is visually lossless.
+CRF = "18"
 
 # Auto-zoom density: zooming every scene makes the whole video feel like it never
 # stops moving. Keep at least this much SOURCE time between zoom-ins (the output
@@ -63,13 +72,23 @@ _FONT_CANDIDATES = [
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
     "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    # macOS (local dev runs the worker outside Docker)
+    "/System/Library/Fonts/Supplemental/Arial.ttf",
+    "/System/Library/Fonts/Helvetica.ttc",
 ]
 
 
 def _font() -> str | None:
+    # No font OR no drawtext filter (slim ffmpeg builds lack libfreetype) means
+    # captions can't be burned — skip them rather than failing every segment.
+    proc = subprocess.run(["ffmpeg", "-hide_banner", "-filters"], capture_output=True, text=True)
+    if "drawtext" not in proc.stdout:
+        log.warning("this ffmpeg has no drawtext filter — captions/titles will be skipped")
+        return None
     for f in _FONT_CANDIDATES:
         if Path(f).exists():
             return f
+    log.warning("no caption font found — captions/titles will be skipped")
     return None
 
 
@@ -83,6 +102,27 @@ def _run(cmd: list[str]) -> bool:
 
 def _sha(*parts) -> str:
     return hashlib.sha1(json.dumps(parts, sort_keys=True, default=str).encode()).hexdigest()[:16]
+
+
+CAPTION_MAX_CHARS = 86  # ~90% of the frame width at fontsize w/48
+
+
+def _caption_chunks(script: str, max_chars: int = CAPTION_MAX_CHARS) -> list[str]:
+    """Split a scene script into caption-sized pieces: one sentence per caption,
+    with overlong sentences broken further on word boundaries so each caption is
+    a single line that fits the frame."""
+    out: list[str] = []
+    for sent in re.split(r"(?<=[.!?])\s+", script.strip()):
+        sent = sent.strip()
+        while len(sent) > max_chars:
+            cut = sent.rfind(" ", 0, max_chars)
+            if cut <= 0:
+                break
+            out.append(sent[:cut])
+            sent = sent[cut + 1:].strip()
+        if sent:
+            out.append(sent)
+    return out
 
 
 def _drawtext(font: str | None, textfile: Path, size: int, y: str) -> str | None:
@@ -256,8 +296,8 @@ def _render_segment(seg, seg_tl, src_video, dims, captions, font, work: Path,
     crop_eff = _crop_for_segment(crops, seg)
     zoom_eff = _remap_zoom_into_crop(seg.get("zoom"), crop_eff)
 
-    clip_hash = _sha("v4", seg.get("step_id"), script, tts_path.name, zoom_eff,
-                     dims, captions, seg.get("screenshot"), seg.get("source_start_ms"),
+    clip_hash = _sha("v5", seg.get("step_id"), script, tts_path.name, zoom_eff,
+                     dims, captions, font, seg.get("screenshot"), seg.get("source_start_ms"),
                      seg.get("source_end_ms"), round(dur_s, 3), use_footage,
                      crop_eff, elements, str(logo), logo_pos, background)
     clip = work / f"seg_{seg_tl.index:03d}_{clip_hash}.mp4"
@@ -287,11 +327,22 @@ def _render_segment(seg, seg_tl, src_video, dims, captions, font, work: Path,
     # zoom -> captions -> overlay elements -> normalize
     parts.append(_zoom_filter(zoom_eff, dims, dur_s))
     if captions and script:
-        capfile = work / f"cap_{clip_hash}.txt"
-        capfile.write_text(script)
-        dt = _drawtext(font, capfile, size=int(dims[0] / 36), y="h-th-40")
-        if dt:
-            parts.append(dt)
+        # One sentence at a time, switching as the voice progresses. TTS gives no
+        # word timestamps, so each chunk's window is proportional to its share of
+        # the script's characters within the voiced part of the slot (the trailing
+        # SCENE_GAP_MS breather stays caption-free).
+        chunks = _caption_chunks(script)
+        voiced_s = max(0.3, dur_s - seg.get("_gap_ms", 0) / 1000.0)
+        total_chars = sum(len(c) for c in chunks) or 1
+        t0 = 0.0
+        for i, chunk in enumerate(chunks):
+            capfile = work / f"cap_{clip_hash}_{i}.txt"
+            capfile.write_text(chunk)
+            t1 = voiced_s if i == len(chunks) - 1 else t0 + voiced_s * len(chunk) / total_chars
+            dt = _drawtext(font, capfile, size=int(dims[0] / 48), y="h-th-40")
+            if dt:
+                parts.append(f"{dt}:enable='between(t,{t0:.3f},{t1:.3f})'")
+            t0 = t1
     parts.extend(_element_filters(elements, dims, font, work, clip_hash,
                                   seg.get("source_start_ms", 0), seg.get("source_end_ms", 0)))
     parts += ["format=yuv420p", f"fps={FPS}", "setsar=1"]
@@ -330,7 +381,7 @@ def _render_segment(seg, seg_tl, src_video, dims, captions, font, work: Path,
         last = "branded"
     fc = ";".join(steps)
     cmd += ["-filter_complex", fc, "-map", f"[{last}]", "-map", "1:a",
-            "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", CRF, "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-ar", "24000", "-shortest", "-t", f"{dur_s:.3f}", str(clip)]
     ok = _run(cmd)
     if not ok:
@@ -374,7 +425,7 @@ def _render_titlecard(text, dur_ms, dims, font, work, tag, brand: dict | None = 
     if clip.exists():
         return clip
     capfile = work / f"{tag}_{chash}.txt"
-    capfile.write_text(text or "")
+    capfile.write_text(textwrap.fill(text or "", width=30))
     dt = _drawtext(font, capfile, size=int(w / 20), y="(h-th)/2")
 
     # background: brand gradient (primary -> accent) or the default dark slate
@@ -402,7 +453,7 @@ def _render_titlecard(text, dur_ms, dims, font, work, tag, brand: dict | None = 
     _run([
         "ffmpeg", "-y", *inputs,
         "-filter_complex", fc, "-map", "[v]", "-map", "1:a",
-        "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", CRF, "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-ar", "24000", "-t", f"{dur_s:.3f}", str(clip),
     ])
     return clip
@@ -450,6 +501,13 @@ def _extract_audio(src_video: Path, start_ms: int, end_ms: int, out: Path, tempo
     cmd += ["-c:a", "pcm_s16le", str(out)]
     _run(cmd)
     return max(300, dur_ms)
+
+
+def _pad_audio(src: Path, out: Path, pad_ms: int) -> None:
+    """Append pad_ms of silence to a narration clip (the inter-scene breather)."""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    _run(["ffmpeg", "-y", "-i", str(src), "-af", f"apad=pad_dur={pad_ms / 1000:.3f}",
+          "-ac", "1", "-ar", "24000", "-c:a", "pcm_s16le", str(out)])
 
 
 def run_render(render_job_id: str) -> dict:
@@ -591,8 +649,16 @@ def run_render(render_job_id: str) -> dict:
                                speed=voice.get("speed", 1.0) * pace)
                 tts_cached += int(r.cached)
                 tts_synth += int(not r.cached)
-                dur_ms = r.duration_ms
-                s["_audio_path"] = str(store.local_path(r.storage_key))
+                # pad a breather after the narration so scenes don't run into each
+                # other; the padded copy lives in the work dir (the TTS cache entry
+                # itself stays pristine)
+                tts_local = store.local_path(r.storage_key)
+                padded = work / f"pad{SCENE_GAP_MS}_{tts_local.stem}.wav"
+                if not padded.exists():
+                    _pad_audio(tts_local, padded, SCENE_GAP_MS)
+                dur_ms = r.duration_ms + SCENE_GAP_MS
+                s["_audio_path"] = str(padded if padded.exists() else tts_local)
+                s["_gap_ms"] = SCENE_GAP_MS  # captions stop before the breather
             z = s.get("zoom") or {}
             step_inputs.append(
                 StepInput(
@@ -643,7 +709,7 @@ def run_render(render_job_id: str) -> dict:
         out_key = f"renders/{vp.id}/final_{overall}.mp4"
         out_path = store.local_path(out_key)
         ok = _run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file),
-                   "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+                   "-c:v", "libx264", "-preset", "veryfast", "-crf", CRF, "-pix_fmt", "yuv420p",
                    "-c:a", "aac", str(out_path)])
         if not ok:
             raise RuntimeError("concat failed")
