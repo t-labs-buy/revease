@@ -1,7 +1,7 @@
 "use client";
 
 import { Rnd } from "react-rnd";
-import type { EditSpec, EditElement } from "@/lib/api";
+import type { EditSpec, EditElement, CropRegion } from "@/lib/api";
 
 type Frame = { w: number; h: number };
 
@@ -19,6 +19,9 @@ export function PreviewOverlay({
   frame,
   tab,
   cropEditing = false,
+  crops = [],
+  cropSel = 0,
+  onPatchCrop,
   spec,
   setSpec,
   selId,
@@ -28,6 +31,9 @@ export function PreviewOverlay({
   frame: Frame;
   tab: string;
   cropEditing?: boolean;
+  crops?: CropRegion[];
+  cropSel?: number;
+  onPatchCrop?: (idx: number, patch: Partial<CropRegion>) => void;
   spec: EditSpec;
   setSpec: (s: EditSpec) => void;
   selId: string | null;
@@ -37,41 +43,37 @@ export function PreviewOverlay({
   const { w, h } = frame;
   if (!w || !h) return null;
 
-  const crop = spec.crop ?? { enabled: false, x: 0, y: 0, w: 1, h: 1 };
+  const sel = Math.min(cropSel, crops.length - 1);
+  const crop = crops[sel];
   const allElements = spec.elements ?? [];
-  const cropEdit = cropEditing && crop.enabled;
+  const cropEdit = cropEditing && !!crop;
   const elEdit = tab === "Elements";
   // While editing show every element (so any can be positioned); otherwise show
   // only those active at the current time.
   const elements = elEdit ? allElements : allElements.filter((e) => elActive(e, curMs));
 
-  const setCrop = (c: Partial<NonNullable<EditSpec["crop"]>>) =>
-    setSpec({ ...spec, crop: { ...crop, ...c } });
+  const setCrop = (patch: Partial<CropRegion>) => onPatchCrop?.(sel, patch);
   const setEl = (id: string, patch: Partial<EditElement>) =>
     setSpec({ ...spec, elements: elements.map((e) => (e.id === id ? { ...e, ...patch } : e)) });
 
-  const L = crop.x * 100,
-    T = crop.y * 100,
-    R = (crop.x + crop.w) * 100,
-    B = (crop.y + crop.h) * 100;
+  const L = (crop?.x ?? 0) * 100,
+    T = (crop?.y ?? 0) * 100,
+    R = ((crop?.x ?? 0) + (crop?.w ?? 1)) * 100,
+    B = ((crop?.y ?? 0) + (crop?.h ?? 1)) * 100;
 
   return (
     <div className="pointer-events-none absolute inset-0 overflow-hidden">
       {/* crop: darken outside + a draggable box — only while EDITING the crop.
           Otherwise the preview video itself is reframed to the crop region. */}
-      {cropEdit && (
+      {cropEdit && crop && (
         <>
           <div className="absolute bg-black/50" style={{ left: 0, top: 0, width: "100%", height: `${T}%` }} />
           <div className="absolute bg-black/50" style={{ left: 0, top: `${B}%`, width: "100%", bottom: 0 }} />
           <div className="absolute bg-black/50" style={{ left: 0, top: `${T}%`, width: `${L}%`, height: `${B - T}%` }} />
           <div className="absolute bg-black/50" style={{ left: `${R}%`, top: `${T}%`, right: 0, height: `${B - T}%` }} />
           <Rnd
-            className={`${cropEdit ? "pointer-events-auto" : "pointer-events-none"} border-2 ${
-              cropEdit ? "border-violet-400" : "border-white/50"
-            }`}
+            className="pointer-events-auto border-2 border-violet-400"
             bounds="parent"
-            disableDragging={!cropEdit}
-            enableResizing={cropEdit}
             size={{ width: crop.w * w, height: crop.h * h }}
             position={{ x: crop.x * w, y: crop.y * h }}
             onDragStop={(_e, d) => setCrop({ x: clamp01(d.x / w), y: clamp01(d.y / h) })}

@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Rnd } from "react-rnd";
-import { mediaUrl, type CropRegion, type EditSegment, type EditSpec } from "@/lib/api";
+import { mediaUrl, type CropRegion, type EditSegment } from "@/lib/api";
 import { Filmstrip, useFilmstrip, useWaveform, type Frame } from "@/lib/media";
 
 const mmss = (t: number) =>

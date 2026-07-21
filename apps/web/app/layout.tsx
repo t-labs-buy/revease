@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
 import { BottomNav } from "@/components/BottomNav";
+import { Footer } from "@/components/Footer";
 
 const inter = Inter({ subsets: ["latin"], variable: "--font-inter" });
 
@@ -28,7 +29,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <div className="absolute top-1/4 right-0 h-[420px] w-[420px] rounded-full bg-fuchsia-600/8 blur-[130px]" />
         </div>
 
-        <div className="min-h-screen pb-24">{children}</div>
+        <div className="flex min-h-screen flex-col pb-24">
+          <div className="flex-1">{children}</div>
+          <Footer />
+        </div>
         <BottomNav />
       </body>
     </html>

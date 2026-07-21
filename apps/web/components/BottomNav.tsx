@@ -25,14 +25,14 @@ export function BottomNav() {
 
   return (
     <div
-      className="fixed bottom-5 left-1/2 z-50 -translate-x-1/2"
+      className="fixed right-5 top-1/2 z-50 -translate-y-1/2"
       onMouseEnter={() => setOpen(true)}
       onMouseLeave={() => setOpen(false)}
     >
-      {/* expanded menu */}
+      {/* expanded menu — absolutely positioned so it never shifts the collapsed handle off-center */}
       <div
-        className={`mb-2 flex items-end gap-1 rounded-[26px] border border-[var(--border)] bg-[var(--card)] p-2.5 shadow-2xl shadow-black/20 transition-all duration-200 ${
-          open ? "translate-y-0 opacity-100" : "pointer-events-none translate-y-3 opacity-0"
+        className={`absolute bottom-full right-0 mb-2 flex w-[168px] flex-col items-stretch gap-1 rounded-[22px] border border-[var(--border)] bg-[var(--card)] p-2.5 shadow-2xl shadow-black/20 transition-all duration-200 ${
+          open ? "translate-x-0 opacity-100" : "pointer-events-none translate-x-3 opacity-0"
         }`}
       >
         {NAV.map(({ href, label, icon: Icon, match }) => {
@@ -42,15 +42,15 @@ export function BottomNav() {
               key={href}
               href={href}
               onClick={() => setOpen(false)}
-              className={`flex w-[92px] flex-col items-center gap-1.5 rounded-2xl px-2 py-2.5 transition-colors ${
+              className={`flex items-center gap-2.5 rounded-2xl px-3 py-2 transition-colors ${
                 on ? "bg-[var(--hover)]" : "hover:bg-[var(--hover)]"
               }`}
             >
               <span className={on ? "text-[var(--text)]" : "text-[var(--text-3)]"}>
-                <Icon width={22} height={22} />
+                <Icon width={20} height={20} />
               </span>
               <span
-                className={`text-center text-[11px] leading-tight ${
+                className={`text-[13px] leading-tight ${
                   on ? "font-semibold text-[var(--text)]" : "text-[var(--text-3)]"
                 }`}
               >
@@ -59,7 +59,7 @@ export function BottomNav() {
             </Link>
           );
         })}
-        <div className="mx-1 flex flex-col items-center gap-1.5 px-1 py-2.5">
+        <div className="flex items-center gap-2.5 px-3 py-2">
           <ThemeToggle compact />
         </div>
       </div>
@@ -67,7 +67,7 @@ export function BottomNav() {
       {/* collapsed handle — always visible */}
       <button
         onClick={() => setOpen((v) => !v)}
-        className="mx-auto flex items-center gap-2.5 rounded-full border border-[var(--border)] bg-[var(--card)] px-5 py-2 shadow-xl shadow-black/20"
+        className="flex items-center gap-2.5 rounded-full border border-[var(--border)] bg-[var(--card)] px-5 py-2 shadow-xl shadow-black/20"
       >
         <span className="flex h-6 w-6 items-center justify-center rounded-md bg-gradient-to-br from-[#6d5dfb] to-[#a855f7] text-[11px] font-bold text-white">
           R

@@ -15,6 +15,7 @@ import {
   rewriteLines,
   startVoiceTrack,
   suggestZooms,
+  type CropRegion,
   type EditElement,
   type EditSegment,
   type EditSpec,
@@ -24,7 +25,7 @@ import { Spinner } from "@/components/ui";
 import { VoicePanel } from "@/components/VoicePanel";
 import { ShareButton } from "@/components/ShareButton";
 import { PreviewOverlay } from "@/components/PreviewOverlay";
-import { CropModal, resolveDuration } from "@/components/EditModals";
+import { resolveDuration } from "@/components/EditModals";
 import {
   Filmstrip,
   Waveform,
@@ -40,6 +41,15 @@ const TONE_INSTR: Record<Tone, string> = {
   Casual: "Use a friendly, casual, conversational tone.",
   Energetic: "Use an upbeat, energetic, enthusiastic tone.",
   Concise: "Make each line as concise as possible while keeping the meaning.",
+};
+const DEFAULT_CROP: CropRegion = {
+  enabled: true,
+  x: 0.12,
+  y: 0.12,
+  w: 0.76,
+  h: 0.76,
+  start_ms: 0,
+  end_ms: 0,
 };
 const ENHANCE_INSTR =
   "Tighten every line: remove filler, redundancy and hedging, fix awkward phrasing, and " +
@@ -161,6 +171,7 @@ export default function VideoEditor({
   const [tone, setTone] = useState<Tone>("Professional");
   const [zoomBusy, setZoomBusy] = useState(false);
   const [activeTool, setActiveTool] = useState<null | "trim" | "crop">(null); // inline preview tools
+  const [cropSel, setCropSel] = useState(0); // which crop region is being edited
   const timelineRef = useRef<HTMLElement>(null);
 
   // undo / redo history (coalesced snapshots of the whole edit-spec)
@@ -509,6 +520,59 @@ export default function VideoEditor({
     },
     [],
   );
+
+  // Crop regions: a list of normalized boxes, each optionally scoped to a time
+  // window (multi-range crops). Edited live on the same timeline as Trim —
+  // no separate popup/draft state, changes land straight on spec.crops.
+  const patchCrop = useCallback((idx: number, patch: Partial<CropRegion>) => {
+    setSpec((s) => {
+      if (!s) return s;
+      const list = cropList(s).map((c, i) =>
+        i === idx ? { ...c, ...patch } : c,
+      );
+      return {
+        ...s,
+        crops: list,
+        crop: { enabled: false, x: 0, y: 0, w: 1, h: 1 },
+      };
+    });
+  }, []);
+  const addCrop = useCallback(() => {
+    setSpec((s) => {
+      if (!s) return s;
+      const list = cropList(s);
+      const start = Math.round(cur * 1000);
+      const end = Math.max(Math.round((dur || cur + 10) * 1000), start + 500);
+      setCropSel(list.length);
+      return {
+        ...s,
+        crops: [...list, { ...DEFAULT_CROP, start_ms: start, end_ms: end }],
+        crop: { enabled: false, x: 0, y: 0, w: 1, h: 1 },
+      };
+    });
+  }, [cur, dur]);
+  const removeCrop = useCallback((idx: number) => {
+    setSpec((s) => {
+      if (!s) return s;
+      const list = cropList(s).filter((_, i) => i !== idx);
+      setCropSel((sel) =>
+        Math.max(0, Math.min(sel > idx ? sel - 1 : sel, list.length - 1)),
+      );
+      return {
+        ...s,
+        crops: list,
+        crop: { enabled: false, x: 0, y: 0, w: 1, h: 1 },
+      };
+    });
+  }, []);
+  const removeAllCrops = useCallback(() => {
+    setCropSel(0);
+    setSpec((s) =>
+      s
+        ? { ...s, crops: [], crop: { enabled: false, x: 0, y: 0, w: 1, h: 1 } }
+        : s,
+    );
+  }, []);
 
   useEffect(() => {
     const el = frameRef.current;
@@ -986,15 +1050,18 @@ export default function VideoEditor({
   // middle of the frame — same "crop, then cover" the render does, so the
   // preview shows exactly the selected content with no stretch and no padding.
   const cropScale = Math.max(1 / cw, 1 / ch);
-  const cropStyle: React.CSSProperties = cropOn
-    ? {
-        transform: `translate(${((0.5 - (cx + cw / 2)) * 100).toFixed(2)}%, ${(
-          (0.5 - (cy + ch / 2)) *
-          100
-        ).toFixed(2)}%) scale(${cropScale.toFixed(4)})`,
-        transformOrigin: `${((cx + cw / 2) * 100).toFixed(2)}% ${((cy + ch / 2) * 100).toFixed(2)}%`,
-      }
-    : {};
+  // While actively editing a crop region, show the full raw frame instead of
+  // the reframed preview so the box can be dragged against the whole source.
+  const cropStyle: React.CSSProperties =
+    cropOn && activeTool !== "crop"
+      ? {
+          transform: `translate(${((0.5 - (cx + cw / 2)) * 100).toFixed(2)}%, ${(
+            (0.5 - (cy + ch / 2)) *
+            100
+          ).toFixed(2)}%) scale(${cropScale.toFixed(4)})`,
+          transformOrigin: `${((cx + cw / 2) * 100).toFixed(2)}% ${((cy + ch / 2) * 100).toFixed(2)}%`,
+        }
+      : {};
 
   const totalMs =
     (dur ? dur * 1000 : 0) ||
@@ -1019,24 +1086,6 @@ export default function VideoEditor({
 
   return (
     <div className="flex h-screen flex-col bg-[var(--bg)] text-[var(--text)]">
-      {/* Crop modal window — trim now happens inline on the timeline below */}
-      {activeTool === "crop" && source && (
-        <CropModal
-          source={source}
-          crops={cropList(spec)}
-          onCancel={() => setActiveTool(null)}
-          onSave={(cs) => {
-            // an explicit [] means "no crops" — also disable the legacy single
-            // crop so the renderer doesn't fall back to it
-            setSpec({
-              ...spec,
-              crops: cs,
-              crop: { enabled: false, x: 0, y: 0, w: 1, h: 1 },
-            });
-            setActiveTool(null);
-          }}
-        />
-      )}
       {/* header */}
       <header className="flex items-center justify-between gap-4 border-b border-[var(--border)] bg-[var(--card)] px-6 py-3">
         <div className="flex min-w-0 items-center gap-3">
@@ -1566,6 +1615,10 @@ export default function VideoEditor({
                     <PreviewOverlay
                       frame={frameSize}
                       tab={tab}
+                      cropEditing={activeTool === "crop"}
+                      crops={crops}
+                      cropSel={cropSel}
+                      onPatchCrop={patchCrop}
                       spec={spec}
                       setSpec={setSpec}
                       selId={selEl}
@@ -1697,8 +1750,22 @@ export default function VideoEditor({
                     block: "end",
                   });
                 } else if (c.key === "crop") {
+                  // Crop swaps the timeline below to a region-editing track (same
+                  // pattern as Trim) and shows a draggable box on the preview above.
                   videoRef.current?.pause();
-                  setActiveTool("crop");
+                  if (activeTool !== "crop") {
+                    const list = cropList(spec);
+                    if (!list.length)
+                      setSpec({ ...spec, crops: [{ ...DEFAULT_CROP }] });
+                    setCropSel((sel) =>
+                      Math.min(sel, Math.max(0, list.length - 1)),
+                    );
+                    timelineRef.current?.scrollIntoView({
+                      behavior: "smooth",
+                      block: "end",
+                    });
+                  }
+                  setActiveTool((t) => (t === "crop" ? null : "crop"));
                 } else setTab(c.key as Tab);
               }}
               className={`inline-flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-sm font-medium transition-all ${
@@ -1718,8 +1785,8 @@ export default function VideoEditor({
         })}
       </div>
 
-      {/* TIMELINE — Trim mode swaps in a focused single-track view; otherwise the
-          full Video/Audio/Voice/Captions/Zoom timeline. Both edit the same spec live. */}
+      {/* TIMELINE — Trim/Crop swap in a focused single-track view; otherwise the
+          full Video/Audio/Voice/Captions/Zoom timeline. All edit the same spec live. */}
       {activeTool === "trim" ? (
         <TrimTrack
           sectionRef={timelineRef}
@@ -1741,6 +1808,22 @@ export default function VideoEditor({
           onRedo={redo}
           canUndo={histState.canUndo}
           canRedo={histState.canRedo}
+          onDone={() => setActiveTool(null)}
+        />
+      ) : activeTool === "crop" ? (
+        <CropTrack
+          sectionRef={timelineRef}
+          source={source}
+          cur={cur}
+          dur={dur}
+          crops={crops}
+          cropSel={cropSel}
+          setCropSel={setCropSel}
+          seekTo={seekTo}
+          onPatchCrop={patchCrop}
+          onAddCrop={addCrop}
+          onRemoveCrop={removeCrop}
+          onRemoveAll={removeAllCrops}
           onDone={() => setActiveTool(null)}
         />
       ) : (
@@ -3052,6 +3135,279 @@ function TrimBlock({
         </>
       )}
     </div>
+  );
+}
+
+// Crop mode: swaps the timeline into a focused track for assigning each crop
+// region's time window (drag its block to move, side handles to resize) —
+// the box itself is dragged/resized directly on the preview above.
+function CropTrack({
+  sectionRef,
+  source,
+  cur,
+  dur,
+  crops,
+  cropSel,
+  setCropSel,
+  seekTo,
+  onPatchCrop,
+  onAddCrop,
+  onRemoveCrop,
+  onRemoveAll,
+  onDone,
+}: {
+  sectionRef?: React.RefObject<HTMLElement>;
+  source: string | null;
+  cur: number;
+  dur: number;
+  crops: CropRegion[];
+  cropSel: number;
+  setCropSel: (n: number) => void;
+  seekTo: (s: number) => void;
+  onPatchCrop: (idx: number, patch: Partial<CropRegion>) => void;
+  onAddCrop: () => void;
+  onRemoveCrop: (idx: number) => void;
+  onRemoveAll: () => void;
+  onDone: () => void;
+}) {
+  const frames = useFilmstrip(source, 48);
+  const stripRef = useRef<HTMLDivElement>(null);
+  const totalMs = Math.max(dur * 1000, 1);
+  const sel = Math.min(cropSel, Math.max(0, crops.length - 1));
+  const box = crops[sel] as CropRegion | undefined;
+  const dragRef = useRef<null | {
+    mode: "seek" | "move" | "l" | "r";
+    idx: number;
+    grab: number;
+  }>(null);
+
+  const msAtX = (clientX: number) => {
+    const r = stripRef.current?.getBoundingClientRect();
+    if (!r) return 0;
+    return Math.max(0, Math.min(1, (clientX - r.left) / r.width)) * totalMs;
+  };
+  const stripDown = (e: React.PointerEvent) => {
+    dragRef.current = { mode: "seek", idx: -1, grab: 0 };
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+    seekTo(msAtX(e.clientX) / 1000);
+  };
+  const blockDown = (
+    e: React.PointerEvent,
+    idx: number,
+    mode: "move" | "l" | "r",
+  ) => {
+    e.stopPropagation();
+    setCropSel(idx);
+    dragRef.current = {
+      mode,
+      idx,
+      grab: msAtX(e.clientX) - (crops[idx].start_ms ?? 0),
+    };
+    stripRef.current?.setPointerCapture?.(e.pointerId);
+  };
+  const stripMove = (e: React.PointerEvent) => {
+    const d = dragRef.current;
+    if (!d) return;
+    const at = msAtX(e.clientX);
+    if (d.mode === "seek") {
+      seekTo(at / 1000);
+      return;
+    }
+    const c = crops[d.idx];
+    if (!c) return;
+    const s0 = c.start_ms ?? 0;
+    const en = c.end_ms ?? 0;
+    if (d.mode === "move") {
+      const width = en - s0;
+      const ns = Math.max(0, Math.min(at - d.grab, totalMs - width));
+      onPatchCrop(d.idx, {
+        start_ms: Math.round(ns),
+        end_ms: Math.round(ns + width),
+      });
+    } else if (d.mode === "l") {
+      onPatchCrop(d.idx, {
+        start_ms: Math.round(Math.max(0, Math.min(at, en - 500))),
+      });
+    } else {
+      onPatchCrop(d.idx, {
+        end_ms: Math.round(Math.min(totalMs, Math.max(at, s0 + 500))),
+      });
+    }
+  };
+  const stripUp = () => {
+    dragRef.current = null;
+  };
+
+  const rStart = box?.start_ms ?? 0;
+  const rEnd = box?.end_ms ?? 0;
+  const rangeOn = rEnd > rStart;
+
+  return (
+    <section
+      ref={sectionRef}
+      className="border-t border-[var(--border)] bg-[var(--card)] px-6 py-3"
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        {crops.map((c, i) => {
+          const ranged = (c.end_ms ?? 0) > (c.start_ms ?? 0);
+          return (
+            <span
+              key={i}
+              className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs ${
+                i === sel
+                  ? "border-[#6d5dfb] bg-[#6d5dfb]/10 text-[var(--text)]"
+                  : "border-[var(--border)] text-[var(--text-2)]"
+              }`}
+            >
+              <button
+                onClick={() => {
+                  setCropSel(i);
+                  if (ranged) seekTo((c.start_ms ?? 0) / 1000);
+                }}
+              >
+                Crop {i + 1}
+                <span className="ml-1 font-mono text-[10px] text-[var(--text-3)]">
+                  {ranged
+                    ? `${mmss((c.start_ms ?? 0) / 1000)}–${mmss((c.end_ms ?? 0) / 1000)}`
+                    : "whole video"}
+                </span>
+              </button>
+              {crops.length > 1 && (
+                <button
+                  title="Remove this crop"
+                  onClick={() => onRemoveCrop(i)}
+                  className="text-[var(--text-3)] hover:text-[var(--text)]"
+                >
+                  ×
+                </button>
+              )}
+            </span>
+          );
+        })}
+        <button onClick={onAddCrop} className="btn btn-ghost btn-sm">
+          ＋ Add crop
+        </button>
+        {crops.length > 0 && (
+          <button
+            onClick={onRemoveAll}
+            className="btn btn-ghost btn-sm text-[var(--text-2)]"
+          >
+            Remove all crops
+          </button>
+        )}
+        <button
+          onClick={onDone}
+          className="btn btn-ghost btn-sm ml-auto text-[#6d5dfb]"
+          title="Back to the full timeline"
+        >
+          ✓ Done cropping
+        </button>
+      </div>
+
+      {box && (
+        <div className="mt-2 rounded-xl border border-[var(--border)] p-3">
+          <label className="flex cursor-pointer items-center justify-between">
+            <span>
+              <span className="text-sm font-medium">
+                Crop {crops.length > 1 ? `${sel + 1} ` : ""}only a time range
+              </span>
+              <span className="mt-0.5 block text-xs text-[var(--text-3)]">
+                Outside it the video stays uncropped — add another crop to cover
+                it.
+              </span>
+            </span>
+            <input
+              type="checkbox"
+              checked={rangeOn}
+              onChange={(e) =>
+                onPatchCrop(
+                  sel,
+                  e.target.checked
+                    ? {
+                        start_ms: Math.round(cur * 1000),
+                        end_ms: Math.round(Math.min(dur, cur + 10) * 1000),
+                      }
+                    : { start_ms: 0, end_ms: 0 },
+                )
+              }
+              className="h-4 w-8 accent-[#6d5dfb]"
+            />
+          </label>
+          {/* filmstrip timeline — drag a crop window like a trim block */}
+          <div
+            ref={stripRef}
+            onPointerDown={stripDown}
+            onPointerMove={stripMove}
+            onPointerUp={stripUp}
+            className="relative mt-3 h-16 touch-none select-none overflow-hidden rounded-lg bg-[#0e1116] ring-1 ring-inset ring-[var(--border)]"
+          >
+            <Filmstrip frames={frames} className="opacity-70" />
+            {crops.map((c, i) => {
+              const s0 = c.start_ms ?? 0;
+              const en = c.end_ms ?? 0;
+              if (en <= s0) return null; // whole-video crop — no window to draw
+              const left = (s0 / totalMs) * 100;
+              const width = Math.max(0.5, ((en - s0) / totalMs) * 100);
+              const active = i === sel;
+              return (
+                <div
+                  key={i}
+                  onPointerDown={(e) => blockDown(e, i, "move")}
+                  style={{ left: `${left}%`, width: `${width}%` }}
+                  title={`Crop ${i + 1} · ${mmss(s0 / 1000)}–${mmss(en / 1000)} — drag to move`}
+                  className={`absolute inset-y-0 cursor-grab rounded-md border bg-[#6d5dfb]/30 backdrop-brightness-110 ${
+                    active
+                      ? "border-[#6d5dfb] ring-2 ring-inset ring-[#6d5dfb]"
+                      : "border-white/40"
+                  }`}
+                >
+                  {width > 7 && (
+                    <span className="pointer-events-none absolute left-1.5 top-1 rounded bg-black/60 px-1 py-px font-mono text-[9px] text-white">
+                      Crop {i + 1}
+                    </span>
+                  )}
+                  {active && (
+                    <>
+                      <span
+                        onPointerDown={(e) => blockDown(e, i, "l")}
+                        title="Drag to adjust start"
+                        className="absolute inset-y-0 -left-0.5 flex w-2.5 cursor-ew-resize items-center justify-center rounded-l-md bg-[#6d5dfb]"
+                      >
+                        <span className="h-6 w-0.5 rounded bg-white" />
+                      </span>
+                      <span
+                        onPointerDown={(e) => blockDown(e, i, "r")}
+                        title="Drag to adjust end"
+                        className="absolute inset-y-0 -right-0.5 flex w-2.5 cursor-ew-resize items-center justify-center rounded-r-md bg-[#6d5dfb]"
+                      >
+                        <span className="h-6 w-0.5 rounded bg-white" />
+                      </span>
+                    </>
+                  )}
+                </div>
+              );
+            })}
+            {/* playhead */}
+            <span
+              style={{
+                left: `${Math.min(100, (cur * 1000 * 100) / totalMs)}%`,
+              }}
+              className="pointer-events-none absolute inset-y-0 w-px bg-white"
+            />
+          </div>
+          <p className="mt-1.5 text-right font-mono text-[11px] text-[var(--text-3)]">
+            {rangeOn
+              ? `Crop ${crops.length > 1 ? sel + 1 : ""} applies ${mmss(rStart / 1000)} – ${mmss(rEnd / 1000)}`
+              : "applies to the whole video"}
+          </p>
+        </div>
+      )}
+      <p className="mt-2 text-[11px] text-[var(--text-3)]">
+        Drag the box on the video preview above to position or resize this crop.
+        Click a chip to switch which region you're editing, or drag its block
+        below to change when it applies. Click "Done cropping" when finished.
+      </p>
+    </section>
   );
 }
 
