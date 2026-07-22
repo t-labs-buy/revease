@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   getAutoEdit,
+  mediaUrl,
   startAutoEdit,
   type AutoEditJob,
   type AutoEditOptions,
@@ -110,8 +111,8 @@ export function AutoEditCard({ projectId }: { projectId: string }) {
           {st.captions ? (
             <div className="mt-1 text-xs text-emerald-400">captions burned in</div>
           ) : null}
-          {job.output_url && (
-            <video src={job.output_url} controls className="mt-3 w-full rounded-lg bg-black" />
+          {job.output_key && (
+            <video src={mediaUrl(job.output_key)} controls className="mt-3 w-full rounded-lg bg-black" />
           )}
           <button onClick={() => setJob(null)} className="btn btn-ghost btn-sm mt-2 w-full">
             New auto-edit
