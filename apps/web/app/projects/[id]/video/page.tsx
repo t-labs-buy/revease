@@ -60,11 +60,12 @@ type Tab =
   | "AI Voice"
   | "Zoom"
   | "Background"
+  | "Intro"
   | "Trim"
   | "Crop"
   | "Elements"
   | "Captions";
-const SIDE_TABS: Tab[] = ["Script", "AI Voice", "Zoom", "Background"];
+const SIDE_TABS: Tab[] = ["Script", "AI Voice", "Zoom", "Background", "Intro"];
 const TOOL_TABS: Tab[] = ["Elements"];
 
 // Backdrop presets shared with the renderer (same ids in worker render.py).
@@ -1098,9 +1099,12 @@ export default function VideoEditor({
           </Link>
           <div className="min-w-0">
             <div className="flex items-center gap-2">
-              <h1 className="truncate text-[17px] font-semibold tracking-tight">
-                {spec.title}
-              </h1>
+              <input
+                value={spec.title}
+                onChange={(e) => setSpec({ ...spec, title: e.target.value })}
+                title="Video title — also used as the Intro card text"
+                className="min-w-0 flex-1 truncate rounded px-1 -mx-1 text-[17px] font-semibold tracking-tight text-[var(--text)] hover:bg-[var(--hover)] focus:bg-[var(--hover)] focus:outline-none"
+              />
               <Link
                 href={`/projects/${id}/document`}
                 className="rounded-lg px-2 py-0.5 text-xs font-medium text-[var(--text-2)] hover:bg-[var(--hover)]"
@@ -1445,6 +1449,10 @@ export default function VideoEditor({
 
             {tab === "Background" && (
               <BackgroundPanel spec={spec} patchSpec={patchSpec} />
+            )}
+
+            {tab === "Intro" && (
+              <IntroOutroPanel spec={spec} patchSpec={patchSpec} />
             )}
 
             {tab === "Elements" && (
@@ -2274,6 +2282,95 @@ function BackgroundPanel({
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function IntroOutroPanel({
+  spec,
+  patchSpec,
+}: {
+  spec: EditSpec;
+  patchSpec: (p: Partial<EditSpec>) => void;
+}) {
+  const intro = spec.intro ?? {
+    enabled: false,
+    title: spec.title,
+    duration_ms: 2000,
+  };
+  const outro = spec.outro ?? {
+    enabled: false,
+    title: "Thanks for watching",
+    duration_ms: 1500,
+  };
+  return (
+    <div className="space-y-5">
+      <p className="text-xs text-[var(--text-3)]">
+        Title cards shown before and after the recording. Turn either off to
+        skip it entirely.
+      </p>
+
+      {(
+        [
+          [
+            "Intro",
+            intro,
+            (p: Partial<EditSpec["intro"]>) =>
+              patchSpec({ intro: { ...intro, ...p } }),
+            500,
+            5000,
+          ],
+          [
+            "Outro",
+            outro,
+            (p: Partial<EditSpec["outro"]>) =>
+              patchSpec({ outro: { ...outro, ...p } }),
+            500,
+            5000,
+          ],
+        ] as const
+      ).map(([label, card, set, minMs, maxMs]) => (
+        <div
+          key={label}
+          className="rounded-xl border border-[var(--border)] p-3"
+        >
+          <label className="flex cursor-pointer items-center justify-between">
+            <span className="text-sm font-medium">{label}</span>
+            <input
+              type="checkbox"
+              checked={card.enabled}
+              onChange={(e) => set({ enabled: e.target.checked })}
+              className="h-4 w-8 accent-[#6d5dfb]"
+            />
+          </label>
+          {card.enabled && (
+            <div className="mt-3 space-y-3">
+              <input
+                value={card.title}
+                onChange={(e) => set({ title: e.target.value })}
+                placeholder={`${label} text`}
+                className="input"
+              />
+              <div className="flex items-center gap-3 text-xs">
+                <span className="text-[var(--text-3)]">Short</span>
+                <input
+                  type="range"
+                  min={minMs}
+                  max={maxMs}
+                  step={100}
+                  value={card.duration_ms}
+                  onChange={(e) => set({ duration_ms: Number(e.target.value) })}
+                  className="flex-1 accent-[#6d5dfb]"
+                />
+                <span className="text-[var(--text-3)]">Long</span>
+                <span className="w-14 text-right font-mono text-[var(--text-2)]">
+                  {(card.duration_ms / 1000).toFixed(1)}s
+                </span>
+              </div>
+            </div>
+          )}
+        </div>
+      ))}
     </div>
   );
 }
