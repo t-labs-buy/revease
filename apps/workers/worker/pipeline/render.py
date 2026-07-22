@@ -25,6 +25,7 @@ from app.db import SessionLocal
 from app.editspec import effective_script
 from app.models import MediaAsset, RenderJob, VideoProject, WorkflowGraphRow
 from app.storage import store
+from worker.pipeline.smoothzoom import apply_zoom
 from worker.pipeline.timeline import StepInput, build_timeline
 from worker.pipeline.tts import _silent_wav, synth_step
 
@@ -254,23 +255,9 @@ def _element_filters(elements, dims: tuple[int, int], font: str | None, work: Pa
     return out
 
 
-def _zoom_filter(zoom: dict | None, dims: tuple[int, int], dur_s: float = 3.0) -> str:
-    """Animated click-centered zoom: the viewport eases in toward (cx, cy) like a
-    camera move, then holds — the production 'pan + zoom' feel. `speed` (1 slow …
-    5 snappy) sets how fast the ease-in lands."""
-    w, h = dims
-    if not zoom or not zoom.get("enabled"):
-        return f"scale={w}:{h}"
-    scale = max(1.0, float(zoom.get("scale", 1.6)))
-    cx = min(1.0, max(0.0, float(zoom.get("cx", 0.5))))
-    cy = min(1.0, max(0.0, float(zoom.get("cy", 0.5))))
-    ease_s = {1: 2.0, 2: 1.5, 3: 1.1, 4: 0.7, 5: 0.4}.get(int(zoom.get("speed", 3) or 3), 1.1)
-    ease_frames = max(1, int(FPS * min(ease_s, max(0.3, dur_s))))
-    step = max(0.0005, round((scale - 1.0) / ease_frames, 5))
-    z = f"min(zoom+{step},{scale})"
-    x = f"iw*{cx}-(iw/zoom/2)"
-    y = f"ih*{cy}-(ih/zoom/2)"
-    return f"scale={w}:{h},zoompan=z='{z}':x='{x}':y='{y}':d=1:s={w}x{h}:fps={FPS}"
+def _zoom_ease_s(zoom: dict) -> float:
+    """Ease-in/out duration for a zoom's `speed` setting (1 slow … 5 snappy)."""
+    return {1: 2.0, 2: 1.5, 3: 1.1, 4: 0.7, 5: 0.4}.get(int(zoom.get("speed", 3) or 3), 1.1)
 
 
 def _render_segment(seg, seg_tl, src_video, dims, captions, font, work: Path,
@@ -296,7 +283,7 @@ def _render_segment(seg, seg_tl, src_video, dims, captions, font, work: Path,
     crop_eff = _crop_for_segment(crops, seg)
     zoom_eff = _remap_zoom_into_crop(seg.get("zoom"), crop_eff)
 
-    clip_hash = _sha("v5", seg.get("step_id"), script, tts_path.name, zoom_eff,
+    clip_hash = _sha("v12", seg.get("step_id"), script, tts_path.name, zoom_eff,
                      dims, captions, font, seg.get("screenshot"), seg.get("source_start_ms"),
                      seg.get("source_end_ms"), round(dur_s, 3), use_footage,
                      crop_eff, elements, str(logo), logo_pos, background)
@@ -325,7 +312,30 @@ def _render_segment(seg, seg_tl, src_video, dims, captions, font, work: Path,
         _make_still(seg, src_video, dims, still, crop=crop_eff)  # crop baked into the still
 
     # zoom -> captions -> overlay elements -> normalize
-    parts.append(_zoom_filter(zoom_eff, dims, dur_s))
+    zoom_on = bool(zoom_eff and zoom_eff.get("enabled"))
+    zoomed = work / f"zoomclip_{clip_hash}.mp4"
+    if zoom_on:
+        # The zoom runs OUTSIDE ffmpeg: zoompan quantizes the camera path to
+        # whole pixels (visible jitter), so a flat CFR base clip is rendered
+        # first and smoothzoom warps each frame with a float-precision affine
+        # instead. Captions/elements are burned afterwards so they stay put.
+        base = work / f"zoombase_{clip_hash}.mp4"
+        pre = parts + [f"fps={FPS}", "format=yuv420p"]
+        if use_footage:
+            cmd_a = ["ffmpeg", "-y", "-ss", f"{seg_tl.source_start_ms / 1000.0:.3f}",
+                     "-t", f"{src_len_s:.3f}", "-i", str(src_video)]
+        else:
+            cmd_a = ["ffmpeg", "-y", "-loop", "1", "-t", f"{dur_s:.3f}", "-i", str(still)]
+        cmd_a += ["-vf", ",".join(pre), "-an", "-c:v", "libx264", "-preset", "veryfast",
+                  "-crf", CRF, "-pix_fmt", "yuv420p", "-t", f"{dur_s:.3f}", str(base)]
+        if not _run(cmd_a):
+            raise RuntimeError(f"segment {seg_tl.index} zoom base render failed")
+        apply_zoom(base, zoomed, scale=float(zoom_eff.get("scale", 1.6)),
+                   cx=float(zoom_eff.get("cx", 0.5)), cy=float(zoom_eff.get("cy", 0.5)),
+                   dur_s=dur_s, ease_s=_zoom_ease_s(zoom_eff), fps=FPS, crf=CRF)
+        parts = []  # geometry + timing are already baked into the zoomed clip
+    else:
+        parts.append(f"scale={w}:{h}")  # normalize the still path; no-op for footage
     if captions and script:
         # One sentence at a time, switching as the voice progresses. TTS gives no
         # word timestamps, so each chunk's window is proportional to its share of
@@ -348,7 +358,9 @@ def _render_segment(seg, seg_tl, src_video, dims, captions, font, work: Path,
     parts += ["format=yuv420p", f"fps={FPS}", "setsar=1"]
     vf = ",".join(parts)
 
-    if use_footage:
+    if zoom_on:
+        cmd = ["ffmpeg", "-y", "-i", str(zoomed), "-i", str(tts_path)]
+    elif use_footage:
         ss = seg_tl.source_start_ms / 1000.0
         cmd = ["ffmpeg", "-y", "-ss", f"{ss:.3f}", "-t", f"{src_len_s:.3f}",
                "-i", str(src_video), "-i", str(tts_path)]

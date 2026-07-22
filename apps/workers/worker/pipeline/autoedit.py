@@ -18,6 +18,8 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from worker.pipeline.smoothzoom import apply_zoom
+
 log = logging.getLogger("refract.pipeline.autoedit")
 
 SPEEDUP = 3.0  # silent regions (usually skippable)
@@ -282,17 +284,6 @@ def _atempo_chain(speed: float) -> str:
     return ",".join(f"atempo={f}" for f in factors)
 
 
-def _zoompan_vf(seg: Seg, dims: tuple[int, int]) -> str:
-    """Smooth ease-in zoom toward (cx,cy) up to seg.scale over ~1.5s, then hold."""
-    w, h = dims
-    ease_frames = FPS * min(max(0.3, seg.src_len), 1.5)
-    step = max(0.0005, round((seg.scale - 1.0) / ease_frames, 5))
-    z = f"min(zoom+{step},{seg.scale})"
-    x = f"iw*{seg.cx}-(iw/zoom/2)"
-    y = f"ih*{seg.cy}-(ih/zoom/2)"
-    return f"zoompan=z='{z}':x='{x}':y='{y}':d=1:s={w}x{h}:fps={FPS}"
-
-
 def _fmt_ts(t: float) -> str:
     ms = max(0, int(round(t * 1000)))
     h, ms = divmod(ms, 3600000)
@@ -342,7 +333,6 @@ def build_srt(words: list[dict], segments: list[Seg]) -> str:
 
 def render(video: Path, analysis: Analysis, out: Path, work: Path, srt_path: Path | None = None) -> dict:
     work.mkdir(parents=True, exist_ok=True)
-    dims = probe_dims(video)
     audio = has_audio(video)
     clips: list[Path] = []
     sped = zoomed = 0
@@ -351,9 +341,11 @@ def render(video: Path, analysis: Analysis, out: Path, work: Path, srt_path: Pat
         if seg.src_len < 0.1:
             continue
         clip = work / f"seg_{i:03d}.mp4"
-        if seg.scale > 1.0 and seg.speed == 1.0:
-            # smooth zoom (zoompan sets fps + size itself); speed is 1x here
-            vf = f"{_zoompan_vf(seg, dims)},format=yuv420p,setsar=1"
+        zoom_seg = seg.scale > 1.0 and seg.speed == 1.0
+        if zoom_seg:
+            # rendered flat here; the zoom itself is a float-precision warp pass
+            # below (smoothzoom) — zoompan's whole-pixel camera path jitters
+            vf = ",".join([f"fps={FPS}", "format=yuv420p", "setsar=1"])
         else:
             vf = ",".join([f"setpts=PTS/{seg.speed}", f"fps={FPS}", "format=yuv420p", "setsar=1"])
         cmd = ["ffmpeg", "-y", "-i", str(video), "-ss", f"{seg.t_start:.3f}", "-t",
@@ -368,6 +360,17 @@ def render(video: Path, analysis: Analysis, out: Path, work: Path, srt_path: Pat
         if proc.returncode != 0:
             log.warning("autoedit seg %d failed: %s", i, proc.stderr[-400:])
             continue
+        if zoom_seg:
+            zoom_clip = work / f"seg_{i:03d}_zoom.mp4"
+            apply_zoom(clip, zoom_clip, scale=seg.scale, cx=seg.cx, cy=seg.cy,
+                       dur_s=seg.src_len, ease_s=1.5, fps=FPS)
+            muxed = work / f"seg_{i:03d}_zoomed.mp4"
+            mux = _run(["ffmpeg", "-y", "-i", str(zoom_clip), "-i", str(clip),
+                        "-map", "0:v", "-map", "1:a", "-c", "copy", str(muxed)])
+            if mux.returncode != 0:
+                log.warning("autoedit seg %d zoom mux failed: %s", i, mux.stderr[-400:])
+                continue
+            clip = muxed
         clips.append(clip)
         sped += int(seg.speed > 1.0)
         zoomed += int(seg.scale > 1.0)
