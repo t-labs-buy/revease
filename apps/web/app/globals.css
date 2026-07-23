@@ -6,19 +6,23 @@
   /* Light theme (default) */
   :root {
     color-scheme: light;
-    --bg: #f8f9fc;
+    --bg: #f1f5f9;
     --panel: #ffffff;
     --card: #ffffff;
     --card-hover: #f4f5fa;
-    --border: #eceef5;
+    --border: #e5e7eb;
     --border-strong: #d7dae6;
     --text: #111827;
     --text-2: #6b7280;
     --text-3: #9aa1b2;
     --hover: #f4f5fa;
     --input-bg: #ffffff;
-    --brand: #6d5dfb;
-    --brand-2: #7c6cf6;
+    --brand: #7c3aed;
+    --brand-2: #7c3aed;
+    --brand-soft: #a78bfa;
+    --success: #10b981;
+    --shadow-card: 0 1px 2px rgba(17, 24, 39, 0.04), 0 1px 1px rgba(17, 24, 39, 0.03);
+    --shadow-card-hover: 0 16px 32px -12px rgba(17, 24, 39, 0.16);
   }
   /* Dark theme */
   .dark {
@@ -64,17 +68,17 @@
 
 @layer components {
   .card {
-    @apply rounded-2xl border border-[var(--border)] bg-[var(--card)];
+    @apply rounded-[18px] border border-[var(--border)] bg-[var(--card)] shadow-[var(--shadow-card)];
   }
   .card-hover {
-    @apply transition-all duration-200 hover:bg-[var(--card-hover)];
+    @apply transition-all duration-[250ms] ease-out hover:-translate-y-1 hover:bg-[var(--card-hover)] hover:shadow-[var(--shadow-card-hover)];
   }
 
   .btn {
-    @apply inline-flex select-none items-center justify-center gap-2 rounded-xl px-3.5 py-2 text-sm font-medium transition-all duration-150 disabled:pointer-events-none disabled:opacity-50;
+    @apply inline-flex select-none items-center justify-center gap-2 rounded-xl px-3.5 py-2 text-sm font-medium transition-all duration-200 disabled:pointer-events-none disabled:opacity-50;
   }
   .btn-primary {
-    @apply bg-[#6d5dfb] text-white shadow-sm shadow-[#6d5dfb]/25 hover:bg-[#5b4ce6];
+    @apply bg-[var(--brand)] text-white shadow-sm shadow-[#7c3aed]/25 hover:bg-[#6d28d9] hover:scale-[1.02];
   }
   .btn-secondary {
     @apply border border-[var(--border)] bg-[var(--card)] text-[var(--text)] hover:bg-[var(--hover)];
@@ -90,7 +94,10 @@
   }
 
   .input {
-    @apply w-full rounded-xl border border-[var(--border)] bg-[var(--input-bg)] px-3 py-2 text-sm text-[var(--text)] outline-none transition-colors placeholder:text-[var(--text-3)] focus:border-[#6d5dfb]/60 focus:ring-2 focus:ring-[#6d5dfb]/15;
+    @apply w-full rounded-xl border border-[var(--border)] bg-[var(--input-bg)] px-3 py-2 text-sm text-[var(--text)] outline-none transition-colors placeholder:text-[var(--text-3)] focus:border-[#7c3aed]/60 focus:ring-2 focus:ring-[#7c3aed]/15;
+  }
+  .input-pill {
+    @apply rounded-full shadow-[var(--shadow-card)];
   }
 
   /* selects share .input but need the native arrow replaced with our chevron */
@@ -111,5 +118,20 @@
 
   .label {
     @apply text-[11px] font-semibold uppercase tracking-wider text-[var(--text-3)];
+  }
+
+  .animate-fade-in {
+    animation: fade-in-up 420ms ease-out both;
+  }
+}
+
+@keyframes fade-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
   }
 }
