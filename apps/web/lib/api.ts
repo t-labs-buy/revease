@@ -291,6 +291,22 @@ export function mediaUrl(storageKey: string): string {
   return `${API_BASE}/media/${storageKey}`;
 }
 
+// Cross-origin <a download> is ignored by browsers, so fetch the file and
+// save it via a same-origin blob URL instead of navigating to it directly.
+export async function downloadMedia(storageKey: string, filename: string): Promise<void> {
+  const r = await fetch(mediaUrl(storageKey));
+  if (!r.ok) throw new Error(`download failed: ${r.status}`);
+  const blob = await r.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 // ---- documents (SOP) ----
 export interface DocStep {
   n: number;

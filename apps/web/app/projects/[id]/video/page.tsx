@@ -5,6 +5,7 @@ import Link from "next/link";
 import {
   activeCrop,
   cropList,
+  downloadMedia,
   getRender,
   getVideo,
   mediaUrl,
@@ -1487,9 +1488,21 @@ export default function VideoEditor({
                 >
                   {render.status}
                 </span>
+                {render.status === "done" && render.output_key && (
+                  <button
+                    onClick={() =>
+                      downloadMedia(render.output_key!, `${render.output_key!.split("/").pop()}`)
+                    }
+                    className="btn btn-ghost btn-sm ml-auto"
+                  >
+                    ↓ Download
+                  </button>
+                )}
                 <button
                   onClick={() => setShowRender(false)}
-                  className="btn btn-ghost btn-sm ml-auto"
+                  className={`btn btn-ghost btn-sm ${
+                    render.status === "done" && render.output_key ? "" : "ml-auto"
+                  }`}
                 >
                   ← back to preview
                 </button>
