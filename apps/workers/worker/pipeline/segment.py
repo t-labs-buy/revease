@@ -19,7 +19,16 @@ from worker.pipeline.providers import Transcript
 # (the next step's window starts right where its speech starts, so the silence
 # between them lives inside the earlier step). Once that dead air exceeds this,
 # split it into its own blank, editable step instead of silently absorbing it.
-MIN_GAP_S = 5.0
+MIN_GAP_S = 2.0
+
+# A step's window can start before its speech actually does — step 1's is forced
+# to 0 (so leading narration is never missed), and a later step's opens at its
+# triggering click, which rarely lands on the exact instant speech starts. Either
+# way, anything anchored to the window's start (narration audio placement,
+# source_start_ms) then thinks speech starts earlier than it really does. Split
+# off gaps past this threshold into their own blank step — tighter than MIN_GAP_S
+# since even a short lead-in silence is enough to misplace narration.
+LEADING_GAP_S = 1.0
 
 
 def _nearest_frame(t: float, keyframes: list[tuple[float, str]]) -> str | None:
@@ -31,9 +40,11 @@ def _nearest_frame(t: float, keyframes: list[tuple[float, str]]) -> str | None:
 def _split_silence_gaps(
     steps: list[dict[str, Any]], transcript: Transcript, keyframes: list[tuple[float, str]]
 ) -> list[dict[str, Any]]:
-    """Surface long silences (no spoken word for > MIN_GAP_S) as their own blank
-    step so they show up as an editable, empty narration row instead of just
-    padding out the previous step's clip."""
+    """Surface long silences — no spoken word for > MIN_GAP_S after a step's
+    speech ends, or > LEADING_GAP_S before a step's speech starts — as their own
+    blank step so they show up as an editable, empty narration row instead of
+    just padding out a spoken step's clip or getting baked into where its
+    narration is anchored."""
     if not transcript.words:
         return steps
     out: list[dict[str, Any]] = []
@@ -44,6 +55,22 @@ def _split_silence_gaps(
             # Already fully silent — one blank row already, nothing to split off.
             out.append(step)
             continue
+        speech_start = words_in[0].t_start
+        if speech_start - t0 > LEADING_GAP_S:
+            out.append(
+                {
+                    "action": "custom",
+                    "target": "Silence — add narration",
+                    "selector": None,
+                    "bbox": None,
+                    "screenshot": _nearest_frame(t0, keyframes),
+                    "t_start": round(t0, 3),
+                    "t_end": round(speech_start, 3),
+                    "narration_span": "",
+                }
+            )
+            t0 = round(speech_start, 3)
+            step = {**step, "t_start": t0}
         speech_end = words_in[-1].t_end
         gap = t1 - speech_end
         if gap > MIN_GAP_S:
@@ -138,12 +165,21 @@ def _segment_by_clicks(
 
 
 def _sentences(transcript: Transcript, max_words: int = 60) -> list[tuple[float, float, str]]:
-    """Split on real sentence boundaries only. `max_words` is a safety valve for
-    run-on speech with no punctuation — not a normal splitting rule — so a sentence
-    is never chopped mid-thought just because it ran past an arbitrary word count."""
+    """Split on real sentence boundaries, OR wherever a real pause (> MIN_GAP_S)
+    separates two words even without terminal punctuation — a comma-spliced
+    run-on with a long mid-utterance pause (e.g. the speaker paused to click
+    something, then kept talking without a full stop) would otherwise read as
+    one unbroken step, so the TTS voice reads it back-to-back with none of that
+    pause and leaves the rest of the step's window silently dead. `max_words` is
+    a safety valve for run-on speech with no punctuation — not a normal
+    splitting rule — so a sentence is never chopped mid-thought just because it
+    ran past an arbitrary word count."""
     out: list[tuple[float, float, str]] = []
     buf: list = []
     for w in transcript.words:
+        if buf and w.t_start - buf[-1].t_end > MIN_GAP_S:
+            out.append((buf[0].t_start, buf[-1].t_end, " ".join(x.w for x in buf).strip()))
+            buf = []
         buf.append(w)
         ends_sentence = w.w.endswith((".", "?", "!"))
         if ends_sentence or len(buf) >= max_words:

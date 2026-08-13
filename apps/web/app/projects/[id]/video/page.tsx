@@ -934,71 +934,6 @@ export default function VideoEditor({
       )
     : -1;
 
-  // Output timeline: the player clock/scrubber run on the FINAL video's clock
-  // (pace and skips applied) — mirrors the render pipeline's per-scene timing
-  // rules, which keep full source length regardless of voice presence.
-  const outMap = useMemo(() => {
-    if (!spec) return null;
-    const WPS = 2.6;
-    const pace = Math.min(1.5, Math.max(1, spec.pace ?? 1.0));
-    const useOrig = !!spec.voice.use_original;
-    const kept = spec.segments
-      .filter((s) => !s.skipped)
-      .slice()
-      .sort((a, b) => a.source_start_ms - b.source_start_ms);
-    let acc = 0;
-    const items = kept.map((s) => {
-      const src = Math.max(1, s.source_end_ms - s.source_start_ms);
-      const words = s.words.filter((_, i) => !s.removed.includes(i));
-      const o = !words.length
-        ? Math.max(300, src / pace)
-        : useOrig
-          ? Math.max(300, src / pace)
-          : Math.max(
-              300,
-              (words.length / (WPS * (spec.voice.speed || 1) * pace)) * 1000,
-            );
-      const it = {
-        s0: s.source_start_ms,
-        s1: s.source_end_ms,
-        o0: acc,
-        o1: acc + o,
-      };
-      acc += o;
-      return it;
-    });
-    return { items, total: acc };
-  }, [spec]);
-  const outTotalSec = outMap && outMap.items.length ? outMap.total / 1000 : dur;
-  const toOutSec = (srcSec: number) => {
-    if (!outMap || !outMap.items.length) return srcSec;
-    const t = srcSec * 1000;
-    let last = 0;
-    for (const it of outMap.items) {
-      if (t < it.s0) return last / 1000; // inside a dropped gap → hold at previous scene's end
-      if (t < it.s1)
-        return (
-          (it.o0 + ((t - it.s0) / (it.s1 - it.s0)) * (it.o1 - it.o0)) / 1000
-        );
-      last = it.o1;
-    }
-    return outMap.total / 1000;
-  };
-  const toSrcSec = (outSec: number) => {
-    if (!outMap || !outMap.items.length) return outSec;
-    const o = outSec * 1000;
-    for (const it of outMap.items) {
-      if (o <= it.o1) {
-        const f = Math.max(
-          0,
-          Math.min(1, (o - it.o0) / Math.max(1, it.o1 - it.o0)),
-        );
-        return (it.s0 + f * (it.s1 - it.s0)) / 1000;
-      }
-    }
-    return outMap.items[outMap.items.length - 1].s1 / 1000;
-  };
-
   useEffect(() => {
     if (playing && tab === "Script")
       activeRef.current?.scrollIntoView({ block: "nearest" });
@@ -1674,17 +1609,17 @@ export default function VideoEditor({
                 </button>
                 <span
                   className="font-mono text-xs text-[var(--text-2)]"
-                  title="Final video time (pace & cuts applied)"
+                  title="Original video time — the final rendered video's timing may differ once pace & cuts are applied"
                 >
-                  {clock(toOutSec(cur))} / {clock(outTotalSec)}
+                  {clock(cur)} / {clock(dur)}
                 </span>
                 <input
                   type="range"
                   min={0}
-                  max={outTotalSec || 1}
+                  max={dur || 1}
                   step={0.05}
-                  value={Math.min(outTotalSec, toOutSec(cur))}
-                  onChange={(e) => seekTo(toSrcSec(Number(e.target.value)))}
+                  value={Math.min(dur, cur)}
+                  onChange={(e) => seekTo(Number(e.target.value))}
                   className="flex-1 accent-[#6d5dfb]"
                 />
                 <select
