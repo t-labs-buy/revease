@@ -17,7 +17,9 @@ import logging
 import re
 import subprocess
 import textwrap
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import select
 
@@ -522,6 +524,49 @@ def _pad_audio(src: Path, out: Path, pad_ms: int) -> None:
           "-ac", "1", "-ar", "24000", "-c:a", "pcm_s16le", str(out)])
 
 
+@dataclass
+class StepAudio:
+    path: str
+    duration_ms: int
+    cached: bool
+    gap_ms: int  # SCENE_GAP_MS if this is a narrated (TTS) clip, else 0
+
+
+def compute_step_audio(
+    s: dict[str, Any], *, work: Path, src_video: Path | None, pace: float,
+    voice: dict[str, Any], use_original: bool,
+) -> StepAudio:
+    """Resolve one segment's audio clip + its output-clock duration: the single
+    source of truth for scene pacing, shared by the render and the editor's
+    live-preview so the two can never drift apart. A silent scene keeps its
+    full source length (scaled only by `pace`); a narrated scene takes its
+    real TTS length plus the SCENE_GAP_MS breather every narrated scene gets
+    in the render."""
+    script = effective_script(s.get("words", []), s.get("removed", []))
+    src_ms = max(0, s.get("source_end_ms", 0) - s.get("source_start_ms", 0))
+    if not script.strip():
+        dur_ms = max(300, int(src_ms / pace))
+        apath = work / f"sil_{s['step_id']}_{dur_ms}.wav"
+        if not apath.exists():
+            _silent_wav(apath, dur_ms)
+        return StepAudio(str(apath), dur_ms, False, 0)
+    if use_original and src_video is not None:
+        apath = work / f"orig_{s['step_id']}_{pace:.2f}.wav"
+        dur_ms = _extract_audio(
+            src_video, s.get("source_start_ms", 0), s.get("source_end_ms", 0), apath, tempo=pace,
+        )
+        return StepAudio(str(apath), dur_ms, False, 0)
+    r = synth_step(script, media_root=store.root, voice_id=voice["voice_id"],
+                    speed=voice.get("speed", 1.0) * pace)
+    tts_local = store.local_path(r.storage_key)
+    padded = work / f"pad{SCENE_GAP_MS}_{tts_local.stem}.wav"
+    if not padded.exists():
+        _pad_audio(tts_local, padded, SCENE_GAP_MS)
+    dur_ms = r.duration_ms + SCENE_GAP_MS
+    path = str(padded if padded.exists() else tts_local)
+    return StepAudio(path, dur_ms, r.cached, SCENE_GAP_MS)
+
+
 def run_render(render_job_id: str) -> dict:
     db = SessionLocal()
     try:
@@ -638,44 +683,19 @@ def run_render(render_job_id: str) -> dict:
         step_inputs = []
         tts_synth = tts_cached = 0
         for s in segs:
-            script = effective_script(s.get("words", []), s.get("removed", []))
-            src_ms = max(0, s.get("source_end_ms", 0) - s.get("source_start_ms", 0))
-            if not script.strip():
-                # No spoken words in this scene: keep it at full source length
-                # (scaled only by the same `pace` every other scene uses).
-                dur_ms = max(300, int(src_ms / pace))
-                apath = work / f"sil_{s['step_id']}_{dur_ms}.wav"
-                if not apath.exists():
-                    _silent_wav(apath, dur_ms)
-                s["_audio_path"] = str(apath)
-            elif use_original:
-                apath = work / f"orig_{s['step_id']}_{pace:.2f}.wav"
-                dur_ms = _extract_audio(
-                    src_video, s.get("source_start_ms", 0), s.get("source_end_ms", 0), apath,
-                    tempo=pace,
-                )
-                s["_audio_path"] = str(apath)
-            else:
-                r = synth_step(script, media_root=store.root,
-                               voice_id=voice["voice_id"],
-                               speed=voice.get("speed", 1.0) * pace)
-                tts_cached += int(r.cached)
-                tts_synth += int(not r.cached)
-                # pad a breather after the narration so scenes don't run into each
-                # other; the padded copy lives in the work dir (the TTS cache entry
-                # itself stays pristine)
-                tts_local = store.local_path(r.storage_key)
-                padded = work / f"pad{SCENE_GAP_MS}_{tts_local.stem}.wav"
-                if not padded.exists():
-                    _pad_audio(tts_local, padded, SCENE_GAP_MS)
-                dur_ms = r.duration_ms + SCENE_GAP_MS
-                s["_audio_path"] = str(padded if padded.exists() else tts_local)
-                s["_gap_ms"] = SCENE_GAP_MS  # captions stop before the breather
+            audio = compute_step_audio(
+                s, work=work, src_video=src_video, pace=pace, voice=voice, use_original=use_original,
+            )
+            s["_audio_path"] = audio.path
+            if audio.gap_ms:
+                s["_gap_ms"] = audio.gap_ms  # captions stop before the breather
+                tts_cached += int(audio.cached)
+                tts_synth += int(not audio.cached)
             z = s.get("zoom") or {}
             step_inputs.append(
                 StepInput(
                     step_id=s["step_id"],
-                    tts_duration_ms=dur_ms,
+                    tts_duration_ms=audio.duration_ms,
                     source_start_ms=s.get("source_start_ms", 0),
                     source_end_ms=s.get("source_end_ms", 0),
                     click_x=z.get("cx") if z.get("enabled") else None,

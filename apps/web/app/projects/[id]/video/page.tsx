@@ -6,6 +6,7 @@ import {
   activeCrop,
   cropList,
   downloadMedia,
+  fetchPreviewTimeline,
   getRender,
   getVideo,
   mediaUrl,
@@ -20,6 +21,8 @@ import {
   type EditElement,
   type EditSegment,
   type EditSpec,
+  type PreviewTimeline,
+  type PreviewTimelineSegment,
   type RenderJob,
 } from "@/lib/api";
 import { Spinner } from "@/components/ui";
@@ -112,6 +115,59 @@ const wordTimeSec = (s: EditSegment, wi: number) => {
   const n = Math.max(1, s.words.length);
   return (start + ((end - start) * wi) / n) / 1000;
 };
+// Maps between raw SOURCE time (the recording's own clock — what the Script
+// tab and source_start_ms/end_ms use) and the render's OUTPUT clock (what the
+// AI-voice track is actually placed on, since the render retimes each scene to
+// fill its narration's real length). Both directions are needed so the live
+// preview can retime video playback the same way the render does: outToSrcMs
+// drives continuous playback (audio's position -> where video should be),
+// srcToOutMs re-anchors audio after a manual seek (clicking a step, dragging
+// the scrubber) expressed in source time.
+/** The render's actual pacing rule for one segment (render.py's _render_segment):
+ * speed up when the window is longer than the narration; otherwise ALWAYS
+ * natural pace (1x) — never slow motion, even when speed works out to, say,
+ * 0.35 because the narration badly outlasts a short window. The remainder in
+ * that case is a freeze on the last frame, handled by the caller, not by
+ * crawling through the window in slow motion. */
+function scenePlaybackRate(seg: PreviewTimelineSegment): number {
+  return seg.speed >= 1.02 ? seg.speed : 1;
+}
+function outToSrcMs(outMs: number, tl: PreviewTimeline): number {
+  const segs = tl.segments;
+  if (!segs.length) return outMs;
+  for (const seg of segs) {
+    if (outMs < seg.out_start_ms) return seg.source_start_ms;
+    if (outMs < seg.out_end_ms) {
+      const srcLen = seg.source_end_ms - seg.source_start_ms;
+      if (srcLen <= 0) return seg.source_start_ms;
+      const elapsedOut = outMs - seg.out_start_ms;
+      return seg.source_start_ms + Math.min(srcLen, elapsedOut * scenePlaybackRate(seg));
+    }
+  }
+  return segs[segs.length - 1].source_end_ms;
+}
+function srcToOutMs(srcMs: number, tl: PreviewTimeline): number {
+  const segs = tl.segments;
+  if (!segs.length) return srcMs;
+  for (const seg of segs) {
+    if (srcMs < seg.source_start_ms) return seg.out_start_ms;
+    if (srcMs < seg.source_end_ms) {
+      const elapsedOut = (srcMs - seg.source_start_ms) / scenePlaybackRate(seg);
+      return seg.out_start_ms + Math.min(seg.out_duration_ms, elapsedOut);
+    }
+  }
+  return segs[segs.length - 1].out_end_ms;
+}
+/** Which segment owns this position on the output clock — or, if outMs falls in
+ * a gap (a segment was filtered out from under a stale timeline, see
+ * liveTimeline below), the NEXT segment after the gap, so playback skips
+ * straight over it instead of misreading the final segment as current. */
+function segmentAtOutMs(outMs: number, tl: PreviewTimeline) {
+  const segs = tl.segments;
+  if (!segs.length) return null;
+  return segs.find((sg) => outMs < sg.out_end_ms) ?? segs[segs.length - 1];
+}
+
 const mmss = (t: number) =>
   `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
 const clock = (t: number) =>
@@ -196,6 +252,17 @@ export default function VideoEditor({
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
+  // Set right before the conductor effect calls video.pause() to hold a scene's
+  // last frame — lets the real onPause handler tell "we froze it" apart from
+  // "the user hit pause" so a hold doesn't stop the whole player.
+  const conductorFreezingRef = useRef(false);
+  // Set right before the conductor effect calls video.play() to resume from a
+  // hold — video's native 'play' event fires either way, and onPlay normally
+  // force-resyncs audio to video's position on every play event. Audio is
+  // supposed to be the untouched master clock during active conductor
+  // playback; resyncing it on every hold-resume was making it jump/glitch
+  // audibly right at every freeze -> resume transition.
+  const conductorResumingRef = useRef(false);
   const activeRef = useRef<HTMLDivElement>(null);
   const frameRef = useRef<HTMLDivElement>(null);
   const [frameSize, setFrameSize] = useState({ w: 0, h: 0 });
@@ -206,6 +273,41 @@ export default function VideoEditor({
   const [voiceUrl, setVoiceUrl] = useState<string | null>(null);
   const [voiceLoading, setVoiceLoading] = useState(false);
   const [voiceError, setVoiceError] = useState(false);
+  // The render retimes each scene to fill its narration's real length (speed up
+  // when the source window is longer, hold the last frame when the voice runs
+  // longer). This is that same pacing, fetched so the live preview can mirror
+  // it instead of just playing raw footage at 1x underneath a shorter/longer
+  // voice track. Null while loading or when there's nothing to retime against
+  // (useOriginal voice) — playback then falls back to plain 1x sync.
+  const [previewTimeline, setPreviewTimeline] = useState<PreviewTimeline | null>(null);
+  // previewTimeline is a snapshot from whenever the voice track was last built
+  // (only rebuilt on a manual "Refresh voice", to avoid re-synthesizing on
+  // every keystroke) — so it goes stale the moment you delete/skip a scene or
+  // drag a boundary to trim one. Re-deriving it against the CURRENT spec on
+  // every render (cheap — id lookups) means playback immediately reflects
+  // that: a deleted/skipped step's slot is dropped entirely, and a trimmed
+  // step's source_start_ms/source_end_ms are swapped for its live values (with
+  // speed recomputed so it still lands its audio slot's real end) — so a
+  // shortened clip is capped at its NEW edge, not the stale wider one. Only
+  // the narration audio itself stays stale until refresh: its bytes are
+  // already baked into the built wav and can't be un-played without a rebuild.
+  const liveTimeline = useMemo<PreviewTimeline | null>(() => {
+    if (!previewTimeline || !spec) return null;
+    const byId = new Map(spec.segments.map((s) => [s.step_id, s]));
+    const segments: PreviewTimelineSegment[] = [];
+    for (const sg of previewTimeline.segments) {
+      const live = byId.get(sg.step_id);
+      if (!live || live.skipped) continue; // deleted or skipped -> drop its slot
+      const srcLen = live.source_end_ms - live.source_start_ms;
+      segments.push({
+        ...sg,
+        source_start_ms: live.source_start_ms,
+        source_end_ms: live.source_end_ms,
+        speed: srcLen > 0 ? srcLen / Math.max(1, sg.out_duration_ms) : 1,
+      });
+    }
+    return segments.length ? { ...previewTimeline, segments } : null;
+  }, [previewTimeline, spec]);
 
   const voiceKey = spec?.voice.voice_id;
   const voiceSpeed = spec?.voice.speed;
@@ -218,6 +320,7 @@ export default function VideoEditor({
   useEffect(() => {
     if (!spec || useOriginal) {
       setVoiceUrl(null);
+      setPreviewTimeline(null);
       setVoiceError(false);
       return;
     }
@@ -225,29 +328,36 @@ export default function VideoEditor({
     setVoiceLoading(true);
     setVoiceError(false);
     setVoiceUrl(null);
+    setPreviewTimeline(null);
+    const applyReady = async (url: string, timelineUrl: string | null) => {
+      if (cancelled) return;
+      setVoiceUrl(url);
+      setVoiceLoading(false);
+      if (timelineUrl) {
+        try {
+          setPreviewTimeline(await fetchPreviewTimeline(timelineUrl));
+        } catch {
+          setPreviewTimeline(null); // preview still works, just without retiming
+        }
+      }
+    };
     (async () => {
       try {
         await patchVideo(id, spec);
         const started = await startVoiceTrack(id, voiceKey!, voiceSpeed!);
         if (started.ready) {
-          if (!cancelled) {
-            setVoiceUrl(started.url);
-            setVoiceLoading(false);
-          }
+          await applyReady(started.url, started.timelineUrl);
           return;
         }
         for (let i = 0; i < 80 && !cancelled; i++) {
           await new Promise((r) => setTimeout(r, 1500));
-          const { url, ready } = await pollVoiceTrack(
+          const { url, ready, timelineUrl } = await pollVoiceTrack(
             id,
             voiceKey!,
             voiceSpeed!,
           );
           if (ready) {
-            if (!cancelled) {
-              setVoiceUrl(url);
-              setVoiceLoading(false);
-            }
+            await applyReady(url, timelineUrl);
             return;
           }
         }
@@ -273,18 +383,90 @@ export default function VideoEditor({
     const v = videoRef.current;
     if (!a) return;
     if (playing && aiVoiceActive) {
-      if (v) a.currentTime = v.currentTime;
-      void a.play().catch(() => {});
+      const sync = () => {
+        if (v)
+          a.currentTime = liveTimeline
+            ? srcToOutMs(v.currentTime * 1000, liveTimeline) / 1000
+            : v.currentTime;
+        void a.play().catch(() => {});
+      };
+      // A fresh voiceUrl (e.g. after "Refresh voice") reloads the <audio>
+      // element from scratch — reset to position 0, paused, with no metadata
+      // yet. Seeking/playing before it's actually ready can silently drop the
+      // seek and start from 0 instead, which sounds like a garbled jump right
+      // around the rebuild point. Wait for real metadata first.
+      if (a.readyState >= 1) {
+        sync();
+      } else {
+        a.addEventListener("loadedmetadata", sync, { once: true });
+        return () => a.removeEventListener("loadedmetadata", sync);
+      }
     } else {
       a.pause();
     }
-  }, [playing, aiVoiceActive, voiceUrl]);
+  }, [playing, aiVoiceActive, voiceUrl, liveTimeline]);
 
   // keep playback rate in sync
   useEffect(() => {
     if (videoRef.current) videoRef.current.playbackRate = rate;
     if (audioRef.current) audioRef.current.playbackRate = rate;
   }, [rate, voiceUrl, source]);
+
+  // Conductor: while the AI voice is driving playback and a pacing timeline is
+  // loaded, continuously retime the (muted) video against the voice's own
+  // clock every frame — speed up a scene shorter than its narration, hold its
+  // last frame on a scene longer than its narration — the same rule the
+  // render applies with ffmpeg setpts/tpad. Audio is the master clock here and
+  // its own rate is never touched by this (only by the user's manual `rate`
+  // control), so the voice always sounds natural; only the video's pace bends
+  // to match it.
+  useEffect(() => {
+    if (!playing || !aiVoiceActive || !liveTimeline?.segments.length) return;
+    const video = videoRef.current;
+    const audio = audioRef.current;
+    if (!video || !audio) return;
+    let raf = 0;
+    let frozenAt = -1; // index of the segment currently holding its last frame
+
+    const tick = () => {
+      const seg = segmentAtOutMs(audio.currentTime * 1000, liveTimeline);
+      if (seg) {
+        const srcLen = seg.source_end_ms - seg.source_start_ms;
+        const segRate = scenePlaybackRate(seg); // clamped: never below 1x, see scenePlaybackRate
+        const elapsedOut = audio.currentTime * 1000 - seg.out_start_ms;
+        const atEnd = srcLen <= 0 || elapsedOut * segRate >= srcLen;
+        const targetSrcMs =
+          srcLen > 0
+            ? seg.source_start_ms + Math.min(srcLen, elapsedOut * segRate)
+            : seg.source_start_ms;
+
+        if (atEnd) {
+          if (frozenAt !== seg.index) {
+            video.currentTime = targetSrcMs / 1000;
+            frozenAt = seg.index;
+          }
+          if (!video.paused) {
+            conductorFreezingRef.current = true;
+            video.pause();
+          }
+        } else {
+          frozenAt = -1;
+          if (video.paused || Math.abs(video.currentTime * 1000 - targetSrcMs) > 180) {
+            video.currentTime = targetSrcMs / 1000;
+          }
+          if (video.paused) {
+            conductorResumingRef.current = true;
+            void video.play().catch(() => {});
+          }
+          const wantRate = Math.min(8, Math.max(0.1, segRate)) * rate;
+          if (Math.abs(video.playbackRate - wantRate) > 0.01) video.playbackRate = wantRate;
+        }
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [playing, aiVoiceActive, liveTimeline, rate]);
 
   useEffect(() => {
     setSpec(null);
@@ -910,7 +1092,17 @@ export default function VideoEditor({
 
   function seekTo(seconds: number) {
     const v = videoRef.current;
-    if (v) v.currentTime = Math.max(0, Math.min(seconds, dur || seconds));
+    const target = Math.max(0, Math.min(seconds, dur || seconds));
+    if (v) v.currentTime = target;
+    // Move audio in the same call (not via the 'seeked' event, whose timing vs.
+    // the conductor's next tick isn't guaranteed) so a mid-playback scrub lands
+    // exactly where the user dragged instead of the conductor snapping video
+    // back to audio's stale pre-scrub position on its next frame.
+    if (aiVoiceActive && audioRef.current) {
+      audioRef.current.currentTime = liveTimeline
+        ? srcToOutMs(target * 1000, liveTimeline) / 1000
+        : target;
+    }
   }
   function playFrom(seconds: number) {
     seekTo(seconds);
@@ -1496,8 +1688,29 @@ export default function VideoEditor({
                             const v = e.currentTarget;
                             setCur(v.currentTime);
                             if (v.paused) return; // free scrubbing while paused
-                            // Preview the PROCESSED video: while playing, stay on kept
-                            // scenes only — skipped scenes AND the dead source gaps
+                            // Clip-range trim always applies, conductor or not: the
+                            // preview timeline already excludes out-of-range segments
+                            // (voicetrack.py mirrors render.py's trim filter), but that
+                            // only skips whole segments — one that starts inside the
+                            // range can still run past tr.end_ms, so this is the runtime
+                            // backstop that actually stops/loops playback at the edge.
+                            const tr = spec.trim;
+                            if (
+                              tr?.enabled &&
+                              tr.end_ms > tr.start_ms &&
+                              v.currentTime * 1000 >= tr.end_ms
+                            ) {
+                              v.pause();
+                              v.currentTime = tr.start_ms / 1000;
+                              return;
+                            }
+                            // With a preview timeline, the conductor effect below owns
+                            // positioning every frame (it's what actually retimes video
+                            // to the voice, the render's own scene-pacing rule) — this
+                            // handler's job then is just setCur (and the trim check) above.
+                            if (aiVoiceActive && liveTimeline) return;
+                            // Fallback (no timeline yet, or original-voice mode): stay on
+                            // kept scenes only — skipped scenes AND the dead source gaps
                             // between scenes (which the render drops) are jumped over.
                             const nowMs = v.currentTime * 1000;
                             const kept = spec.segments
@@ -1525,33 +1738,53 @@ export default function VideoEditor({
                                 return;
                               }
                             }
-                            const tr = spec.trim;
-                            if (
-                              tr?.enabled &&
-                              tr.end_ms > tr.start_ms &&
-                              v.currentTime * 1000 >= tr.end_ms
-                            ) {
-                              v.pause();
-                              v.currentTime = tr.start_ms / 1000;
-                            }
                           }}
                           onPlay={(e) => {
                             setPlaying(true);
                             e.currentTarget.muted = wantAiVoice;
+                            if (conductorResumingRef.current) {
+                              // the conductor resumed video from a held frame —
+                              // audio never stopped and is already exactly where
+                              // it should be; resyncing it FROM video here would
+                              // yank it to a slightly-off position and glitch.
+                              conductorResumingRef.current = false;
+                              return;
+                            }
                             if (aiVoiceActive && audioRef.current) {
-                              audioRef.current.currentTime =
-                                e.currentTarget.currentTime;
+                              audioRef.current.currentTime = liveTimeline
+                                ? srcToOutMs(
+                                    e.currentTarget.currentTime * 1000,
+                                    liveTimeline,
+                                  ) / 1000
+                                : e.currentTarget.currentTime;
                               void audioRef.current.play().catch(() => {});
                             }
                           }}
                           onPause={() => {
+                            if (conductorFreezingRef.current) {
+                              // the conductor paused video to hold a scene's last
+                              // frame while the (still-playing) voice catches up —
+                              // not a real user pause.
+                              conductorFreezingRef.current = false;
+                              return;
+                            }
                             setPlaying(false);
                             audioRef.current?.pause();
                           }}
                           onSeeked={(e) => {
+                            // While the conductor is running it owns video's position
+                            // (derived FROM audio) — seekTo() already moves audio in
+                            // the same call for user-initiated seeks, so resyncing
+                            // audio FROM video here too would fight it every time the
+                            // conductor's own corrective seeks land.
+                            if (playing && aiVoiceActive && liveTimeline) return;
                             if (aiVoiceActive && audioRef.current)
-                              audioRef.current.currentTime =
-                                e.currentTarget.currentTime;
+                              audioRef.current.currentTime = liveTimeline
+                                ? srcToOutMs(
+                                    e.currentTarget.currentTime * 1000,
+                                    liveTimeline,
+                                  ) / 1000
+                                : e.currentTarget.currentTime;
                           }}
                         />
                       </div>
@@ -1563,7 +1796,7 @@ export default function VideoEditor({
                     />
                     {captionText && (
                       <div className="pointer-events-none absolute inset-x-0 bottom-4 flex justify-center px-6">
-                        <span className="max-w-[90%] rounded-lg bg-black/75 px-3 py-1.5 text-center text-sm text-[var(--text)]">
+                        <span className="max-w-[90%] rounded-lg bg-black/75 px-3 py-1.5 text-center text-sm text-white">
                           {captionText}
                         </span>
                       </div>
@@ -1764,7 +1997,13 @@ export default function VideoEditor({
           onRedo={redo}
           canUndo={histState.canUndo}
           canRedo={histState.canRedo}
-          onDone={() => setActiveTool(null)}
+          onDone={() => {
+            setActiveTool(null);
+            // Trimming changes source_start_ms/source_end_ms, which changes the
+            // voice_signature — rebuild the preview automatically so stale audio
+            // never plays after a trim, instead of relying on a manual click.
+            void refreshVoice();
+          }}
         />
       ) : activeTool === "crop" ? (
         <CropTrack
@@ -3069,15 +3308,22 @@ function TrimBlock({
       ? peaksInRange(peaks, dur, it.s.source_start_ms, it.s.source_end_ms)
       : [];
   const dragEdge = useRef<"l" | "r" | null>(null);
+  // Only re-split words on a REAL drag (a `move` actually fired) — a bare
+  // click on the handle (pointerdown -> pointerup, no movement) must not
+  // re-run the word redistribution, or every accidental tap silently
+  // reshuffles/cuts words via the proportional-duration heuristic below.
+  const moved = useRef(false);
 
   const begin = (edge: "l" | "r") => (e: React.PointerEvent<HTMLElement>) => {
     e.stopPropagation();
     dragEdge.current = edge;
+    moved.current = false;
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
   };
   const move = (e: React.PointerEvent<HTMLElement>) => {
     if (!dragEdge.current) return;
     e.stopPropagation();
+    moved.current = true;
     // Anchor the drag to this block's own start — effective and source ms move
     // in lockstep within one block, so this maps the pointer straight to source ms.
     const ms = Math.round(
@@ -3089,9 +3335,12 @@ function TrimBlock({
   const end = (e: React.PointerEvent<HTMLElement>) => {
     e.stopPropagation();
     if (!dragEdge.current) return;
-    if (dragEdge.current === "l") onFinalizeStart();
-    else onFinalizeEnd();
+    if (moved.current) {
+      if (dragEdge.current === "l") onFinalizeStart();
+      else onFinalizeEnd();
+    }
     dragEdge.current = null;
+    moved.current = false;
   };
 
   return (

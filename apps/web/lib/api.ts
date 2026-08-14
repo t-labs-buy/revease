@@ -787,8 +787,37 @@ export async function patchVideo(projectId: string, editSpec: EditSpec): Promise
   return r.json();
 }
 
-function _voiceRes(j: { url: string; ready: boolean }) {
-  return { url: j.url?.startsWith("/") ? `${API_BASE}${j.url}` : j.url, ready: !!j.ready };
+/** One scene's slot on the render's OUTPUT clock — mirrors worker.pipeline.timeline.Segment.
+ * `speed` = source_len / out_duration (>1 plays faster to fit; a real `hold`-free
+ * scene where the voice outlasts the window instead holds its last frame, which
+ * the player detects itself rather than trusting a stale flag here). */
+export interface PreviewTimelineSegment {
+  step_id: string;
+  index: number;
+  out_start_ms: number;
+  out_end_ms: number;
+  out_duration_ms: number;
+  source_start_ms: number;
+  source_end_ms: number;
+  speed: number;
+  hold: boolean;
+}
+
+export interface PreviewTimeline {
+  total_duration_ms: number;
+  segments: PreviewTimelineSegment[];
+}
+
+function _voiceRes(j: { url: string; ready: boolean; timeline_url?: string | null }) {
+  return {
+    url: j.url?.startsWith("/") ? `${API_BASE}${j.url}` : j.url,
+    ready: !!j.ready,
+    timelineUrl: j.timeline_url
+      ? j.timeline_url.startsWith("/")
+        ? `${API_BASE}${j.timeline_url}`
+        : j.timeline_url
+      : null,
+  };
 }
 
 /** Kick off building the voice track (enqueues once). */
@@ -796,7 +825,7 @@ export async function startVoiceTrack(
   projectId: string,
   voiceId: string,
   speed: number,
-): Promise<{ url: string; ready: boolean }> {
+): Promise<{ url: string; ready: boolean; timelineUrl: string | null }> {
   const r = await fetch(`${API_BASE}/projects/${projectId}/voice-track`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -811,11 +840,18 @@ export async function pollVoiceTrack(
   projectId: string,
   voiceId: string,
   speed: number,
-): Promise<{ url: string; ready: boolean }> {
+): Promise<{ url: string; ready: boolean; timelineUrl: string | null }> {
   const q = `voice_id=${encodeURIComponent(voiceId)}&speed=${speed}`;
   const r = await fetch(`${API_BASE}/projects/${projectId}/voice-track?${q}`, { cache: "no-store" });
   if (!r.ok) throw new Error(`voice-track poll failed: ${r.status}`);
   return _voiceRes(await r.json());
+}
+
+/** Fetch and parse a preview timeline JSON (from `timelineUrl`). */
+export async function fetchPreviewTimeline(url: string): Promise<PreviewTimeline> {
+  const r = await fetch(url, { cache: "no-store" });
+  if (!r.ok) throw new Error(`preview timeline fetch failed: ${r.status}`);
+  return r.json();
 }
 
 export async function renderVideo(projectId: string): Promise<RenderJob> {

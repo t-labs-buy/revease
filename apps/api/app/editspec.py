@@ -39,15 +39,17 @@ def effective_script(words: list[str], removed: list[int]) -> str:
 
 
 def voice_signature(spec: dict[str, Any]) -> str:
-    """Content hash of what the AI-voice track depends on: each segment's spoken
-    text and where it sits on the timeline. Editing the script changes this, so the
-    cached preview rebuilds instead of serving stale audio."""
+    """Content hash of what the AI-voice track (and its pacing timeline) depends
+    on: each segment's spoken text, its source window, and whether it's in the
+    mix at all. Editing the script, trimming a segment, toggling skip, or
+    changing the global pace all change this, so the cached preview rebuilds
+    instead of serving stale audio or stale pacing."""
     payload = [
-        [int(s.get("source_start_ms", 0) or 0),
-         effective_script(s.get("words", []), s.get("removed", []))]
+        [int(s.get("source_start_ms", 0) or 0), int(s.get("source_end_ms", 0) or 0),
+         bool(s.get("skipped")), effective_script(s.get("words", []), s.get("removed", []))]
         for s in spec.get("segments", [])
     ]
-    raw = json.dumps(payload, ensure_ascii=False)
+    raw = json.dumps([payload, spec.get("pace"), spec.get("trim")], ensure_ascii=False)
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
 
 
@@ -55,6 +57,13 @@ def voice_track_key(project_id: str, voice_id: str, speed: float, spec: dict[str
     """Storage key for the narration preview track — includes the script hash so a
     script edit yields a new key (no stale cache)."""
     return f"voicepreview/{project_id}_{voice_id}_{speed}_{voice_signature(spec)}.wav"
+
+
+def voice_timeline_key(project_id: str, voice_id: str, speed: float, spec: dict[str, Any]) -> str:
+    """Storage key for the preview track's pacing timeline (build_timeline's
+    per-segment out_start_ms/speed/hold) — same signature as the audio itself,
+    so the two can never point at mismatched content."""
+    return f"voicepreview/{project_id}_{voice_id}_{speed}_{voice_signature(spec)}.json"
 
 
 # Auto-zoom density: zooming every scene makes the whole video feel like it never

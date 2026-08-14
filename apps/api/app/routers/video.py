@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 from app.db import get_session
 from app.diff import migrate_edit_spec
-from app.editspec import build_edit_spec, mark_dirty, voice_track_key
+from app.editspec import build_edit_spec, mark_dirty, voice_timeline_key, voice_track_key
 from app.models import CaptureSession, MediaAsset, RenderJob, VideoProject, WorkflowGraphRow
 from app.queue import enqueue_render, enqueue_voice_track
 from app.schemas import EditSpecPatch, RenderJobOut, VideoSpecOut
@@ -134,10 +134,15 @@ def start_voice_track(
     The key is content-hashed on the script, so editing the script rebuilds it."""
     vp = _get_or_build(db, project_id)
     key = voice_track_key(project_id, payload.voice_id, payload.speed, vp.edit_spec_json)
+    tkey = voice_timeline_key(project_id, payload.voice_id, payload.speed, vp.edit_spec_json)
     if store.exists(key):
-        return {"url": store.download_url(key), "ready": True}
+        return {
+            "url": store.download_url(key),
+            "ready": True,
+            "timeline_url": store.download_url(tkey) if store.exists(tkey) else None,
+        }
     enqueue_voice_track(project_id, payload.voice_id, payload.speed)
-    return {"url": store.download_url(key), "ready": False}
+    return {"url": store.download_url(key), "ready": False, "timeline_url": None}
 
 
 @router.get("/projects/{project_id}/voice-track")
@@ -147,7 +152,13 @@ def voice_track_status(
     """Poll-only readiness check — does NOT re-enqueue (avoids flooding the worker)."""
     vp = _get_or_build(db, project_id)
     key = voice_track_key(project_id, voice_id, speed, vp.edit_spec_json)
-    return {"url": store.download_url(key), "ready": store.exists(key)}
+    tkey = voice_timeline_key(project_id, voice_id, speed, vp.edit_spec_json)
+    ready = store.exists(key)
+    return {
+        "url": store.download_url(key),
+        "ready": ready,
+        "timeline_url": store.download_url(tkey) if ready and store.exists(tkey) else None,
+    }
 
 
 @router.get("/render/{job_id}", response_model=RenderJobOut)
