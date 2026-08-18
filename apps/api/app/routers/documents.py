@@ -8,9 +8,11 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.auth import CurrentUser
 from app.db import get_session
 from app.docgen import build_document, render_markdown, render_pdf, slugify
 from app.models import Document, WorkflowGraphRow
+from app.ownership import owned_project
 from app.schemas import DocumentOut
 
 router = APIRouter(tags=["documents"])
@@ -31,7 +33,9 @@ def _latest_graph(db: Session, project_id: str) -> WorkflowGraphRow:
     return row
 
 
-def _get_or_build(db: Session, project_id: str) -> Document:
+def _get_or_build(db: Session, user, project_id: str) -> Document:
+    """Ownership is checked here so every route that reads a doc inherits it."""
+    owned_project(db, user, project_id)
     graph = _latest_graph(db, project_id)
     doc = db.scalar(select(Document).where(Document.project_id == project_id))
     if doc is None or doc.graph_version != graph.version:
@@ -48,8 +52,10 @@ def _get_or_build(db: Session, project_id: str) -> Document:
 
 
 @router.get("/projects/{project_id}/document", response_model=DocumentOut)
-def get_document(project_id: str, db: Session = Depends(get_session)) -> DocumentOut:
-    doc = _get_or_build(db, project_id)
+def get_document(
+    project_id: str, user: CurrentUser, db: Session = Depends(get_session)
+) -> DocumentOut:
+    doc = _get_or_build(db, user, project_id)
     return DocumentOut(
         document_id=doc.id,
         project_id=project_id,
@@ -60,8 +66,12 @@ def get_document(project_id: str, db: Session = Depends(get_session)) -> Documen
 
 @router.post("/projects/{project_id}/document", response_model=DocumentOut)
 def regenerate_document(
-    project_id: str, payload: DocStyleReq = DocStyleReq(), db: Session = Depends(get_session)
+    project_id: str,
+    user: CurrentUser,
+    payload: DocStyleReq = DocStyleReq(),
+    db: Session = Depends(get_session),
 ) -> DocumentOut:
+    owned_project(db, user, project_id)
     graph = _latest_graph(db, project_id)
     doc = db.scalar(select(Document).where(Document.project_id == project_id))
     built = build_document(graph.graph_json)
@@ -86,10 +96,11 @@ def regenerate_document(
 def export_document(
     project_id: str,
     request: Request,
+    user: CurrentUser,
     format: str = Query(default="md", pattern="^(md|pdf)$"),
     db: Session = Depends(get_session),
 ) -> Response:
-    doc = _get_or_build(db, project_id).doc_json
+    doc = _get_or_build(db, user, project_id).doc_json
     name = slugify(doc.get("title", "document"))
     if format == "md":
         base = str(request.base_url).rstrip("/")

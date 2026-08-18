@@ -231,19 +231,27 @@ export function Recorder({ projectId, onDone }: { projectId: string; onDone: () 
       )}
 
       {phase === "idle" && (
-        <div className="flex items-center gap-3">
-          <button onClick={runCountdown} className="btn btn-primary">
+        <div className="flex items-center gap-4">
+          <button
+            onClick={runCountdown}
+            className="inline-flex items-center gap-2 rounded-xl bg-[#7C3AED] px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition-transform duration-200 hover:scale-[1.03]"
+          >
             Start recording
           </button>
-          <label className="flex items-center gap-2 text-sm text-zinc-400">
-            <input type="checkbox" checked={micOn} onChange={(e) => setMicOn(e.target.checked)} />
+          <label className="flex items-center gap-2 text-sm text-[var(--text-2)]">
+            <input
+              type="checkbox"
+              checked={micOn}
+              onChange={(e) => setMicOn(e.target.checked)}
+              className="h-4 w-4 accent-[#7C3AED]"
+            />
             Mic
           </label>
         </div>
       )}
 
       {phase === "countdown" && (
-        <div className="text-4xl font-bold tabular-nums text-violet-300">
+        <div className="text-4xl font-bold tabular-nums text-[#7C3AED]">
           {count > 0 ? count : "Go"}
         </div>
       )}
@@ -262,17 +270,17 @@ export function Recorder({ projectId, onDone }: { projectId: string; onDone: () 
           <button onClick={() => void stop()} className="btn btn-primary btn-sm">
             Stop &amp; save
           </button>
-          <span className="text-xs text-zinc-500">{eventsRef.current.length} events</span>
+          <span className="text-xs text-[var(--text-3)]">{eventsRef.current.length} events</span>
         </div>
       )}
 
-      {phase === "uploading" && <p className="text-sm text-zinc-400">Uploading…</p>}
+      {phase === "uploading" && <p className="text-sm text-[var(--text-2)]">Uploading…</p>}
       {phase === "error" && (
-        <p className="mt-3 rounded-lg border border-red-900/60 bg-red-950/30 px-3 py-2 text-sm text-red-300">
+        <p className="mt-3 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-400">
           {error}
         </p>
       )}
-      <p className="mt-3 text-xs text-zinc-600">
+      <p className="mt-4 text-xs leading-relaxed text-[var(--text-3)]">
         Click log covers this tab only — the MV3 extension captures full click telemetry anywhere.
       </p>
     </div>

@@ -2,11 +2,8 @@
 logic is tested deterministically without a key or network."""
 
 import app.routers.auto_record as ar
-from fastapi.testclient import TestClient
 
-from app.main import app
-
-client = TestClient(app)
+from tests.helpers import client
 
 
 def _project() -> str:

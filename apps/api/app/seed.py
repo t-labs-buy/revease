@@ -1,12 +1,16 @@
-"""Seed sample data so Skills / Knowledge Base / Library have content to explore.
-Idempotent: only inserts when a table is empty. Run with: python -m app.seed"""
+"""Seed sample data so Skills / Knowledge Base have content to explore.
+
+Content is per-user: `seed_for_user` runs once when an account registers, so each
+new space starts with the canonical skill and the onboarding articles instead of
+three empty pages. Idempotent — it only inserts what that user is missing."""
 
 from __future__ import annotations
 
 from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 
 from app.db import SessionLocal, init_db
-from app.models import KbArticle, Project, Skill
+from app.models import KbArticle, Skill
 
 # The single canonical skill: a product demo with automatic mouse/click zoom.
 SAMPLE_SKILLS = [
@@ -75,33 +79,49 @@ SAMPLE_ARTICLES = [
     },
 ]
 
-SAMPLE_PROJECTS = ["Product Onboarding Walkthrough", "TMS Inbound Vendors Demo"]
+def seed_for_user(db: Session, user_id: str) -> dict:
+    """Give one user's space its starting content. Called on registration."""
+    counts = {"skills": 0, "articles": 0}
 
+    # drop superseded sample skills, then add any canonical ones that are missing
+    for old in db.scalars(
+        select(Skill).where(Skill.user_id == user_id, Skill.name.in_(_OLD_SAMPLE_NAMES))
+    ):
+        db.delete(old)
+    existing = {s.name for s in db.scalars(select(Skill).where(Skill.user_id == user_id))}
+    for s in SAMPLE_SKILLS:
+        if s["name"] not in existing:
+            db.add(Skill(user_id=user_id, **s))
+            counts["skills"] += 1
 
-def seed_samples() -> dict:
-    init_db()
-    db = SessionLocal()
-    counts = {"skills": 0, "articles": 0, "projects": 0}
-    try:
-        # drop superseded sample skills, then add any canonical ones that are missing
-        for old in db.scalars(select(Skill).where(Skill.name.in_(_OLD_SAMPLE_NAMES))):
-            db.delete(old)
-        existing = {s.name for s in db.scalars(select(Skill))}
-        for s in SAMPLE_SKILLS:
-            if s["name"] not in existing:
-                db.add(Skill(**s))
-                counts["skills"] += 1
-        if db.scalar(select(func.count(KbArticle.id))) == 0:
-            db.add_all([KbArticle(**a) for a in SAMPLE_ARTICLES])
-            counts["articles"] = len(SAMPLE_ARTICLES)
-        if db.scalar(select(func.count(Project.id))) == 0:
-            db.add_all([Project(name=n) for n in SAMPLE_PROJECTS])
-            counts["projects"] = len(SAMPLE_PROJECTS)
-        db.commit()
-    finally:
-        db.close()
+    has_articles = db.scalar(
+        select(func.count(KbArticle.id)).where(KbArticle.user_id == user_id)
+    )
+    if not has_articles:
+        db.add_all([KbArticle(user_id=user_id, **a) for a in SAMPLE_ARTICLES])
+        counts["articles"] = len(SAMPLE_ARTICLES)
+
+    db.commit()
     return counts
 
 
+def seed_all_users() -> dict:
+    """Top up every existing account's space. Run with: python -m app.seed"""
+    from app.models import User
+
+    init_db()
+    db = SessionLocal()
+    totals = {"skills": 0, "articles": 0, "users": 0}
+    try:
+        for user in db.scalars(select(User)):
+            counts = seed_for_user(db, user.id)
+            totals["skills"] += counts["skills"]
+            totals["articles"] += counts["articles"]
+            totals["users"] += 1
+    finally:
+        db.close()
+    return totals
+
+
 if __name__ == "__main__":
-    print("seeded:", seed_samples())
+    print("seeded:", seed_all_users())

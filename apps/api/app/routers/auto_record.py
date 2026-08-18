@@ -14,8 +14,10 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.agent import decide_next_action
+from app.auth import CurrentUser
 from app.db import get_session
-from app.models import AutoRecordRun, CaptureSession, Event, Job, Project
+from app.models import AutoRecordRun, CaptureSession, Event, Job
+from app.ownership import owned_autorecord_run, owned_project, project_ids_for
 from app.queue import enqueue_understanding
 from app.schemas import (
     ActionResult,
@@ -36,13 +38,6 @@ _TERMINAL = {"ready", "failed", "aborted"}
 
 
 # --------------------------------------------------------------------------- #
-def _get_run_or_404(db: Session, run_id: str) -> AutoRecordRun:
-    run = db.get(AutoRecordRun, run_id)
-    if run is None:
-        raise HTTPException(status_code=404, detail="run not found")
-    return run
-
-
 def _parse_plan(text: str) -> list[dict]:
     """Turn the free-text coverage plan (bullets / numbered / lines) into plan items."""
     items: list[dict] = []
@@ -110,9 +105,10 @@ def _apply_results(log: list[dict], results: list[ActionResult]) -> None:
 
 # --------------------------------------------------------------------------- #
 @router.post("/runs", response_model=AutoRecordRunOut, status_code=status.HTTP_201_CREATED)
-def create_run(payload: AutoRecordCreate, db: Session = Depends(get_session)) -> AutoRecordRunOut:
-    if db.get(Project, payload.project_id) is None:
-        raise HTTPException(status_code=404, detail="project not found")
+def create_run(
+    payload: AutoRecordCreate, user: CurrentUser, db: Session = Depends(get_session)
+) -> AutoRecordRunOut:
+    owned_project(db, user, payload.project_id)
     plan = _parse_plan(payload.coverage_plan)
     if not plan:
         raise HTTPException(status_code=400, detail="coverage plan is empty")
@@ -144,9 +140,9 @@ def create_run(payload: AutoRecordCreate, db: Session = Depends(get_session)) ->
 
 @router.post("/runs/{run_id}/step", response_model=AgentStepOut)
 def agent_step(
-    run_id: str, payload: AgentStepIn, db: Session = Depends(get_session)
+    run_id: str, payload: AgentStepIn, user: CurrentUser, db: Session = Depends(get_session)
 ) -> AgentStepOut:
-    run = _get_run_or_404(db, run_id)
+    run = owned_autorecord_run(db, user, run_id)
     if run.status in _TERMINAL:
         raise HTTPException(status_code=409, detail=f"run is {run.status}")
 
@@ -240,12 +236,12 @@ class RunComplete(BaseModel):
 
 @router.post("/runs/{run_id}/complete", response_model=AutoRecordRunOut)
 def complete_run(
-    run_id: str, payload: RunComplete, db: Session = Depends(get_session)
+    run_id: str, payload: RunComplete, user: CurrentUser, db: Session = Depends(get_session)
 ) -> AutoRecordRunOut:
     """Finalize a run: mark the session captured and kick off the understanding
     pipeline (which builds the graph from the agent log). Reuses the same enqueue
     path as manual sessions so nothing downstream is Auto-Record-specific."""
-    run = _get_run_or_404(db, run_id)
+    run = owned_autorecord_run(db, user, run_id)
     sess = db.get(CaptureSession, run.session_id)
     if sess is None:
         raise HTTPException(status_code=404, detail="session not found")
@@ -271,8 +267,10 @@ def complete_run(
 
 
 @router.post("/runs/{run_id}/abort", response_model=AutoRecordRunOut)
-def abort_run(run_id: str, db: Session = Depends(get_session)) -> AutoRecordRunOut:
-    run = _get_run_or_404(db, run_id)
+def abort_run(
+    run_id: str, user: CurrentUser, db: Session = Depends(get_session)
+) -> AutoRecordRunOut:
+    run = owned_autorecord_run(db, user, run_id)
     if run.status not in _TERMINAL:
         run.status = "aborted"
         sess = db.get(CaptureSession, run.session_id)
@@ -285,19 +283,25 @@ def abort_run(run_id: str, db: Session = Depends(get_session)) -> AutoRecordRunO
 
 @router.get("/runs", response_model=list[AutoRecordRunOut])
 def list_runs(
+    user: CurrentUser,
     project_id: str | None = Query(default=None),
     limit: int = Query(default=50, le=200),
     db: Session = Depends(get_session),
 ) -> list[AutoRecordRunOut]:
     q = select(AutoRecordRun).order_by(AutoRecordRun.created_at.desc()).limit(limit)
     if project_id:
+        owned_project(db, user, project_id)
         q = q.where(AutoRecordRun.project_id == project_id)
+    else:
+        q = q.where(AutoRecordRun.project_id.in_(project_ids_for(db, user)))
     return [_run_out(db, r) for r in db.scalars(q)]
 
 
 @router.get("/runs/{run_id}", response_model=AutoRecordRunOut)
-def get_run(run_id: str, db: Session = Depends(get_session)) -> AutoRecordRunOut:
-    return _run_out(db, _get_run_or_404(db, run_id))
+def get_run(
+    run_id: str, user: CurrentUser, db: Session = Depends(get_session)
+) -> AutoRecordRunOut:
+    return _run_out(db, owned_autorecord_run(db, user, run_id))
 
 
 def _run_out(db: Session, run: AutoRecordRun) -> AutoRecordRunOut:

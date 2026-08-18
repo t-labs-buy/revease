@@ -2,7 +2,7 @@ import { listProjects } from "./api.js";
 
 const $ = (id) => document.getElementById(id);
 const els = {
-  apiBase: $("apiBase"), project: $("project"), startUrl: $("startUrl"),
+  apiBase: $("apiBase"), token: $("token"), project: $("project"), startUrl: $("startUrl"),
   plan: $("plan"), transcript: $("transcript"), start: $("start"),
   form: $("form"), live: $("live"), timer: $("timer"), step: $("step"),
   phase: $("phase"), planList: $("plan"), pause: $("pause"), abort: $("abort"),
@@ -136,9 +136,15 @@ chrome.runtime.onMessage.addListener((msg) => {
   if (msg && msg.kind === "auto-status") renderStatus(msg.status);
 });
 
+els.token.addEventListener("change", async () => {
+  await chrome.storage.local.set({ accessToken: els.token.value.trim() });
+  await loadProjects();
+});
+
 (async () => {
-  const cfg = await chrome.storage.local.get("apiBase");
+  const cfg = await chrome.storage.local.get(["apiBase", "accessToken"]);
   if (cfg.apiBase) els.apiBase.value = cfg.apiBase;
+  if (cfg.accessToken) els.token.value = cfg.accessToken;
   await loadProjects();
   // If a run is already in progress (panel reopened), resume the live view.
   const res = await send({ kind: "auto-query" });

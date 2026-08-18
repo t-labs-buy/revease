@@ -1,4 +1,8 @@
-"""Publish & share — public tokenized links to a rendered video or generated doc."""
+"""Publish & share — public tokenized links to a rendered video or generated doc.
+
+Creating, listing and revoking links is private to the owner; *redeeming* a link
+(`GET /shares/{token}`) is deliberately public — an unguessable token is the whole
+authorization model, and that is the point of a share link."""
 
 from __future__ import annotations
 
@@ -6,9 +10,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.auth import CurrentUser
 from app.db import get_session
 from app.docgen import build_document
-from app.models import Project, RenderJob, Share, VideoProject, WorkflowGraphRow
+from app.models import RenderJob, Share, VideoProject, WorkflowGraphRow
+from app.ownership import owned_project, project_ids_for
 from app.schemas import ShareCreate, SharePublic, ShareOut
 from app.storage import store
 
@@ -36,10 +42,9 @@ def _latest_render_key(db: Session, project_id: str) -> str | None:
 
 @router.post("/projects/{project_id}/share", response_model=ShareOut)
 def create_share(
-    project_id: str, payload: ShareCreate, db: Session = Depends(get_session)
+    project_id: str, payload: ShareCreate, user: CurrentUser, db: Session = Depends(get_session)
 ) -> ShareOut:
-    if db.get(Project, project_id) is None:
-        raise HTTPException(status_code=404, detail="project not found")
+    owned_project(db, user, project_id)
     if payload.kind == "video" and _latest_render_key(db, project_id) is None:
         raise HTTPException(status_code=400, detail="generate a video before sharing it")
     # reuse an existing active share of this kind if present
@@ -58,7 +63,10 @@ def create_share(
 
 
 @router.get("/projects/{project_id}/shares", response_model=list[ShareOut])
-def list_shares(project_id: str, db: Session = Depends(get_session)) -> list[ShareOut]:
+def list_shares(
+    project_id: str, user: CurrentUser, db: Session = Depends(get_session)
+) -> list[ShareOut]:
+    owned_project(db, user, project_id)
     rows = db.scalars(
         select(Share).where(Share.project_id == project_id, Share.revoked == False)  # noqa: E712
     )
@@ -66,18 +74,24 @@ def list_shares(project_id: str, db: Session = Depends(get_session)) -> list[Sha
 
 
 @router.get("/shares", response_model=list[ShareOut])
-def list_all_shares(db: Session = Depends(get_session)) -> list[ShareOut]:
+def list_all_shares(user: CurrentUser, db: Session = Depends(get_session)) -> list[ShareOut]:
     rows = db.scalars(
-        select(Share).where(Share.revoked == False).order_by(Share.created_at.desc())  # noqa: E712
+        select(Share)
+        .where(
+            Share.revoked == False,  # noqa: E712
+            Share.project_id.in_(project_ids_for(db, user)),
+        )
+        .order_by(Share.created_at.desc())
     )
     return [_out(s) for s in rows]
 
 
 @router.delete("/shares/{token}")
-def revoke_share(token: str, db: Session = Depends(get_session)) -> dict:
+def revoke_share(token: str, user: CurrentUser, db: Session = Depends(get_session)) -> dict:
     s = db.scalar(select(Share).where(Share.token == token))
     if s is None:
         raise HTTPException(status_code=404, detail="share not found")
+    owned_project(db, user, s.project_id)  # only the owner can revoke their link
     s.revoked = True
     db.commit()
     return {"revoked": True}

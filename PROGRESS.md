@@ -57,6 +57,16 @@ Release-gate checklist (§5) all satisfied except the two provider-key items (Wh
 - **Voice:** default is **Piper** — keyless local neural TTS (`REFRACT_TTS_PROVIDER=piper`, model auto-downloads ~63MB to `data/piper/`). Verified real speech synthesis. `openai` and silent-clip paths remain behind the same adapter.
 - **Config fix:** `Settings` now loads the **repo-root `.env`** regardless of CWD (api/worker run from `apps/*`), so `.env` keys actually take effect. All provider/whisper/tts config flows through `get_settings()`.
 
+## Accounts & per-user spaces
+- **Auth:** email + password (bcrypt, sha256-prehashed so long passphrases aren't truncated at bcrypt's 72-byte limit) issuing stateless HS256 JWT bearer tokens. Signing key from `REFRACT_AUTH_SECRET_KEY`, else generated once into `data/auth_secret.key`. Logout is client-side (drop the token).
+- **Endpoints:** `POST /auth/register` (creates the account only — returns the user, **no token**, so registering does not sign you in), `POST /auth/login` (the only call that issues a token), `GET /auth/me`.
+- **Ownership:** `users` table; `user_id` on the four top-level entities (Project, Skill, KbArticle, BrandPackage). Everything else hangs off a Project, so `app/ownership.py` resolves ownership by walking up to it. Another user's row returns **404, not 403**, so responses never confirm an id exists.
+- **Still public by design:** `/auth/register`, `/auth/login`, `/healthz`, `/voices[/preview]`, `GET /media/{key}` (`<video src>` and the share viewer can't send a header; keys embed UUIDs) and `GET /shares/{token}` (an unguessable token *is* the share authorization). `PUT /media/{key}` used to be anonymous and is now authenticated **and** authorized against the key's owning session/package.
+- **Web:** `lib/http.ts` is the single transport (attaches the token, and on 401 clears it and bounces to `/login`); `AuthGate` in the root layout makes every route private unless whitelisted, so a new page is private by default. Doc export moved from `<a href>` to an authenticated blob download.
+- **Extension:** reads `accessToken` from `chrome.storage.local` inside `api.js`, so no other extension file knows about auth. Paste API base + token from the web app's **Account → Connect extension**.
+- **Verified:** api 43/43 (incl. a cross-account isolation suite), workers 45/45, web typecheck + `next build` clean.
+- **Not built yet — password reset / change.** Deliberately deferred: it needs an email transport (SMTP/Resend) this deployment doesn't have. The `/account` page says so in the UI. When adding it: a `PasswordResetToken` table (single-use, short TTL, hashed at rest), `POST /auth/forgot-password` (always 200, never reveal whether the email exists), `POST /auth/reset-password`, and a `/reset-password` page.
+
 ## Notes / environment
 - **No NVIDIA GPU visible** in the current dev shell — Whisper will fall back to CPU (slow) in P2 until CUDA 12.x is set up on the RTX 5070 target.
 - TTS: OpenRouter has no TTS endpoint; voice uses OpenAI TTS behind the `TTSProvider` adapter (swappable).

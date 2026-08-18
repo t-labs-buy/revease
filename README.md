@@ -1,13 +1,13 @@
 # Refract V1
 
-> Record once. Refract into everything. Capture a workflow → AI generates a polished video → edit → AI regenerates. Single-user, runs locally.
+> Record once. Refract into everything. Capture a workflow → AI generates a polished video → edit → AI regenerates. Multi-user: each account gets its own private space.
 
 See [V1-CORE-PLAN.md](V1-CORE-PLAN.md) for scope and [PROGRESS.md](PROGRESS.md) for status.
 
 ## Layout
 ```
 apps/web         Next.js (App Router, TS, Tailwind) — dashboard + editor
-apps/api         FastAPI (3.12) — SQLite, local media store, no auth
+apps/api         FastAPI (3.12) — SQLite, local media store, per-user auth (JWT bearer)
 apps/workers     Celery + Redis — AI pipeline (media/ml/llm/render)
 apps/extension   MV3 capture extension (P1)
 packages/workflow-graph  IR JSON Schema + Python & TS validators (single source of truth)

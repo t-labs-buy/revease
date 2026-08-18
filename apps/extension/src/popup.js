@@ -2,6 +2,7 @@ import { listProjects } from "./api.js";
 
 const $ = (id) => document.getElementById(id);
 const apiBaseEl = $("apiBase");
+const tokenEl = $("token");
 const projectEl = $("project");
 const startEl = $("start");
 const stopEl = $("stop");
@@ -44,6 +45,12 @@ async function refreshRecordingUI() {
 
 apiBaseEl.addEventListener("change", async () => {
   await chrome.storage.local.set({ apiBase: apiBaseEl.value });
+  await loadProjects();
+});
+// The token is what makes every request work, so re-list projects on change to
+// give immediate feedback on whether it was accepted.
+tokenEl.addEventListener("change", async () => {
+  await chrome.storage.local.set({ accessToken: tokenEl.value.trim() });
   await loadProjects();
 });
 projectEl.addEventListener("change", () =>
@@ -89,8 +96,9 @@ $("autorec").addEventListener("click", async () => {
 });
 
 (async () => {
-  const cfg = await chrome.storage.local.get("apiBase");
+  const cfg = await chrome.storage.local.get(["apiBase", "accessToken"]);
   if (cfg.apiBase) apiBaseEl.value = cfg.apiBase;
+  if (cfg.accessToken) tokenEl.value = cfg.accessToken;
   await loadProjects();
   await refreshRecordingUI();
 })();

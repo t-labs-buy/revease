@@ -12,7 +12,7 @@ GRAPH_PY := packages/workflow-graph/python
 # harmless no-op on Linux/Docker where the system ffmpeg already has drawtext.
 export PATH := /opt/homebrew/opt/ffmpeg-full/bin:$(PATH)
 
-.PHONY: help install redis dev api worker web test test-py test-js lint typecheck fmt clean
+.PHONY: help install redis dev api worker web test test-py test-js lint typecheck fmt purge-legacy purge-legacy-force clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -73,6 +73,12 @@ typecheck: ## Typecheck all apps
 fmt: ## Format Python
 	cd $(API_DIR) && uv run ruff format .
 	cd $(WORKERS_DIR) && uv run ruff format .
+
+purge-legacy: ## Show pre-auth ownerless rows (projects/skills/articles/packages) — dry run
+	cd $(API_DIR) && uv run python -m app.purge
+
+purge-legacy-force: ## DELETE those ownerless rows and their media. Back up data/ first!
+	cd $(API_DIR) && uv run python -m app.purge --yes
 
 clean: ## Remove local data (SQLite + media)
 	rm -rf data

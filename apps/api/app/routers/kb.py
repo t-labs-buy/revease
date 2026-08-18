@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.auth import CurrentUser
 from app.db import get_session
 from app.models import KbArticle
+from app.ownership import owned_project, owned_row
 
 router = APIRouter(prefix="/kb", tags=["kb"])
 
@@ -42,22 +44,29 @@ def _out(a: KbArticle) -> ArticleOut:
 
 
 @router.get("", response_model=list[ArticleOut])
-def list_articles(db: Session = Depends(get_session)) -> list[ArticleOut]:
-    rows = db.scalars(select(KbArticle).order_by(KbArticle.created_at.desc()))
+def list_articles(user: CurrentUser, db: Session = Depends(get_session)) -> list[ArticleOut]:
+    rows = db.scalars(
+        select(KbArticle).where(KbArticle.user_id == user.id).order_by(KbArticle.created_at.desc())
+    )
     return [_out(a) for a in rows]
 
 
 @router.get("/{article_id}", response_model=ArticleOut)
-def get_article(article_id: str, db: Session = Depends(get_session)) -> ArticleOut:
-    a = db.get(KbArticle, article_id)
-    if a is None:
-        raise HTTPException(status_code=404, detail="article not found")
-    return _out(a)
+def get_article(
+    article_id: str, user: CurrentUser, db: Session = Depends(get_session)
+) -> ArticleOut:
+    return _out(owned_row(db, user, KbArticle, article_id, "article"))
 
 
 @router.post("", response_model=ArticleOut)
-def create_article(payload: ArticleIn, db: Session = Depends(get_session)) -> ArticleOut:
+def create_article(
+    payload: ArticleIn, user: CurrentUser, db: Session = Depends(get_session)
+) -> ArticleOut:
+    # An article may reference a project, but only one the caller owns.
+    if payload.project_id:
+        owned_project(db, user, payload.project_id)
     a = KbArticle(
+        user_id=user.id,
         title=payload.title.strip() or "Untitled",
         summary=payload.summary,
         body_md=payload.body_md,
@@ -71,9 +80,9 @@ def create_article(payload: ArticleIn, db: Session = Depends(get_session)) -> Ar
 
 
 @router.delete("/{article_id}")
-def delete_article(article_id: str, db: Session = Depends(get_session)) -> dict:
-    a = db.get(KbArticle, article_id)
-    if a:
-        db.delete(a)
-        db.commit()
+def delete_article(
+    article_id: str, user: CurrentUser, db: Session = Depends(get_session)
+) -> dict:
+    db.delete(owned_row(db, user, KbArticle, article_id, "article"))
+    db.commit()
     return {"ok": True}

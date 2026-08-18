@@ -5,12 +5,40 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 # ---- shared ----
 SourceType = Literal["extension", "recorder", "upload", "auto"]
 EventType = Literal["click", "input", "navigation", "scroll", "keydown"]
 Bbox = Annotated[list[float], Field(min_length=4, max_length=4)]
+
+
+# ---- auth ----
+class RegisterIn(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=200)
+    name: str = Field(default="", max_length=120)
+
+
+class LoginIn(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=1, max_length=200)
+
+
+class UserOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    email: str
+    name: str
+    created_at: datetime
+
+
+class TokenOut(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int  # seconds until the token expires
+    user: UserOut
 
 
 class ProjectCreate(BaseModel):
@@ -24,6 +52,10 @@ class ProjectOut(BaseModel):
     name: str
     favorite: int = 0
     created_at: datetime
+    # Whether a step-by-step doc has actually been generated for this project, so
+    # the UI can label it truthfully instead of guessing from capture counts.
+    has_document: bool = False
+    capture_count: int = 0
 
 
 class HealthOut(BaseModel):

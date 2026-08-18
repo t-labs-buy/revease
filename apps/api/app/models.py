@@ -1,7 +1,12 @@
-"""SQLAlchemy models — V1 trimmed schema (no users/workspaces; top entity = project).
+"""SQLAlchemy models.
 
-Tables are created now and populated over later phases; keeping them here keeps the
-Workflow Graph and step->asset links authoritative from the start."""
+Every user gets their own private space: the four top-level entities a user can
+create (Project, Skill, KbArticle, BrandPackage) carry a `user_id` owner, and
+everything else hangs off a Project, so ownership is reachable for any row.
+
+`user_id` is nullable at the DB level only because SQLite's ADD COLUMN cannot add
+a NOT NULL column to an existing table — the API always sets it. Rows that predate
+auth therefore read as ownerless and belong to nobody; `app.purge` removes them."""
 
 from __future__ import annotations
 
@@ -23,10 +28,29 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+class User(Base):
+    """An account. `email` is stored lower-cased and is the login identifier."""
+
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    email: Mapped[str] = mapped_column(String, unique=True, index=True, nullable=False)
+    name: Mapped[str] = mapped_column(String, default="")
+    password_hash: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    # Present on every other mutable row here, and required by `users` tables
+    # created before this model existed (that column is NOT NULL with no default,
+    # so omitting it makes every INSERT fail against such a database).
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now
+    )
+
+
 class Project(Base):
     __tablename__ = "projects"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), index=True, nullable=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
     favorite: Mapped[int] = mapped_column(Integer, default=0)  # 0/1 — starred/pinned
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
@@ -250,6 +274,7 @@ class Skill(Base):
     __tablename__ = "skills"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), index=True, nullable=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
     description: Mapped[str] = mapped_column(Text, default="")
     target: Mapped[str] = mapped_column(String, default="video")  # "video" | "doc"
@@ -263,6 +288,7 @@ class KbArticle(Base):
     __tablename__ = "kb_articles"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), index=True, nullable=True)
     title: Mapped[str] = mapped_column(String, nullable=False)
     summary: Mapped[str] = mapped_column(Text, default="")
     body_md: Mapped[str] = mapped_column(Text, default="")
@@ -278,6 +304,7 @@ class BrandPackage(Base):
     __tablename__ = "brand_packages"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), index=True, nullable=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
     settings_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

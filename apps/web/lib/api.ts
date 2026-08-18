@@ -1,15 +1,19 @@
-export const API_BASE =
-  process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
+import { API_BASE, apiFetch } from "@/lib/http";
+
+// Re-exported so callers that build media/asset URLs keep importing it from here.
+export { API_BASE };
 
 export interface Project {
   id: string;
   name: string;
   favorite?: number; // 0/1 — starred projects sort first
   created_at: string;
+  has_document?: boolean; // a step-by-step doc has actually been generated
+  capture_count?: number; // how many recordings/uploads this project holds
 }
 
 export async function setKeepRanges(sessionId: string, ranges: number[][]): Promise<void> {
-  const r = await fetch(`${API_BASE}/sessions/${sessionId}/keep-ranges`, {
+  const r = await apiFetch(`/sessions/${sessionId}/keep-ranges`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ ranges }),
@@ -18,30 +22,30 @@ export async function setKeepRanges(sessionId: string, ranges: number[][]): Prom
 }
 
 export async function deleteProject(projectId: string): Promise<void> {
-  const r = await fetch(`${API_BASE}/projects/${projectId}`, { method: "DELETE" });
+  const r = await apiFetch(`/projects/${projectId}`, { method: "DELETE" });
   if (!r.ok) throw new Error(`deleteProject failed: ${r.status}`);
 }
 
 export async function toggleFavorite(projectId: string): Promise<Project> {
-  const r = await fetch(`${API_BASE}/projects/${projectId}/favorite`, { method: "POST" });
+  const r = await apiFetch(`/projects/${projectId}/favorite`, { method: "POST" });
   if (!r.ok) throw new Error(`toggleFavorite failed: ${r.status}`);
   return r.json();
 }
 
 export async function listProjects(): Promise<Project[]> {
-  const r = await fetch(`${API_BASE}/projects`, { cache: "no-store" });
+  const r = await apiFetch(`/projects`, { cache: "no-store" });
   if (!r.ok) throw new Error(`listProjects failed: ${r.status}`);
   return r.json();
 }
 
 export async function getProject(id: string): Promise<Project> {
-  const r = await fetch(`${API_BASE}/projects/${id}`, { cache: "no-store" });
+  const r = await apiFetch(`/projects/${id}`, { cache: "no-store" });
   if (!r.ok) throw new Error(`getProject failed: ${r.status}`);
   return r.json();
 }
 
 export async function createProject(name: string): Promise<Project> {
-  const r = await fetch(`${API_BASE}/projects`, {
+  const r = await apiFetch(`/projects`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name }),
@@ -93,7 +97,7 @@ export async function createSession(
   sourceType: SourceType,
   viewport?: { w: number; h: number },
 ): Promise<Session> {
-  const r = await fetch(`${API_BASE}/sessions`, {
+  const r = await apiFetch(`/sessions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ project_id: projectId, source_type: sourceType, viewport }),
@@ -108,21 +112,21 @@ export async function registerAndUpload(
   ext: string,
   blob: Blob,
 ): Promise<string> {
-  const reg = await fetch(`${API_BASE}/sessions/${sessionId}/assets`, {
+  const reg = await apiFetch(`/sessions/${sessionId}/assets`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ kind, ext }),
   });
   if (!reg.ok) throw new Error(`registerAsset failed: ${reg.status}`);
   const target = await reg.json();
-  const put = await fetch(`${API_BASE}${target.url}`, { method: "PUT", body: blob });
+  const put = await apiFetch(`${target.url}`, { method: "PUT", body: blob });
   if (!put.ok) throw new Error(`upload failed: ${put.status}`);
   return target.storage_key as string;
 }
 
 export async function postEvents(sessionId: string, events: CaptureEvent[]): Promise<void> {
   if (events.length === 0) return;
-  const r = await fetch(`${API_BASE}/sessions/${sessionId}/events`, {
+  const r = await apiFetch(`/sessions/${sessionId}/events`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ events }),
@@ -131,7 +135,7 @@ export async function postEvents(sessionId: string, events: CaptureEvent[]): Pro
 }
 
 export async function completeSession(sessionId: string, durationMs?: number): Promise<Session> {
-  const r = await fetch(`${API_BASE}/sessions/${sessionId}/complete`, {
+  const r = await apiFetch(`/sessions/${sessionId}/complete`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ duration_ms: durationMs ?? null }),
@@ -142,7 +146,7 @@ export async function completeSession(sessionId: string, durationMs?: number): P
 
 export async function listSessions(projectId?: string): Promise<Session[]> {
   const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
-  const r = await fetch(`${API_BASE}/sessions${qs}`, { cache: "no-store" });
+  const r = await apiFetch(`/sessions${qs}`, { cache: "no-store" });
   if (!r.ok) throw new Error(`listSessions failed: ${r.status}`);
   return r.json();
 }
@@ -196,19 +200,19 @@ export interface GraphRow {
 }
 
 export async function getSessionStatus(sessionId: string): Promise<SessionStatus> {
-  const r = await fetch(`${API_BASE}/sessions/${sessionId}/status`, { cache: "no-store" });
+  const r = await apiFetch(`/sessions/${sessionId}/status`, { cache: "no-store" });
   if (!r.ok) throw new Error(`getSessionStatus failed: ${r.status}`);
   return r.json();
 }
 
 export async function reprocessSession(sessionId: string): Promise<Session> {
-  const r = await fetch(`${API_BASE}/sessions/${sessionId}/reprocess`, { method: "POST" });
+  const r = await apiFetch(`/sessions/${sessionId}/reprocess`, { method: "POST" });
   if (!r.ok) throw new Error(`reprocess failed: ${r.status}`);
   return r.json();
 }
 
 export async function getSessionDetail(sessionId: string): Promise<SessionDetail> {
-  const r = await fetch(`${API_BASE}/sessions/${sessionId}`, { cache: "no-store" });
+  const r = await apiFetch(`/sessions/${sessionId}`, { cache: "no-store" });
   if (!r.ok) throw new Error(`getSessionDetail failed: ${r.status}`);
   return r.json();
 }
@@ -218,7 +222,7 @@ export async function setTrim(
   startMs: number,
   endMs: number,
 ): Promise<Session> {
-  const r = await fetch(`${API_BASE}/sessions/${sessionId}/trim`, {
+  const r = await apiFetch(`/sessions/${sessionId}/trim`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ start_ms: Math.round(startMs), end_ms: Math.round(endMs) }),
@@ -272,16 +276,15 @@ export interface Memory {
 }
 
 export async function getMemory(projectId: string): Promise<Memory | null> {
-  const r = await fetch(`${API_BASE}/projects/${projectId}/memory`, { cache: "no-store" });
+  const r = await apiFetch(`/projects/${projectId}/memory`, { cache: "no-store" });
   if (r.status === 404) return null;
   if (!r.ok) throw new Error(`getMemory failed: ${r.status}`);
   return r.json();
 }
 
 export async function getGraph(projectId: string, version?: number): Promise<GraphRow | null> {
-  const url = new URL(`${API_BASE}/projects/${projectId}/graph`);
-  if (version != null) url.searchParams.set("version", String(version));
-  const r = await fetch(url.toString(), { cache: "no-store" });
+  const qs = version != null ? `?version=${encodeURIComponent(version)}` : "";
+  const r = await apiFetch(`/projects/${projectId}/graph${qs}`, { cache: "no-store" });
   if (r.status === 404) return null;
   if (!r.ok) throw new Error(`getGraph failed: ${r.status}`);
   return r.json();
@@ -291,12 +294,10 @@ export function mediaUrl(storageKey: string): string {
   return `${API_BASE}/media/${storageKey}`;
 }
 
-// Cross-origin <a download> is ignored by browsers, so fetch the file and
-// save it via a same-origin blob URL instead of navigating to it directly.
-export async function downloadMedia(storageKey: string, filename: string): Promise<void> {
-  const r = await fetch(mediaUrl(storageKey));
-  if (!r.ok) throw new Error(`download failed: ${r.status}`);
-  const blob = await r.blob();
+/** Save a fetched body to disk. Cross-origin `<a download>` is ignored by
+ *  browsers, so we go through a same-origin blob URL rather than navigating. */
+async function saveBlob(response: Response, filename: string): Promise<void> {
+  const blob = await response.blob();
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -305,6 +306,13 @@ export async function downloadMedia(storageKey: string, filename: string): Promi
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
+}
+
+// Media reads are public (so <video src> and share links work), hence a plain fetch.
+export async function downloadMedia(storageKey: string, filename: string): Promise<void> {
+  const r = await fetch(mediaUrl(storageKey));
+  if (!r.ok) throw new Error(`download failed: ${r.status}`);
+  await saveBlob(r, filename);
 }
 
 // ---- documents (SOP) ----
@@ -330,7 +338,7 @@ export interface DocumentResult {
 }
 
 export async function getDocument(projectId: string): Promise<DocumentResult | null> {
-  const r = await fetch(`${API_BASE}/projects/${projectId}/document`, { cache: "no-store" });
+  const r = await apiFetch(`/projects/${projectId}/document`, { cache: "no-store" });
   if (r.status === 404) return null;
   if (!r.ok) throw new Error(`getDocument failed: ${r.status}`);
   return r.json();
@@ -340,7 +348,7 @@ export async function regenerateDocument(
   projectId: string,
   instruction?: string,
 ): Promise<DocumentResult> {
-  const r = await fetch(`${API_BASE}/projects/${projectId}/document`, {
+  const r = await apiFetch(`/projects/${projectId}/document`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ instruction: instruction ?? null }),
@@ -349,8 +357,16 @@ export async function regenerateDocument(
   return r.json();
 }
 
-export function docExportUrl(projectId: string, format: "md" | "pdf"): string {
-  return `${API_BASE}/projects/${projectId}/document/export?format=${format}`;
+/** Export the doc as MD/PDF. This is an authenticated route, so it can't be a
+ *  plain `<a href>` — the browser wouldn't send the token. Fetch, then save. */
+export async function downloadDocument(
+  projectId: string,
+  format: "md" | "pdf",
+  filename: string,
+): Promise<void> {
+  const r = await apiFetch(`/projects/${projectId}/document/export?format=${format}`);
+  if (!r.ok) throw new Error(`export failed: ${r.status}`);
+  await saveBlob(r, filename);
 }
 
 // ---- publish & share ----
@@ -376,7 +392,7 @@ export function shareLink(token: string): string {
 }
 
 export async function createShare(projectId: string, kind: "video" | "doc"): Promise<Share> {
-  const r = await fetch(`${API_BASE}/projects/${projectId}/share`, {
+  const r = await apiFetch(`/projects/${projectId}/share`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ kind }),
@@ -386,7 +402,7 @@ export async function createShare(projectId: string, kind: "video" | "doc"): Pro
 }
 
 export async function getSharePublic(token: string): Promise<SharePublic> {
-  const r = await fetch(`${API_BASE}/shares/${token}`, { cache: "no-store" });
+  const r = await apiFetch(`/shares/${token}`, { cache: "no-store" });
   if (!r.ok) throw new Error(`getShare failed: ${r.status}`);
   const j = (await r.json()) as SharePublic;
   if (j.video_url && j.video_url.startsWith("/")) j.video_url = `${API_BASE}${j.video_url}`;
@@ -394,13 +410,13 @@ export async function getSharePublic(token: string): Promise<SharePublic> {
 }
 
 export async function listAllShares(): Promise<Share[]> {
-  const r = await fetch(`${API_BASE}/shares`, { cache: "no-store" });
+  const r = await apiFetch(`/shares`, { cache: "no-store" });
   if (!r.ok) throw new Error(`listShares failed: ${r.status}`);
   return r.json();
 }
 
 export async function revokeShare(token: string): Promise<void> {
-  await fetch(`${API_BASE}/shares/${token}`, { method: "DELETE" });
+  await apiFetch(`/shares/${token}`, { method: "DELETE" });
 }
 
 // ---- AI voices ----
@@ -413,13 +429,13 @@ export interface Voice {
 }
 
 export async function listVoices(): Promise<{ voices: Voice[]; preview_text: string }> {
-  const r = await fetch(`${API_BASE}/voices`, { cache: "no-store" });
+  const r = await apiFetch(`/voices`, { cache: "no-store" });
   if (!r.ok) throw new Error(`listVoices failed: ${r.status}`);
   return r.json();
 }
 
 export async function previewVoice(voiceId: string): Promise<{ url: string; ready: boolean }> {
-  const r = await fetch(`${API_BASE}/voices/preview`, {
+  const r = await apiFetch(`/voices/preview`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ voice_id: voiceId }),
@@ -449,7 +465,7 @@ export async function startAutoEdit(
   projectId: string,
   opts: AutoEditOptions,
 ): Promise<AutoEditJob> {
-  const r = await fetch(`${API_BASE}/projects/${projectId}/autoedit`, {
+  const r = await apiFetch(`/projects/${projectId}/autoedit`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(opts),
@@ -459,7 +475,7 @@ export async function startAutoEdit(
 }
 
 export async function getAutoEdit(jobId: string): Promise<AutoEditJob> {
-  const r = await fetch(`${API_BASE}/autoedit/${jobId}`, { cache: "no-store" });
+  const r = await apiFetch(`/autoedit/${jobId}`, { cache: "no-store" });
   if (!r.ok) throw new Error(`getAutoEdit failed: ${r.status}`);
   return r.json();
 }
@@ -470,7 +486,7 @@ export async function rewriteLines(
   lines: string[],
   instruction?: string,
 ): Promise<string[]> {
-  const r = await fetch(`${API_BASE}/projects/${projectId}/rewrite`, {
+  const r = await apiFetch(`/projects/${projectId}/rewrite`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ lines, instruction: instruction ?? null }),
@@ -493,7 +509,7 @@ export async function generateScript(
   title: string,
   instruction?: string,
 ): Promise<string[]> {
-  const r = await fetch(`${API_BASE}/projects/${projectId}/generate-script`, {
+  const r = await apiFetch(`/projects/${projectId}/generate-script`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ scenes, title, instruction: instruction ?? null }),
@@ -514,7 +530,7 @@ export async function suggestZooms(
   projectId: string,
   scenes: { target?: string; action?: string; narration?: string }[],
 ): Promise<{ zoom: boolean; scale: number }[]> {
-  const r = await fetch(`${API_BASE}/projects/${projectId}/suggest-zooms`, {
+  const r = await apiFetch(`/projects/${projectId}/suggest-zooms`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ scenes }),
@@ -540,7 +556,7 @@ export interface Skill {
   settings: Record<string, unknown>;
 }
 export async function listSkills(): Promise<Skill[]> {
-  const r = await fetch(`${API_BASE}/skills`, { cache: "no-store" });
+  const r = await apiFetch(`/skills`, { cache: "no-store" });
   if (!r.ok) throw new Error(`listSkills failed: ${r.status}`);
   return r.json();
 }
@@ -551,7 +567,7 @@ export type SkillInput = {
   settings?: Record<string, unknown>;
 };
 export async function createSkill(s: SkillInput): Promise<Skill> {
-  const r = await fetch(`${API_BASE}/skills`, {
+  const r = await apiFetch(`/skills`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(s),
@@ -560,7 +576,7 @@ export async function createSkill(s: SkillInput): Promise<Skill> {
   return r.json();
 }
 export async function generateSkill(prompt: string, target: string): Promise<Skill> {
-  const r = await fetch(`${API_BASE}/skills/generate`, {
+  const r = await apiFetch(`/skills/generate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ prompt, target }),
@@ -577,12 +593,12 @@ export async function generateSkill(prompt: string, target: string): Promise<Ski
   return r.json();
 }
 export async function getSkill(id: string): Promise<Skill> {
-  const r = await fetch(`${API_BASE}/skills/${id}`, { cache: "no-store" });
+  const r = await apiFetch(`/skills/${id}`, { cache: "no-store" });
   if (!r.ok) throw new Error(`getSkill failed: ${r.status}`);
   return r.json();
 }
 export async function updateSkill(id: string, s: SkillInput): Promise<Skill> {
-  const r = await fetch(`${API_BASE}/skills/${id}`, {
+  const r = await apiFetch(`/skills/${id}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(s),
@@ -591,7 +607,7 @@ export async function updateSkill(id: string, s: SkillInput): Promise<Skill> {
   return r.json();
 }
 export async function deleteSkill(id: string): Promise<void> {
-  await fetch(`${API_BASE}/skills/${id}`, { method: "DELETE" });
+  await apiFetch(`/skills/${id}`, { method: "DELETE" });
 }
 
 // ---- knowledge base ----
@@ -604,7 +620,7 @@ export interface Article {
   project_id?: string | null;
 }
 export async function listArticles(): Promise<Article[]> {
-  const r = await fetch(`${API_BASE}/kb`, { cache: "no-store" });
+  const r = await apiFetch(`/kb`, { cache: "no-store" });
   if (!r.ok) throw new Error(`listArticles failed: ${r.status}`);
   return r.json();
 }
@@ -614,7 +630,7 @@ export async function createArticle(a: {
   body_md?: string;
   tags?: string[];
 }): Promise<Article> {
-  const r = await fetch(`${API_BASE}/kb`, {
+  const r = await apiFetch(`/kb`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(a),
@@ -623,7 +639,7 @@ export async function createArticle(a: {
   return r.json();
 }
 export async function deleteArticle(id: string): Promise<void> {
-  await fetch(`${API_BASE}/kb/${id}`, { method: "DELETE" });
+  await apiFetch(`/kb/${id}`, { method: "DELETE" });
 }
 
 // ---- brand packages ----
@@ -633,18 +649,18 @@ export interface BrandPackage {
   settings: Record<string, unknown>;
 }
 export async function listPackages(): Promise<BrandPackage[]> {
-  const r = await fetch(`${API_BASE}/packages`, { cache: "no-store" });
+  const r = await apiFetch(`/packages`, { cache: "no-store" });
   if (!r.ok) throw new Error(`listPackages failed: ${r.status}`);
   return r.json();
 }
 export async function getPackage(id: string): Promise<BrandPackage> {
-  const r = await fetch(`${API_BASE}/packages/${id}`, { cache: "no-store" });
+  const r = await apiFetch(`/packages/${id}`, { cache: "no-store" });
   if (!r.ok) throw new Error(`getPackage failed: ${r.status}`);
   return r.json();
 }
 /** Upload a File to a storage key (logo / intro clip) via the media endpoint. */
 export async function uploadMedia(key: string, file: File): Promise<string> {
-  const r = await fetch(`${API_BASE}/media/${key}`, {
+  const r = await apiFetch(`/media/${key}`, {
     method: "PUT",
     headers: { "Content-Type": file.type || "application/octet-stream" },
     body: file,
@@ -653,7 +669,7 @@ export async function uploadMedia(key: string, file: File): Promise<string> {
   return key;
 }
 export async function createPackage(name: string, settings: Record<string, unknown>): Promise<BrandPackage> {
-  const r = await fetch(`${API_BASE}/packages`, {
+  const r = await apiFetch(`/packages`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name, settings }),
@@ -662,7 +678,7 @@ export async function createPackage(name: string, settings: Record<string, unkno
   return r.json();
 }
 export async function updatePackage(id: string, name: string, settings: Record<string, unknown>): Promise<BrandPackage> {
-  const r = await fetch(`${API_BASE}/packages/${id}`, {
+  const r = await apiFetch(`/packages/${id}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name, settings }),
@@ -671,7 +687,7 @@ export async function updatePackage(id: string, name: string, settings: Record<s
   return r.json();
 }
 export async function deletePackage(id: string): Promise<void> {
-  await fetch(`${API_BASE}/packages/${id}`, { method: "DELETE" });
+  await apiFetch(`/packages/${id}`, { method: "DELETE" });
 }
 
 // ---- video editor / render ----
@@ -771,14 +787,14 @@ export interface RenderJob {
 }
 
 export async function getVideo(projectId: string): Promise<VideoSpec | null> {
-  const r = await fetch(`${API_BASE}/projects/${projectId}/video`, { cache: "no-store" });
+  const r = await apiFetch(`/projects/${projectId}/video`, { cache: "no-store" });
   if (r.status === 404) return null;
   if (!r.ok) throw new Error(`getVideo failed: ${r.status}`);
   return r.json();
 }
 
 export async function patchVideo(projectId: string, editSpec: EditSpec): Promise<VideoSpec> {
-  const r = await fetch(`${API_BASE}/projects/${projectId}/video`, {
+  const r = await apiFetch(`/projects/${projectId}/video`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ edit_spec: editSpec }),
@@ -826,7 +842,7 @@ export async function startVoiceTrack(
   voiceId: string,
   speed: number,
 ): Promise<{ url: string; ready: boolean; timelineUrl: string | null }> {
-  const r = await fetch(`${API_BASE}/projects/${projectId}/voice-track`, {
+  const r = await apiFetch(`/projects/${projectId}/voice-track`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ voice_id: voiceId, speed }),
@@ -842,7 +858,7 @@ export async function pollVoiceTrack(
   speed: number,
 ): Promise<{ url: string; ready: boolean; timelineUrl: string | null }> {
   const q = `voice_id=${encodeURIComponent(voiceId)}&speed=${speed}`;
-  const r = await fetch(`${API_BASE}/projects/${projectId}/voice-track?${q}`, { cache: "no-store" });
+  const r = await apiFetch(`/projects/${projectId}/voice-track?${q}`, { cache: "no-store" });
   if (!r.ok) throw new Error(`voice-track poll failed: ${r.status}`);
   return _voiceRes(await r.json());
 }
@@ -855,13 +871,13 @@ export async function fetchPreviewTimeline(url: string): Promise<PreviewTimeline
 }
 
 export async function renderVideo(projectId: string): Promise<RenderJob> {
-  const r = await fetch(`${API_BASE}/projects/${projectId}/video/render`, { method: "POST" });
+  const r = await apiFetch(`/projects/${projectId}/video/render`, { method: "POST" });
   if (!r.ok) throw new Error(`renderVideo failed: ${r.status}`);
   return r.json();
 }
 
 export async function getRender(jobId: string): Promise<RenderJob> {
-  const r = await fetch(`${API_BASE}/render/${jobId}`, { cache: "no-store" });
+  const r = await apiFetch(`/render/${jobId}`, { cache: "no-store" });
   if (!r.ok) throw new Error(`getRender failed: ${r.status}`);
   return r.json();
 }

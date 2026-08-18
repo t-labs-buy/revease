@@ -3,11 +3,13 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { listArticles, listProjects, listSessions, mediaUrl, type Project, type Session } from "@/lib/api";
+import { createPortal } from "react-dom";
 import { CaptureModal, type CaptureIntent } from "@/components/CaptureModal";
 import { EmptyState } from "@/components/ui";
+import { useTopBarSlot } from "@/components/TopBar";
+import { useAuth } from "@/contexts/AuthContext";
 import {
   IconArrowRight,
-  IconBell,
   IconBook,
   IconChevronDown,
   IconDatabase,
@@ -65,6 +67,10 @@ export default function Home() {
   const [greeting, setGreeting] = useState("Welcome");
   const [q, setQ] = useState("");
   const searchRef = useRef<HTMLInputElement>(null);
+  const topBarSlot = useTopBarSlot();
+  const { user } = useAuth();
+  // First name if they gave one, else the email's local part — never "User".
+  const displayName = (user?.name?.trim().split(/\s+/)[0] || user?.email?.split("@")[0]) ?? "";
 
   useEffect(() => setGreeting(timeGreeting()), []);
   useEffect(() => {
@@ -94,7 +100,10 @@ export default function Home() {
 
   const open = (intent: CaptureIntent) => setModal(intent);
 
-  const isDocProject = (p: Project) => sessions.filter((s) => s.project_id === p.id).length > 1;
+  // A project is a "Document" when one has actually been generated for it — the
+  // old rule (more than one capture) had nothing to do with documents and
+  // mislabelled every re-recorded project.
+  const isDocProject = (p: Project) => !!p.has_document;
 
   const FEATURES = [
     {
@@ -139,6 +148,7 @@ export default function Home() {
     },
     {
       title: "Create a document",
+      soon: true,
       desc: "Step-by-step guides & SOPs generated from your captures.",
       icon: <IconDoc width={26} height={26} />,
       cta: "Create document",
@@ -164,22 +174,16 @@ export default function Home() {
     { label: "Projects", value: projects.length, icon: <IconFolder width={20} height={20} />, color: "#7C3AED" },
     { label: "Videos", value: sessions.length, icon: <IconVideo width={20} height={20} />, color: "#EC4899" },
     { label: "Documents", value: documentsCount, icon: <IconDoc width={20} height={20} />, color: "#10B981" },
-    { label: "Knowledge Bases", value: kbCount, icon: <IconDatabase width={20} height={20} />, color: "#A78BFA" },
+    { label: "Knowledge Bases", value: kbCount, icon: <IconDatabase width={20} height={20} />, color: "#A78BFA", soon: true },
   ];
 
   const QUICK = [
     { title: "Record", desc: "Capture screen & voice", icon: <IconVideo width={22} height={22} />, onClick: () => open("record") },
     { title: "Upload", desc: "Bring an MP4 or MOV", icon: <IconUpload width={22} height={22} />, onClick: () => open("upload") },
     { title: "New video", desc: "AI video from a capture", icon: <IconSparkles width={22} height={22} />, onClick: () => open("video") },
-    { title: "New doc", desc: "AI step-by-step guide", icon: <IconDoc width={22} height={22} />, onClick: () => open("doc") },
+    { title: "New doc", desc: "AI step-by-step guide", icon: <IconDoc width={22} height={22} />, onClick: () => open("doc"), soon: true },
     { title: "Library", desc: "All your content", icon: <IconLibrary width={22} height={22} />, href: "/library" },
-    { title: "Knowledge base", desc: "Team guides in one place", icon: <IconBook width={22} height={22} />, href: "/knowledge-base" },
-  ];
-
-  const NAV = [
-    { label: "Home", href: "/", active: true },
-    { label: "Library", href: "/library", active: false },
-    { label: "Knowledge Base", href: "/knowledge-base", active: false },
+    { title: "Knowledge base", desc: "Team guides in one place", icon: <IconBook width={22} height={22} />, href: "/knowledge-base", soon: true },
   ];
 
   const filtered = projects.filter((p) => p.name.toLowerCase().includes(q.trim().toLowerCase()));
@@ -188,65 +192,35 @@ export default function Home() {
     <main className="min-h-screen bg-[var(--bg)]">
       {modal && <CaptureModal intent={modal} onClose={() => setModal(null)} />}
 
-      {/* header */}
-      <div className="sticky top-0 z-20 flex items-center gap-6 border-b border-[var(--border)] bg-[var(--bg)]/85 px-8 py-3 backdrop-blur-md">
-        <Link href="/" className="flex items-center gap-2.5">
-          <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-[#7C3AED] to-[#A78BFA] text-base font-bold text-white shadow-sm shadow-[#7C3AED]/30">
-            R
-          </span>
-          <span className="text-[17px] font-semibold tracking-tight text-[var(--text)]">RevEase</span>
-        </Link>
-
-        {/* center nav */}
-        <nav className="hidden items-center gap-1 md:flex">
-          {NAV.map((n) => (
-            <Link
-              key={n.label}
-              href={n.href}
-              className={`rounded-full px-4 py-2 text-sm font-medium transition-colors duration-200 ${
-                n.active
-                  ? "bg-[#7C3AED]/10 text-[#7C3AED]"
-                  : "text-[var(--text-2)] hover:bg-[var(--hover)] hover:text-[var(--text)]"
-              }`}
-            >
-              {n.label}
-            </Link>
-          ))}
-        </nav>
-
-        <div className="relative ml-auto w-full max-w-xl">
-          <IconSearch
-            width={16}
-            height={16}
-            className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-[var(--text-3)]"
-          />
-          <input
-            ref={searchRef}
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            placeholder="Search projects, videos, documents..."
-            className="input input-pill py-2.5 pl-10 pr-14"
-          />
-          <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 rounded-md border border-[var(--border)] bg-[var(--hover)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--text-3)]">
-            ⌘K
-          </span>
-        </div>
-        <div className="flex items-center gap-2.5">
-          <button className="relative flex h-10 w-10 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--card)] text-[var(--text-2)] transition-colors hover:text-[var(--text)]">
-            <IconBell width={17} height={17} />
-            <span className="absolute right-2.5 top-2 h-1.5 w-1.5 rounded-full bg-[#EC4899]" />
-          </button>
-          <span className="flex h-10 w-10 items-center justify-center rounded-full bg-gradient-to-br from-[#7C3AED] to-[#A78BFA] text-sm font-semibold text-white">
-            U
-          </span>
-        </div>
-      </div>
+      {/* Search belongs to this page (it filters the lists below) but is shown in
+          the shared header, so it renders into the header's slot. */}
+      {topBarSlot &&
+        createPortal(
+          <>
+            <IconSearch
+              width={16}
+              height={16}
+              className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-[var(--text-3)]"
+            />
+            <input
+              ref={searchRef}
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="Search projects, videos, documents..."
+              className="input input-pill py-2.5 pl-10 pr-14"
+            />
+            <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 rounded-md border border-[var(--border)] bg-[var(--hover)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--text-3)]">
+              ⌘K
+            </span>
+          </>,
+          topBarSlot,
+        )}
 
       <div className="mx-auto max-w-[1600px] px-8 py-10">
         {/* greeting */}
         <section className="animate-fade-in">
           <h1 className="text-[42px] font-bold leading-[1.1] tracking-tight text-[var(--text)]">
-            {greeting}, User <span className="align-middle">👋</span>
+            {greeting}, {displayName} <span className="align-middle">👋</span>
           </h1>
           <p className="mt-2.5 text-lg text-[var(--text-2)]">
             Create tutorials, videos and documentation using AI.
@@ -264,26 +238,49 @@ export default function Home() {
           {FEATURES.map((f, i) => (
             <div
               key={f.title}
-              className="animate-fade-in group relative flex min-h-[240px] flex-col overflow-hidden rounded-[20px] border p-7 shadow-[var(--shadow-card)] transition-all duration-[250ms] ease-out hover:-translate-y-1 hover:shadow-[var(--shadow-card-hover)]"
+              aria-disabled={f.soon ? "true" : undefined}
+              className={`animate-fade-in group relative flex min-h-[240px] flex-col overflow-hidden rounded-[20px] border p-7 shadow-[var(--shadow-card)] transition-all duration-[250ms] ease-out ${
+                f.soon
+                  ? "cursor-not-allowed select-none"
+                  : "hover:-translate-y-1 hover:shadow-[var(--shadow-card-hover)]"
+              }`}
               style={{ background: f.gradient, borderColor: f.border, animationDelay: `${i * 60}ms` }}
             >
+              {f.soon && (
+                <span className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
+                  <span className="rounded-full border border-[var(--border)] bg-[var(--card)]/95 px-6 py-3 text-lg font-semibold tracking-tight text-[var(--text)] shadow-[var(--shadow-card-hover)] backdrop-blur-sm">
+                    Coming soon
+                  </span>
+                </span>
+              )}
               <span
-                className="flex h-14 w-14 items-center justify-center rounded-2xl shadow-sm"
+                className={`flex h-14 w-14 items-center justify-center rounded-2xl shadow-sm ${f.soon ? "opacity-45" : ""}`}
                 style={{ backgroundColor: `${f.accent}1f`, color: f.accent }}
               >
                 {f.icon}
               </span>
-              <h3 className="mt-5 text-[22px] font-semibold text-[var(--text)]">{f.title}</h3>
-              <p className="mt-2 max-w-[75%] text-[15px] leading-relaxed text-[var(--text-2)]">{f.desc}</p>
+              <h3 className={`mt-5 text-[22px] font-semibold text-[var(--text)] ${f.soon ? "opacity-45" : ""}`}>
+                {f.title}
+              </h3>
+              <p className={`mt-2 max-w-[75%] text-[15px] leading-relaxed text-[var(--text-2)] ${f.soon ? "opacity-45" : ""}`}>
+                {f.desc}
+              </p>
               <button
-                onClick={f.onClick}
-                className="mt-6 inline-flex w-fit items-center gap-1.5 rounded-xl px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition-transform duration-200 hover:scale-[1.03]"
+                onClick={f.soon ? undefined : f.onClick}
+                disabled={f.soon}
+                className={`mt-6 inline-flex w-fit items-center gap-1.5 rounded-xl px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition-transform duration-200 ${
+                  f.soon ? "cursor-not-allowed opacity-45" : "hover:scale-[1.03]"
+                }`}
                 style={{ backgroundColor: f.accent }}
               >
                 {f.cta} <IconArrowRight width={15} height={15} />
               </button>
               {/* decorative art */}
-              <div className="pointer-events-none absolute -right-2 bottom-4 opacity-90 transition-transform duration-[250ms] group-hover:scale-105">
+              <div
+                className={`pointer-events-none absolute -right-2 bottom-4 transition-transform duration-[250ms] ${
+                  f.soon ? "opacity-35" : "opacity-90 group-hover:scale-105"
+                }`}
+              >
                 {f.art}
               </div>
             </div>
@@ -293,17 +290,31 @@ export default function Home() {
         {/* stats */}
         <div className="mt-12 grid grid-cols-2 gap-6 sm:grid-cols-4">
           {STATS.map((s) => (
-            <div key={s.label} className="card flex items-center gap-4 p-5">
-              <span
-                className="flex h-12 w-12 flex-none items-center justify-center rounded-2xl"
-                style={{ backgroundColor: `${s.color}1a`, color: s.color }}
+            <div key={s.label} className="relative">
+              <div
+                className={`card flex items-center gap-4 p-5 ${s.soon ? "opacity-40" : ""}`}
               >
-                {s.icon}
-              </span>
-              <div className="min-w-0">
-                <div className="text-2xl font-bold text-[var(--text)]">{s.value}</div>
-                <div className="truncate text-sm text-[var(--text-2)]">{s.label}</div>
+                <span
+                  className="flex h-12 w-12 flex-none items-center justify-center rounded-2xl"
+                  style={{ backgroundColor: `${s.color}1a`, color: s.color }}
+                >
+                  {s.icon}
+                </span>
+                <div className="min-w-0">
+                  {/* the count is meaningless while the feature is shelved */}
+                  <div className="text-2xl font-bold text-[var(--text)]">
+                    {s.soon ? "—" : s.value}
+                  </div>
+                  <div className="truncate text-sm text-[var(--text-2)]">{s.label}</div>
+                </div>
               </div>
+              {s.soon && (
+                <span className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                  <span className="rounded-full border border-[var(--border)] bg-[var(--card)]/95 px-4 py-2 text-sm font-semibold text-[var(--text)] shadow-[var(--shadow-card)] backdrop-blur-sm">
+                    Coming soon
+                  </span>
+                </span>
+              )}
             </div>
           ))}
         </div>
@@ -321,7 +332,11 @@ export default function Home() {
         <div className="mt-6 grid grid-cols-1 gap-6 sm:grid-cols-3 lg:grid-cols-6">
           {QUICK.map((t) => {
             const inner = (
-              <div className="card card-hover flex h-full flex-col items-start gap-3 p-5 text-left">
+              <div
+                className={`card flex h-full flex-col items-start gap-3 p-5 text-left ${
+                  t.soon ? "" : "card-hover"
+                }`}
+              >
                 <span className="flex h-12 w-12 flex-none items-center justify-center rounded-2xl bg-[#7C3AED]/10 text-[#7C3AED]">
                   {t.icon}
                 </span>
@@ -331,6 +346,23 @@ export default function Home() {
                 </div>
               </div>
             );
+            // Shelved: the card is dimmed and inert, with a legible chip on top
+            // rather than dimming the words "Coming soon" along with the card.
+            if (t.soon)
+              return (
+                <div
+                  key={t.title}
+                  aria-disabled="true"
+                  className="relative block h-full cursor-not-allowed select-none"
+                >
+                  <div className="pointer-events-none h-full opacity-40">{inner}</div>
+                  <span className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                    <span className="rounded-full border border-[var(--border)] bg-[var(--card)]/95 px-4 py-2 text-sm font-semibold text-[var(--text)] shadow-[var(--shadow-card)] backdrop-blur-sm">
+                      Coming soon
+                    </span>
+                  </span>
+                </div>
+              );
             return t.href ? (
               <Link key={t.title} href={t.href} className="block h-full">
                 {inner}
@@ -369,7 +401,7 @@ export default function Home() {
             {filtered.map((p, i) => {
               const mine = sessions.filter((s) => s.project_id === p.id);
               const latest = [...mine].sort((a, b) => (a.created_at < b.created_at ? 1 : -1))[0];
-              const isDoc = mine.length > 1;
+              const isDoc = isDocProject(p); // real document, not a capture count
               return (
                 <Link key={p.id} href={`/projects/${p.id}`} className="card card-hover group flex flex-col overflow-hidden">
                   {/* thumbnail */}

@@ -1,8 +1,14 @@
 import Link from "next/link";
 import { mediaUrl, type Session } from "@/lib/api";
 import { Badge } from "@/components/ui";
+import { IconPlay } from "@/components/icons";
 
 const SOURCE_ICON: Record<string, string> = { recorder: "●", upload: "↑", extension: "◆" };
+
+const mmss = (ms: number) => {
+  const s = Math.round(ms / 1000);
+  return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+};
 
 function statusBadge(status: string) {
   if (status === "ready") return <Badge tone="green">ready</Badge>;
@@ -20,40 +26,58 @@ export function CaptureCard({
   projectName?: string;
 }) {
   return (
-    <Link href={href} className="card card-hover group overflow-hidden">
-      <div className="relative aspect-video w-full overflow-hidden bg-zinc-950">
+    <Link href={href} className="card card-hover group flex flex-col overflow-hidden">
+      {/* thumbnail */}
+      <div className="relative aspect-video overflow-hidden bg-gradient-to-br from-[#1c1c2e] to-[#2b2b45]">
         {s.poster ? (
           // eslint-disable-next-line @next/next/no-img-element
           <img
             src={mediaUrl(s.poster)}
             alt={s.source_type}
-            className="h-full w-full object-cover opacity-90 transition-opacity group-hover:opacity-100"
+            className="h-full w-full object-cover"
           />
         ) : (
-          <div className="flex h-full w-full items-center justify-center text-2xl text-zinc-700">
+          <div className="flex h-full w-full items-center justify-center text-2xl text-white/40">
             {SOURCE_ICON[s.source_type] ?? "●"}
           </div>
         )}
-        <div className="absolute right-2 top-2">{statusBadge(s.status)}</div>
+        <span className="absolute inset-0 flex items-center justify-center">
+          <span className="flex h-11 w-11 items-center justify-center rounded-full bg-white/90 pl-0.5 text-[#7C3AED] shadow-lg">
+            <IconPlay width={16} height={16} />
+          </span>
+        </span>
+        <span className="absolute left-2 top-2">{statusBadge(s.status)}</span>
         {s.duration_ms ? (
-          <div className="absolute bottom-2 right-2 rounded bg-black/70 px-1.5 py-0.5 font-mono text-[11px] text-zinc-200">
-            {(s.duration_ms / 1000).toFixed(0)}s
-          </div>
+          <span className="absolute bottom-2 right-2 rounded-md bg-black/70 px-1.5 py-0.5 text-[11px] font-medium text-white">
+            {mmss(s.duration_ms)}
+          </span>
         ) : null}
       </div>
-      <div className="flex items-center gap-2 px-3.5 py-3">
-        <div className="min-w-0 flex-1">
-          <div className="truncate text-sm font-medium capitalize text-zinc-100">
-            {projectName ?? s.source_type}
-          </div>
-          <div className="mt-0.5 truncate text-xs text-zinc-500">
-            {projectName ? `${s.source_type} · ` : ""}
-            {new Date(s.created_at).toLocaleDateString()}
-          </div>
+
+      {/* body */}
+      <div className="flex flex-1 flex-col p-5">
+        <h3 className="truncate text-[17px] font-semibold capitalize text-[var(--text)]">
+          {projectName ?? s.source_type}
+        </h3>
+        <div className="mt-1 truncate text-sm text-[var(--text-2)]">
+          {projectName ? `${s.source_type} · ` : ""}
+          {new Date(s.created_at).toLocaleDateString(undefined, {
+            day: "numeric",
+            month: "short",
+            year: "numeric",
+          })}
         </div>
-        <Badge tone={s.telemetry === "present" ? "violet" : "zinc"}>
-          {s.telemetry === "present" ? "clicks" : "video"}
-        </Badge>
+        <div className="mt-3.5 flex items-center justify-between border-t border-[var(--border)] pt-3">
+          <span
+            className={`badge px-2.5 py-1 ${
+              s.telemetry === "present"
+                ? "bg-[#7C3AED]/10 text-[#7C3AED]"
+                : "bg-[var(--text-3)]/10 text-[var(--text-2)]"
+            }`}
+          >
+            {s.telemetry === "present" ? "clicks" : "video"}
+          </span>
+        </div>
       </div>
     </Link>
   );

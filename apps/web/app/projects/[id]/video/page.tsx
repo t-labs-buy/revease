@@ -170,6 +170,11 @@ function segmentAtOutMs(outMs: number, tl: PreviewTimeline) {
 
 const mmss = (t: number) =>
   `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
+
+// Voice-track polls at 1.5s. Local CPU TTS runs near real-time, so this ceiling
+// (~20 min) covers even a very long narration's first build; every later build
+// hits the per-line cache and returns immediately.
+const MAX_VOICE_POLLS = 800;
 const clock = (t: number) =>
   `${String(Math.floor(t / 60)).padStart(2, "0")}:${String(Math.floor(t % 60)).padStart(2, "0")}.${String(
     Math.floor((t % 1) * 100),
@@ -272,7 +277,12 @@ export default function VideoEditor({
   const [showRender, setShowRender] = useState(false);
   const [voiceUrl, setVoiceUrl] = useState<string | null>(null);
   const [voiceLoading, setVoiceLoading] = useState(false);
-  const [voiceError, setVoiceError] = useState(false);
+  // How long the current voice build has been running, so a long first build
+  // reads as progress rather than a frozen spinner.
+  const [voiceWaitedMs, setVoiceWaitedMs] = useState(0);
+  // null = fine. "slow" = the worker is still synthesizing (not a failure, just
+  // longer than we waited). Any other string is a real error worth showing.
+  const [voiceError, setVoiceError] = useState<null | "slow" | string>(null);
   // The render retimes each scene to fill its narration's real length (speed up
   // when the source window is longer, hold the last frame when the voice runs
   // longer). This is that same pacing, fetched so the live preview can mirror
@@ -321,13 +331,14 @@ export default function VideoEditor({
     if (!spec || useOriginal) {
       setVoiceUrl(null);
       setPreviewTimeline(null);
-      setVoiceError(false);
+      setVoiceError(null);
       return;
     }
     let cancelled = false;
     setVoiceLoading(true);
-    setVoiceError(false);
+    setVoiceError(null);
     setVoiceUrl(null);
+    setVoiceWaitedMs(0);
     setPreviewTimeline(null);
     const applyReady = async (url: string, timelineUrl: string | null) => {
       if (cancelled) return;
@@ -349,7 +360,13 @@ export default function VideoEditor({
           await applyReady(started.url, started.timelineUrl);
           return;
         }
-        for (let i = 0; i < 80 && !cancelled; i++) {
+        // Local CPU TTS runs at roughly 0.75x real-time, so the FIRST build of a
+        // long narration legitimately takes minutes (5 min of script ≈ 4 min of
+        // synthesis). Every line is cached afterwards, which is why re-opening
+        // the same project is instant — and why only the first visit ever waits.
+        // Poll generously and show elapsed time rather than guessing a deadline.
+        const startedAtMs = Date.now();
+        for (let i = 0; i < MAX_VOICE_POLLS && !cancelled; i++) {
           await new Promise((r) => setTimeout(r, 1500));
           const { url, ready, timelineUrl } = await pollVoiceTrack(
             id,
@@ -360,10 +377,14 @@ export default function VideoEditor({
             await applyReady(url, timelineUrl);
             return;
           }
+          if (!cancelled) setVoiceWaitedMs(Date.now() - startedAtMs);
         }
-        if (!cancelled) setVoiceError(true);
-      } catch {
-        if (!cancelled) setVoiceError(true);
+        // Not an error: nothing failed, we just stopped waiting.
+        if (!cancelled) setVoiceError("slow");
+      } catch (e) {
+        // A real failure (request rejected, server error) — say what it was
+        // instead of blaming the worker for every possible cause.
+        if (!cancelled) setVoiceError(e instanceof Error ? e.message : String(e));
       } finally {
         if (!cancelled) setVoiceLoading(false);
       }
@@ -473,7 +494,7 @@ export default function VideoEditor({
     setSavedSpec(null);
     setSource(null);
     setVoiceUrl(null);
-    setVoiceError(false);
+    setVoiceError(null);
     // reset undo history for the new project
     past.current = [];
     future.current = [];
@@ -925,7 +946,9 @@ export default function VideoEditor({
     }
   }
 
-  // One-click enhance: tighten the whole script + turn on captions.
+  // One-click enhance: tighten the whole script + turn on captions. Left
+  // unsaved on purpose — the Discard / Keep changes bar is the way out of it,
+  // so the voice is only rebuilt when you accept the rewrite.
   async function enhance() {
     if (!spec) return;
     setSpec((s) => (s ? { ...s, captions: { enabled: true } } : s));
@@ -1879,11 +1902,33 @@ export default function VideoEditor({
                 {voiceLoading ? (
                   <>
                     <Spinner /> Preparing the AI voice…
+                    {voiceWaitedMs > 15000 && (
+                      <span className="text-[var(--text-3)]">
+                        {mmss(voiceWaitedMs / 1000)} · first build of a long script
+                        takes a few minutes, then it&apos;s cached
+                      </span>
+                    )}
                   </>
+                ) : voiceError === "slow" ? (
+                  <span className="text-amber-600">
+                    ⏳ The AI voice is still being generated — long narration can
+                    take several minutes the first time.{" "}
+                    <button
+                      onClick={() => setVoiceNonce((n) => n + 1)}
+                      className="underline underline-offset-2 hover:text-[var(--text)]"
+                    >
+                      Check again
+                    </button>
+                  </span>
                 ) : voiceError ? (
                   <span className="text-amber-600">
-                    ⚠ Couldn’t build the AI voice preview — is the worker
-                    running?
+                    ⚠ AI voice preview failed: {voiceError}{" "}
+                    <button
+                      onClick={() => setVoiceNonce((n) => n + 1)}
+                      className="underline underline-offset-2 hover:text-[var(--text)]"
+                    >
+                      Retry
+                    </button>
                   </span>
                 ) : aiVoiceActive ? (
                   <>

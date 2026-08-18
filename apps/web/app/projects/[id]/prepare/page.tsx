@@ -196,28 +196,32 @@ function PrepareInner({ params }: { params: Promise<{ id: string }> }) {
             )}
           </div>
 
-          {/* toolbar */}
-          <div className="mt-4 inline-flex items-center gap-2 rounded-2xl border border-[var(--border)] bg-[var(--card)] p-2">
-            <button onClick={() => setModal("crop")} disabled={!videoAsset} className={toolBtn}>
-              ⛶ Crop{" "}
-              {crops.length > 0 && (
-                <span className="inline-flex items-center gap-1">
-                  <span className="h-1.5 w-1.5 rounded-full bg-[#6d5dfb]" />
-                  {crops.length > 1 && <span className="text-xs text-[var(--text-3)]">{crops.length}</span>}
-                </span>
-              )}
-            </button>
-            <button onClick={() => setModal("trim")} disabled={!videoAsset} className={toolBtn}>
-              ✂ Trim {detail?.trim_start_ms != null && <span className="h-1.5 w-1.5 rounded-full bg-[#6d5dfb]" />}
-            </button>
-            <button disabled title="Coming soon" className={toolBtn}>
-              🌐 Translate
-            </button>
-            <button onClick={() => setModal("voice")} disabled={!videoAsset} className={toolBtn}>
-              🎙 Voice {voice && <span className="h-1.5 w-1.5 rounded-full bg-[#6d5dfb]" />}
-            </button>
-            <span className="rounded-xl border border-[var(--border)] bg-[var(--bg)] px-3.5 py-2 text-sm text-[var(--text-2)]">
-              English ▾
+          {/* Toolbar — shelved. Every tool is drawn but inert, with a note on
+              top pointing at where the real thing lives. The modals below stay
+              wired up, so re-enabling one is just dropping its `disabled`. */}
+          <div className="relative mt-4 inline-block">
+            <div className="inline-flex select-none items-center gap-2 rounded-2xl border border-[var(--border)] bg-[var(--card)] p-2">
+              <button disabled className={toolBtn}>
+                ⛶ Crop
+              </button>
+              <button disabled className={toolBtn}>
+                ✂ Trim
+              </button>
+              <button disabled className={toolBtn}>
+                🌐 Translate
+              </button>
+              <button disabled className={toolBtn}>
+                🎙 Voice
+              </button>
+              <span className="rounded-xl border border-[var(--border)] bg-[var(--bg)] px-3.5 py-2 text-sm text-[var(--text-2)] opacity-40">
+                English ▾
+              </span>
+            </div>
+            <span className="pointer-events-none absolute inset-0 flex items-center justify-center px-2">
+              <span className="rounded-full border border-[var(--border)] bg-[var(--card)]/95 px-4 py-2 text-center text-sm font-semibold text-[var(--text)] shadow-[var(--shadow-card)] backdrop-blur-sm">
+                Click <span className="text-[#7C3AED]">Generate AI content</span> to crop or trim
+                in the editor
+              </span>
             </span>
           </div>
 

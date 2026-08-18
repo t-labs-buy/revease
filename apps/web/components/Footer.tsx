@@ -10,15 +10,19 @@ export function Footer() {
   if (HIDE_ON.some((re) => re.test(pathname))) return null;
 
   return (
-    <footer className="mx-auto flex w-full max-w-[1600px] flex-col items-center gap-3 border-t border-[var(--border)] px-8 py-7 text-sm text-black sm:flex-row sm:justify-between">
-      <span className="font-semibold">© {new Date().getFullYear()} RevEase. All rights reserved.</span>
-      <span className="flex items-center gap-2.5 font-semibold">
-        Powered by
-        <span className="flex items-center rounded-md bg-white px-3 py-2 shadow-sm ring-1 ring-black/5">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src="/tarento-logo.svg" alt="Tarento" className="h-6 w-auto" />
+    // The rule spans the page; the content inside it stays on the app's grid.
+    // Putting both on one element drew the line only across the content box.
+    <footer className="mt-auto w-full border-t border-[var(--border)]">
+      <div className="mx-auto flex w-full max-w-[1600px] flex-col items-center gap-3 px-8 py-6 text-sm text-[var(--text-2)] sm:flex-row sm:justify-between">
+        <span>© {new Date().getFullYear()} RevEase. All rights reserved.</span>
+        <span className="flex items-center gap-2.5">
+          <span className="text-[var(--text-3)]">Powered by</span>
+          <span className="flex items-center rounded-lg bg-white px-2.5 py-1.5 ring-1 ring-black/5">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src="/tarento-logo.svg" alt="Tarento" className="h-5 w-auto" />
+          </span>
         </span>
-      </span>
+      </div>
     </footer>
   );
 }
