@@ -9,10 +9,12 @@ from sqlalchemy.orm import Session
 
 from pydantic import BaseModel
 
+from app.auth import CurrentUser
 from app.db import get_session
 from app.diff import migrate_edit_spec
-from app.editspec import build_edit_spec, mark_dirty, voice_track_key
+from app.editspec import build_edit_spec, mark_dirty, voice_timeline_key, voice_track_key
 from app.models import CaptureSession, MediaAsset, RenderJob, VideoProject, WorkflowGraphRow
+from app.ownership import owned_project, owned_render_job
 from app.queue import enqueue_render, enqueue_voice_track
 from app.schemas import EditSpecPatch, RenderJobOut, VideoSpecOut
 from app.storage import store
@@ -47,7 +49,10 @@ def _latest_viewport(db: Session, project_id: str) -> dict | None:
     return sess.viewport_json if sess else None
 
 
-def _get_or_build(db: Session, project_id: str) -> VideoProject:
+def _get_or_build(db: Session, user, project_id: str) -> VideoProject:
+    """Every project-scoped route funnels through here, so the ownership check
+    lives here too — a new route cannot forget it."""
+    owned_project(db, user, project_id)
     vp = db.scalar(select(VideoProject).where(VideoProject.project_id == project_id))
     graph = _latest_graph(db, project_id)
     if graph is None:
@@ -81,8 +86,10 @@ def _get_or_build(db: Session, project_id: str) -> VideoProject:
 
 
 @router.get("/projects/{project_id}/video", response_model=VideoSpecOut)
-def get_video(project_id: str, db: Session = Depends(get_session)) -> VideoSpecOut:
-    vp = _get_or_build(db, project_id)
+def get_video(
+    project_id: str, user: CurrentUser, db: Session = Depends(get_session)
+) -> VideoSpecOut:
+    vp = _get_or_build(db, user, project_id)
     return VideoSpecOut(
         video_project_id=vp.id,
         project_id=project_id,
@@ -94,9 +101,9 @@ def get_video(project_id: str, db: Session = Depends(get_session)) -> VideoSpecO
 
 @router.patch("/projects/{project_id}/video", response_model=VideoSpecOut)
 def patch_video(
-    project_id: str, payload: EditSpecPatch, db: Session = Depends(get_session)
+    project_id: str, payload: EditSpecPatch, user: CurrentUser, db: Session = Depends(get_session)
 ) -> VideoSpecOut:
-    vp = _get_or_build(db, project_id)
+    vp = _get_or_build(db, user, project_id)
     new_spec = mark_dirty(vp.edit_spec_json, payload.edit_spec)
     vp.edit_spec_json = new_spec
     db.commit()
@@ -111,8 +118,10 @@ def patch_video(
 
 
 @router.post("/projects/{project_id}/video/render", response_model=RenderJobOut)
-def render_video(project_id: str, db: Session = Depends(get_session)) -> RenderJobOut:
-    vp = _get_or_build(db, project_id)
+def render_video(
+    project_id: str, user: CurrentUser, db: Session = Depends(get_session)
+) -> RenderJobOut:
+    vp = _get_or_build(db, user, project_id)
     job = RenderJob(video_project_id=vp.id, status="pending")
     db.add(job)
     db.commit()
@@ -128,33 +137,48 @@ class VoiceTrackReq(BaseModel):
 
 @router.post("/projects/{project_id}/voice-track")
 def start_voice_track(
-    project_id: str, payload: VoiceTrackReq, db: Session = Depends(get_session)
+    project_id: str, payload: VoiceTrackReq, user: CurrentUser, db: Session = Depends(get_session)
 ) -> dict:
     """Kick off (once) building the narration preview track. Poll the GET for readiness.
     The key is content-hashed on the script, so editing the script rebuilds it."""
-    vp = _get_or_build(db, project_id)
+    vp = _get_or_build(db, user, project_id)
     key = voice_track_key(project_id, payload.voice_id, payload.speed, vp.edit_spec_json)
+    tkey = voice_timeline_key(project_id, payload.voice_id, payload.speed, vp.edit_spec_json)
     if store.exists(key):
-        return {"url": store.download_url(key), "ready": True}
+        return {
+            "url": store.download_url(key),
+            "ready": True,
+            "timeline_url": store.download_url(tkey) if store.exists(tkey) else None,
+        }
     enqueue_voice_track(project_id, payload.voice_id, payload.speed)
-    return {"url": store.download_url(key), "ready": False}
+    return {"url": store.download_url(key), "ready": False, "timeline_url": None}
 
 
 @router.get("/projects/{project_id}/voice-track")
 def voice_track_status(
-    project_id: str, voice_id: str, speed: float = 1.0, db: Session = Depends(get_session)
+    project_id: str,
+    voice_id: str,
+    user: CurrentUser,
+    speed: float = 1.0,
+    db: Session = Depends(get_session),
 ) -> dict:
     """Poll-only readiness check — does NOT re-enqueue (avoids flooding the worker)."""
-    vp = _get_or_build(db, project_id)
+    vp = _get_or_build(db, user, project_id)
     key = voice_track_key(project_id, voice_id, speed, vp.edit_spec_json)
-    return {"url": store.download_url(key), "ready": store.exists(key)}
+    tkey = voice_timeline_key(project_id, voice_id, speed, vp.edit_spec_json)
+    ready = store.exists(key)
+    return {
+        "url": store.download_url(key),
+        "ready": ready,
+        "timeline_url": store.download_url(tkey) if ready and store.exists(tkey) else None,
+    }
 
 
 @router.get("/render/{job_id}", response_model=RenderJobOut)
-def get_render(job_id: str, db: Session = Depends(get_session)) -> RenderJobOut:
-    job = db.get(RenderJob, job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="render job not found")
+def get_render(
+    job_id: str, user: CurrentUser, db: Session = Depends(get_session)
+) -> RenderJobOut:
+    job = owned_render_job(db, user, job_id)
     return RenderJobOut(
         id=job.id,
         status=job.status,

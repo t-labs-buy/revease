@@ -6,9 +6,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.auth import CurrentUser
 from app.db import get_session
 from app.diff import diff_graphs
 from app.models import WorkflowGraphRow
+from app.ownership import owned_project
 from app.schemas import GraphOut
 
 router = APIRouter(prefix="/projects", tags=["graphs"])
@@ -16,8 +18,12 @@ router = APIRouter(prefix="/projects", tags=["graphs"])
 
 @router.get("/{project_id}/graph", response_model=GraphOut)
 def get_graph(
-    project_id: str, version: int | None = Query(default=None), db: Session = Depends(get_session)
+    project_id: str,
+    user: CurrentUser,
+    version: int | None = Query(default=None),
+    db: Session = Depends(get_session),
 ) -> WorkflowGraphRow:
+    owned_project(db, user, project_id)
     q = select(WorkflowGraphRow).where(WorkflowGraphRow.project_id == project_id)
     if version is not None:
         q = q.where(WorkflowGraphRow.version == version)
@@ -30,8 +36,11 @@ def get_graph(
 
 
 @router.get("/{project_id}/memory")
-def get_memory(project_id: str, db: Session = Depends(get_session)) -> dict:
+def get_memory(
+    project_id: str, user: CurrentUser, db: Session = Depends(get_session)
+) -> dict:
     """Project memory: diff the two most recent graph versions (re-record diff)."""
+    owned_project(db, user, project_id)
     versions = list(
         db.scalars(
             select(WorkflowGraphRow)

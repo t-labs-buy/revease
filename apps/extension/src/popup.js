@@ -2,6 +2,7 @@ import { listProjects } from "./api.js";
 
 const $ = (id) => document.getElementById(id);
 const apiBaseEl = $("apiBase");
+const tokenEl = $("token");
 const projectEl = $("project");
 const startEl = $("start");
 const stopEl = $("stop");
@@ -46,6 +47,12 @@ apiBaseEl.addEventListener("change", async () => {
   await chrome.storage.local.set({ apiBase: apiBaseEl.value });
   await loadProjects();
 });
+// The token is what makes every request work, so re-list projects on change to
+// give immediate feedback on whether it was accepted.
+tokenEl.addEventListener("change", async () => {
+  await chrome.storage.local.set({ accessToken: tokenEl.value.trim() });
+  await loadProjects();
+});
 projectEl.addEventListener("change", () =>
   chrome.storage.local.set({ projectId: projectEl.value }),
 );
@@ -76,9 +83,22 @@ stopEl.addEventListener("click", async () => {
   }
 });
 
+$("autorec").addEventListener("click", async () => {
+  // Open the persistent side panel (the popup dies on focus change; a multi-minute
+  // AI-driven run needs a surface that survives switching to the recorded tab).
+  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  try {
+    if (tab && tab.windowId != null) await chrome.sidePanel.open({ windowId: tab.windowId });
+    window.close();
+  } catch (e) {
+    setStatus(`Could not open side panel: ${e}`, true);
+  }
+});
+
 (async () => {
-  const cfg = await chrome.storage.local.get("apiBase");
+  const cfg = await chrome.storage.local.get(["apiBase", "accessToken"]);
   if (cfg.apiBase) apiBaseEl.value = cfg.apiBase;
+  if (cfg.accessToken) tokenEl.value = cfg.accessToken;
   await loadProjects();
   await refreshRecordingUI();
 })();

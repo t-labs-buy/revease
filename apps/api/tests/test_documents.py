@@ -1,9 +1,5 @@
-from fastapi.testclient import TestClient
-
 from app.docgen import build_document, render_markdown, render_pdf
-from app.main import app
-
-client = TestClient(app)
+from tests.helpers import client
 
 GRAPH = {
     "workflow_id": "wf_d",

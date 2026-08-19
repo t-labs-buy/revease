@@ -2,6 +2,10 @@ import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
 import { BottomNav } from "@/components/BottomNav";
+import { Footer } from "@/components/Footer";
+import { AuthGate } from "@/components/AuthGate";
+import { TopBar, TopBarProvider } from "@/components/TopBar";
+import { AuthProvider } from "@/contexts/AuthContext";
 
 const inter = Inter({ subsets: ["latin"], variable: "--font-inter" });
 
@@ -17,7 +21,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         {/* set theme before paint to avoid a flash */}
         <script
           dangerouslySetInnerHTML={{
-            __html: `(function(){try{var t=localStorage.getItem('theme');var d=t?t==='dark':window.matchMedia('(prefers-color-scheme: dark)').matches;document.documentElement.classList.toggle('dark',d);}catch(e){document.documentElement.classList.add('dark');}})();`,
+            __html: `(function(){try{var t=localStorage.getItem('theme');var d=t?t==='dark':false;document.documentElement.classList.toggle('dark',d);}catch(e){}})();`,
           }}
         />
       </head>
@@ -28,8 +32,22 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <div className="absolute top-1/4 right-0 h-[420px] w-[420px] rounded-full bg-fuchsia-600/8 blur-[130px]" />
         </div>
 
-        <div className="min-h-screen pb-24">{children}</div>
-        <BottomNav />
+        {/* AuthProvider wraps everything so the nav can show the account too;
+            AuthGate keeps signed-out visitors out of every non-public route. */}
+        <AuthProvider>
+          {/* TopBarProvider wraps both the bar and the page so a page can portal
+              its own controls into the shared header. */}
+          <TopBarProvider>
+            <div className="flex min-h-screen flex-col pb-24">
+              <TopBar />
+              <div className="flex-1">
+                <AuthGate>{children}</AuthGate>
+              </div>
+              <Footer />
+            </div>
+          </TopBarProvider>
+          <BottomNav />
+        </AuthProvider>
       </body>
     </html>
   );

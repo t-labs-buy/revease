@@ -38,6 +38,15 @@ Video-only V1 (P4 doc export deferred to V2). Tick items only when the phase exi
   - **Verified:** render test + full suite **44/44**; **live broker E2E (release gate)**: upload video → understanding → 3-step graph → edit-spec → render MP4 (6.68s vs expected 6.58s, **drift < 0.11s**) → edit one segment's script → regenerate **rendered 1 / reused 2, TTS synth 1 / cached 2**
   - **Note:** offline here → silent TTS + still-image segments (screenshot/video-frame). Real voiceover needs `REFRACT_OPENAI_API_KEY`; live-video-motion segments (vs stills) and zoom ease-in are V2 refinements.
 
+- [x] **Auto Record — AI-driven tab recording (feature/autorec)**
+  - [x] E1 Extension records a chosen tab (offscreen doc + `tabCapture.getMediaStreamId`) and drives it via `chrome.debugger`/CDP with trusted input (click/type/scroll/navigate/keydown) + a ghost cursor for watchability
+  - [x] E2 Server-side agent loop: `POST /auto-record/runs` + `/step` (synchronous Claude, strict `next_action` tool use, prompt-cached plan+transcript prefix, `expected_index` idempotency) drives the tab through a coverage plan
+  - [x] E3 Pipeline auto branch: Whisper skipped (user transcript), `segment_auto` from the agent log + exact telemetry, `build_graph_auto` (no LLM extraction), `narrate` aligns the transcript to steps (verbatim, deterministic fallback)
+  - [x] E4 Side-panel UI (plan + transcript form, live step log, pause/abort); popup "Auto Record" button opens it
+  - **Endpoints:** `POST /auto-record/runs`, `/runs/{id}/step`, `/runs/{id}/complete`, `/runs/{id}/abort`, `GET /auto-record/runs[/{id}]`
+  - **Reuses:** session/asset/event/complete upload path, TTS + `buildTimeline` freeze-frame (narration longer than the clip auto-holds), render + regenerate, the video editor (auto sessions edit identically)
+  - **Verified:** api 23/23, workers 45/45 (segment_auto, narrate verbatim invariant, end-to-end seeded auto pipeline, router loop/idempotency/plan-state with mocked Claude); extension JS syntax-checked. **Needs manual browser E2E** (load unpacked → Auto Record a known product → confirm recording + graph + narrated render).
+
 ---
 
 ## 🎉 V1 core loop complete — capture → AI video → edit → regenerate → drift-free MP4
@@ -47,6 +56,16 @@ Release-gate checklist (§5) all satisfied except the two provider-key items (Wh
 - **LLM:** step labeling/narration calls Claude via the official Anthropic SDK (`claude-opus-4-8`, `REFRACT_ANTHROPIC_API_KEY`); falls back to OpenRouter, then a deterministic offline labeler. Verified: bad key → graceful 401 fallback.
 - **Voice:** default is **Piper** — keyless local neural TTS (`REFRACT_TTS_PROVIDER=piper`, model auto-downloads ~63MB to `data/piper/`). Verified real speech synthesis. `openai` and silent-clip paths remain behind the same adapter.
 - **Config fix:** `Settings` now loads the **repo-root `.env`** regardless of CWD (api/worker run from `apps/*`), so `.env` keys actually take effect. All provider/whisper/tts config flows through `get_settings()`.
+
+## Accounts & per-user spaces
+- **Auth:** email + password (bcrypt, sha256-prehashed so long passphrases aren't truncated at bcrypt's 72-byte limit) issuing stateless HS256 JWT bearer tokens. Signing key from `REFRACT_AUTH_SECRET_KEY`, else generated once into `data/auth_secret.key`. Logout is client-side (drop the token).
+- **Endpoints:** `POST /auth/register` (creates the account only — returns the user, **no token**, so registering does not sign you in), `POST /auth/login` (the only call that issues a token), `GET /auth/me`.
+- **Ownership:** `users` table; `user_id` on the four top-level entities (Project, Skill, KbArticle, BrandPackage). Everything else hangs off a Project, so `app/ownership.py` resolves ownership by walking up to it. Another user's row returns **404, not 403**, so responses never confirm an id exists.
+- **Still public by design:** `/auth/register`, `/auth/login`, `/healthz`, `/voices[/preview]`, `GET /media/{key}` (`<video src>` and the share viewer can't send a header; keys embed UUIDs) and `GET /shares/{token}` (an unguessable token *is* the share authorization). `PUT /media/{key}` used to be anonymous and is now authenticated **and** authorized against the key's owning session/package.
+- **Web:** `lib/http.ts` is the single transport (attaches the token, and on 401 clears it and bounces to `/login`); `AuthGate` in the root layout makes every route private unless whitelisted, so a new page is private by default. Doc export moved from `<a href>` to an authenticated blob download.
+- **Extension:** reads `accessToken` from `chrome.storage.local` inside `api.js`, so no other extension file knows about auth. Paste API base + token from the web app's **Account → Connect extension**.
+- **Verified:** api 43/43 (incl. a cross-account isolation suite), workers 45/45, web typecheck + `next build` clean.
+- **Not built yet — password reset / change.** Deliberately deferred: it needs an email transport (SMTP/Resend) this deployment doesn't have. The `/account` page says so in the UI. When adding it: a `PasswordResetToken` table (single-use, short TTL, hashed at rest), `POST /auth/forgot-password` (always 200, never reveal whether the email exists), `POST /auth/reset-password`, and a `/reset-password` page.
 
 ## Notes / environment
 - **No NVIDIA GPU visible** in the current dev shell — Whisper will fall back to CPU (slow) in P2 until CUDA 12.x is set up on the RTX 5070 target.

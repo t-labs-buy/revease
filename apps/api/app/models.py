@@ -1,7 +1,12 @@
-"""SQLAlchemy models — V1 trimmed schema (no users/workspaces; top entity = project).
+"""SQLAlchemy models.
 
-Tables are created now and populated over later phases; keeping them here keeps the
-Workflow Graph and step->asset links authoritative from the start."""
+Every user gets their own private space: the four top-level entities a user can
+create (Project, Skill, KbArticle, BrandPackage) carry a `user_id` owner, and
+everything else hangs off a Project, so ownership is reachable for any row.
+
+`user_id` is nullable at the DB level only because SQLite's ADD COLUMN cannot add
+a NOT NULL column to an existing table — the API always sets it. Rows that predate
+auth therefore read as ownerless and belong to nobody; `app.purge` removes them."""
 
 from __future__ import annotations
 
@@ -23,10 +28,29 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+class User(Base):
+    """An account. `email` is stored lower-cased and is the login identifier."""
+
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    email: Mapped[str] = mapped_column(String, unique=True, index=True, nullable=False)
+    name: Mapped[str] = mapped_column(String, default="")
+    password_hash: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    # Present on every other mutable row here, and required by `users` tables
+    # created before this model existed (that column is NOT NULL with no default,
+    # so omitting it makes every INSERT fail against such a database).
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now
+    )
+
+
 class Project(Base):
     __tablename__ = "projects"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), index=True, nullable=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
     favorite: Mapped[int] = mapped_column(Integer, default=0)  # 0/1 — starred/pinned
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
@@ -60,6 +84,38 @@ class CaptureSession(Base):
     )
     events: Mapped[list["Event"]] = relationship(
         back_populates="session", cascade="all, delete-orphan"
+    )
+
+
+class AutoRecordRun(Base):
+    """An AI-driven Auto Record session: the agent drives the user's browser tab
+    (via the extension + CDP) through a coverage plan while the tab is recorded.
+
+    One run maps 1:1 to a CaptureSession (source_type="auto"). The `agent_log_json`
+    is the authoritative source for the Workflow Graph — the agent knows each step's
+    action/target/intent/screen at decision time, so no LLM extraction is needed."""
+
+    __tablename__ = "autorecord_runs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("capture_sessions.id"), index=True)
+    # created|driving|capture_done|processing|ready|failed|aborted
+    status: Mapped[str] = mapped_column(String, default="created")
+    start_url: Mapped[str | None] = mapped_column(String, nullable=True)
+    # [{ "id": "p1", "text": "...", "status": "pending|active|done" }, …]
+    coverage_plan_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    transcript_text: Mapped[str] = mapped_column(Text, default="")
+    # ordered decisions: [{ index, action, ref, target, intent, screen_name,
+    #   plan_item_id, reason, ok, selector, bbox, t_ms, error }, …]
+    agent_log_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    current_plan_item: Mapped[str | None] = mapped_column(String, nullable=True)
+    step_count: Mapped[int] = mapped_column(Integer, default=0)
+    max_steps: Mapped[int] = mapped_column(Integer, default=60)
+    error_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now
     )
 
 
@@ -218,6 +274,7 @@ class Skill(Base):
     __tablename__ = "skills"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), index=True, nullable=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
     description: Mapped[str] = mapped_column(Text, default="")
     target: Mapped[str] = mapped_column(String, default="video")  # "video" | "doc"
@@ -231,6 +288,7 @@ class KbArticle(Base):
     __tablename__ = "kb_articles"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), index=True, nullable=True)
     title: Mapped[str] = mapped_column(String, nullable=False)
     summary: Mapped[str] = mapped_column(Text, default="")
     body_md: Mapped[str] = mapped_column(Text, default="")
@@ -246,6 +304,7 @@ class BrandPackage(Base):
     __tablename__ = "brand_packages"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), index=True, nullable=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
     settings_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

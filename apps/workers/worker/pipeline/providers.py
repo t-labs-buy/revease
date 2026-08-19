@@ -55,6 +55,10 @@ def transcribe(audio_path: str | None) -> Transcript:
     model_size = settings.whisper_model
     device = settings.whisper_device
     compute = settings.whisper_compute
+    # Bias recognition toward product/feature names that Whisper would otherwise
+    # mishear (it has no way to know your product's vocabulary on its own).
+    vocab = [v.strip() for v in settings.whisper_vocab.split(",") if v.strip()]
+    initial_prompt = ("Vocabulary: " + ", ".join(vocab)) if vocab else None
     try:
         model = WhisperModel(model_size, device=device, compute_type=compute)
         segments, _info = model.transcribe(
@@ -68,6 +72,7 @@ def transcribe(audio_path: str | None) -> Transcript:
             # Don't feed prior text back in — prevents repetition/drift so the
             # transcript matches what was actually said.
             condition_on_previous_text=False,
+            initial_prompt=initial_prompt,
         )
         words: list[Word] = []
         for seg in segments:
@@ -82,10 +87,16 @@ def transcribe(audio_path: str | None) -> Transcript:
 # --------------------------------------------------------------------------- #
 # LLM labeler
 # --------------------------------------------------------------------------- #
+VALID_ACTIONS = {"click", "input", "navigation", "scroll", "keydown", "wait", "custom"}
+
 LABEL_SYSTEM = (
     "You label steps of a software workflow. For each input step you receive its "
     "action type, target label/selector, and any narration span from the transcript. "
-    "Return concise, user-facing labels."
+    "Return concise, user-facing labels.\n\n"
+    "The \"action\" field MUST be exactly one of: click, input, navigation, scroll, keydown, "
+    "wait, custom — no other value is valid. If the step doesn't clearly match one of "
+    "click/input/navigation/scroll/keydown/wait, use \"custom\" (e.g. for uploads, "
+    "selections, or anything else)."
 )
 
 
@@ -101,21 +112,24 @@ def _fallback_label(step: dict) -> dict:
         "scroll": "Scroll",
         "keydown": "Press a shortcut on",
     }.get(action, "Interact with")
-    narration = step.get("narration_span") or f"{verb} {target}."
+    # Narration is ONLY ever the transcript span — never an invented sentence —
+    # so the script always matches the spoken audio word-for-word. A silent step
+    # gets an empty script (the render plays it at natural speed, silent).
+    narration = (step.get("narration_span") or "").strip()
     return {
         "action": action,
         "target": target[:120],
         "intent": f"{verb} {target}"[:160],
         "screen_name": step.get("screen_name") or "Screen",
-        "narration": narration[:400],
+        "narration": narration,
     }
 
 
 def _label_prompt(steps: list[dict]) -> str:
     return (
         "Label these workflow steps. Reply ONLY with a JSON array (no prose, no code "
-        'fences); each item: {"action","target","intent","screen_name","narration"}. '
-        "Keep narration to one friendly, present-tense sentence.\n\n"
+        'fences); each item: {"action","target","intent","screen_name"}. '
+        "Do NOT write narration — the narration comes verbatim from the transcript.\n\n"
         + json.dumps(steps, ensure_ascii=False)
     )
 
@@ -182,11 +196,16 @@ def label_steps(steps: list[dict]) -> list[dict]:
         merged = []
         for s, lab in zip(steps, labeled):
             row = {**_fallback_label(s), **{k: v for k, v in lab.items() if v}}
+            # The LLM sometimes returns a reasonable-but-invalid action word (e.g.
+            # "navigate", "upload") despite the prompt constraint — the schema only
+            # accepts a fixed enum, so fall back to the original action rather than
+            # let an invalid value fail graph validation downstream.
+            if row.get("action") not in VALID_ACTIONS:
+                row["action"] = s.get("action") if s.get("action") in VALID_ACTIONS else "custom"
             # Narration stays VERBATIM from the transcript so the on-screen script
-            # matches the spoken audio word-for-word. The LLM may relabel the
-            # action/target/intent/screen_name, but it must not paraphrase speech.
-            if s.get("narration_span"):
-                row["narration"] = s["narration_span"]
+            # matches the spoken audio word-for-word — ALWAYS, even when the span is
+            # empty. The LLM may relabel action/target/intent/screen_name only.
+            row["narration"] = (s.get("narration_span") or "").strip()
             merged.append(row)
         return merged
     except Exception as e:

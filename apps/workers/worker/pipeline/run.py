@@ -14,13 +14,23 @@ from typing import Any
 from sqlalchemy import func, select
 
 from app.db import SessionLocal, init_db
-from app.models import CaptureSession, Event, Job, MediaAsset, Transcript, WorkflowGraphRow
+from app.models import (
+    AutoRecordRun,
+    CaptureSession,
+    Event,
+    Job,
+    MediaAsset,
+    Transcript,
+    WorkflowGraphRow,
+)
 from app.storage import store
 from worker.pipeline import media as media_stage
-from worker.pipeline.extract import build_graph
+from worker.pipeline.extract import build_graph, build_graph_auto
+from worker.pipeline.narrate import narrate_steps
 from worker.pipeline.providers import Transcript as TranscriptData
 from worker.pipeline.providers import Word, transcribe
 from worker.pipeline.segment import segment
+from worker.pipeline.segment_auto import segment_auto
 
 log = logging.getLogger("refract.pipeline.run")
 
@@ -74,6 +84,18 @@ def run_pipeline(session_id: str) -> dict[str, Any]:
         sess.status = "processing"
         db.commit()
 
+        # Auto Record: the agent's own decision log is the authoritative step source,
+        # and the transcript is user-supplied text (no spoken audio to transcribe).
+        is_auto = sess.source_type == "auto"
+        auto_run = (
+            db.scalar(select(AutoRecordRun).where(AutoRecordRun.session_id == session_id))
+            if is_auto
+            else None
+        )
+        if auto_run is not None:
+            auto_run.status = "processing"
+            db.commit()
+
         # ---- media stage: ffmpeg keyframes + audio demux ---------------------
         job = _job(db, session_id, "media", version)
         if job.status != "done":
@@ -97,7 +119,10 @@ def run_pipeline(session_id: str) -> dict[str, Any]:
             job.attempts += 1
             db.commit()
             try:
-                _run_whisper(db, sess)
+                if is_auto:
+                    _write_user_transcript(db, sess, auto_run.transcript_text if auto_run else "")
+                else:
+                    _run_whisper(db, sess)
                 job.status = "done"
                 db.commit()
             except Exception as e:
@@ -144,9 +169,26 @@ def run_pipeline(session_id: str) -> dict[str, Any]:
         else:
             duration = _duration_s(sess, events, keyframes, transcript)
 
-        candidate_steps = segment(
-            events, transcript, keyframes, screenshots_by_seq, duration, sess.telemetry
-        )
+        if is_auto:
+            # Project the agent's decision log onto steps (timing from telemetry
+            # events keyed by decision index), then align the transcript across them.
+            events_by_index = {
+                e["seq"]: {"t_ms": e["t_ms"], "bbox": e.get("bbox"), "selector": e.get("selector")}
+                for e in events
+            }
+            agent_log = auto_run.agent_log_json if auto_run else []
+            candidate_steps = segment_auto(agent_log, events_by_index, screenshots_by_seq, duration)
+            narrations = narrate_steps(
+                candidate_steps,
+                auto_run.coverage_plan_json if auto_run else [],
+                auto_run.transcript_text if auto_run else "",
+            )
+            for cand, narr in zip(candidate_steps, narrations):
+                cand["narration_span"] = narr
+        else:
+            candidate_steps = segment(
+                events, transcript, keyframes, screenshots_by_seq, duration, sess.telemetry
+            )
         job.status = "done"
         db.commit()
 
@@ -156,15 +198,43 @@ def run_pipeline(session_id: str) -> dict[str, Any]:
         job.attempts += 1
         db.commit()
         title = f"Workflow ({len(candidate_steps)} steps)"
-        graph = build_graph(
-            candidate_steps,
-            workflow_id=f"wf_{session_id[:8]}",
-            title=title,
-            version=version,
-        )
-        _persist_graph(db, sess.project_id, version, graph)
-        job.status = "done"
-        db.commit()
+        try:
+            if is_auto:
+                graph = build_graph_auto(
+                    candidate_steps,
+                    workflow_id=f"wf_{session_id[:8]}",
+                    title=title,
+                    version=version,
+                )
+            else:
+                graph = build_graph(
+                    candidate_steps,
+                    workflow_id=f"wf_{session_id[:8]}",
+                    title=title,
+                    version=version,
+                )
+            _persist_graph(db, sess.project_id, version, graph)
+            job.status = "done"
+            db.commit()
+        except Exception as e:
+            # Unlike media/whisper, extract has no graceful degradation — without a
+            # graph the project is unusable, so surface a real error instead of
+            # leaving the job stuck at "running" forever (silently, on every retry).
+            log.exception("extract stage error")
+            job.status = "error"
+            job.error_json = {"error": str(e)}
+            sess.status = "error"
+            if auto_run is not None:
+                auto_run.status = "error"
+            db.commit()
+            return {"session_id": session_id, "version": version, "error": str(e)}
+
+        # Precompute auto-zooms into the edit spec so the editor shows real zooms
+        # (preview, Zoom tab, timeline row) — the render then reuses them directly.
+        try:
+            _precompute_zooms(db, sess, version)
+        except Exception:
+            log.exception("zoom precompute failed; render-time fallback still applies")
 
         # Give the project a meaningful name from the transcript (replaces the
         # placeholder "Screen Recording · …" / uploaded file name). Skipped when
@@ -183,10 +253,23 @@ def run_pipeline(session_id: str) -> dict[str, Any]:
             log.warning("project auto-title failed; keeping current name")
 
         sess.status = "ready"
+        if auto_run is not None:
+            auto_run.status = "ready"
         db.commit()
         return {"session_id": session_id, "version": version, "steps": len(graph["steps"])}
     finally:
         db.close()
+
+
+def _write_user_transcript(db, sess: CaptureSession, text: str) -> None:
+    """Auto Record has no spoken audio — persist the user's supplied transcript as
+    the session transcript (provider='user') so downstream titling still works."""
+    existing = db.scalar(select(Transcript).where(Transcript.session_id == sess.id))
+    if existing:
+        db.delete(existing)
+        db.commit()
+    db.add(Transcript(session_id=sess.id, words_json=[], text=text or "", provider="user"))
+    db.commit()
 
 
 # --------------------------------------------------------------------------- #
@@ -293,6 +376,91 @@ def _load_screenshots(db, session_id: str) -> dict[int, str]:
         if seq is not None:
             out[int(seq)] = a.storage_key
     return out
+
+
+def _precompute_zooms(db, sess: CaptureSession, version: int) -> None:
+    """Materialize click/motion auto-zooms into the project's edit spec right after
+    processing, so the editor previews real zooms and the render reuses them.
+    Scenes with a manual zoom or an explicit opt-out (auto=False) are untouched."""
+    from sqlalchemy.orm.attributes import flag_modified
+
+    from app.diff import migrate_edit_spec
+    from app.editspec import build_edit_spec
+    from app.models import VideoProject
+    from worker.pipeline.autoedit import _motion_centroid, probe_dims
+    from worker.pipeline.render import _click_points
+
+    video = db.scalar(
+        select(MediaAsset).where(MediaAsset.session_id == sess.id, MediaAsset.kind == "raw_video")
+    )
+    video_path = store.local_path(video.storage_key) if video else None
+    if video_path is None or not video_path.exists():
+        return
+    graph = db.scalar(
+        select(WorkflowGraphRow).where(
+            WorkflowGraphRow.project_id == sess.project_id, WorkflowGraphRow.version == version
+        )
+    )
+    if graph is None:
+        return
+
+    # Build (or migrate) the video project spec — mirrors the API's lazy build so
+    # the editor and this stage always agree on the spec version.
+    vp = db.scalar(select(VideoProject).where(VideoProject.project_id == sess.project_id))
+    if vp is None:
+        vp = VideoProject(
+            project_id=sess.project_id,
+            graph_version=version,
+            edit_spec_json=build_edit_spec(graph.graph_json, sess.viewport_json),
+        )
+        db.add(vp)
+        db.commit()
+        db.refresh(vp)
+    elif vp.graph_version != version:
+        old = db.scalar(
+            select(WorkflowGraphRow).where(
+                WorkflowGraphRow.project_id == sess.project_id,
+                WorkflowGraphRow.version == vp.graph_version,
+            )
+        )
+        vp.edit_spec_json = (
+            migrate_edit_spec(vp.edit_spec_json, old.graph_json, graph.graph_json, sess.viewport_json)
+            if old is not None
+            else build_edit_spec(graph.graph_json, sess.viewport_json)
+        )
+        vp.graph_version = version
+        flag_modified(vp, "edit_spec_json")
+        db.commit()
+
+    spec = vp.edit_spec_json
+    clicks = _click_points(db, sess.id)
+    vdims = probe_dims(video_path)
+    zoomed = 0
+    for s in spec.get("segments", []):
+        z = s.get("zoom") or {}
+        if z.get("enabled") or z.get("auto") is False:
+            continue  # manual zoom, already computed, or explicit user opt-out
+        t0ms = s.get("source_start_ms", 0)
+        t1ms = max(s.get("source_end_ms", 0), t0ms + 600)
+        hit = next((c for c in clicks if t0ms - 250 <= c[0] <= t1ms), None)
+        if hit:
+            cx, cy, scale = hit[1], hit[2], 1.6
+        else:
+            cx, cy, scale = _motion_centroid(video_path, t0ms / 1000.0, t1ms / 1000.0, vdims)
+        if scale > 1.0:
+            s["zoom"] = {
+                "enabled": True,
+                "scale": round(min(1.8, scale), 3),
+                "cx": cx,
+                "cy": cy,
+                "speed": 3,
+                "auto": True,
+            }
+            zoomed += 1
+    if zoomed:
+        flag_modified(vp, "edit_spec_json")
+        db.commit()
+    log.info("zoom precompute: %d/%d scenes zoomed", zoomed, len(spec.get("segments", [])))
 
 
 def _persist_graph(db, project_id: str, version: int, graph: dict[str, Any]) -> None:

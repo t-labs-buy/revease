@@ -14,8 +14,12 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import subprocess
+import textwrap
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import select
 
@@ -23,24 +27,71 @@ from app.db import SessionLocal
 from app.editspec import effective_script
 from app.models import MediaAsset, RenderJob, VideoProject, WorkflowGraphRow
 from app.storage import store
+from worker.pipeline.smoothzoom import apply_zoom
 from worker.pipeline.timeline import StepInput, build_timeline
-from worker.pipeline.tts import synth_step
+from worker.pipeline.tts import _silent_wav, synth_step
 
 log = logging.getLogger("refract.pipeline.render")
 
-ASPECTS = {"16:9": (1280, 720), "9:16": (720, 1280), "1:1": (720, 720)}
+ASPECTS = {"16:9": (1920, 1080), "9:16": (1080, 1920), "1:1": (1080, 1080)}
 FPS = 30
+DEFAULT_PACE = 1.0  # global tempo, applies uniformly whether a scene has voice or not
+# Breathing room after each narrated scene: without it, one script's narration ends
+# and the next starts on the very next frame, which reads as rushed. The pause is
+# baked into the scene's audio (and thus its timeline slot), so nothing drifts.
+SCENE_GAP_MS = 800
+# Screen recordings are mostly text; the x264 default (crf 23) — applied twice,
+# once per segment and again at concat — smears it. 18 is visually lossless.
+CRF = "18"
+
+# Auto-zoom density: zooming every scene makes the whole video feel like it never
+# stops moving. Keep at least this much SOURCE time between zoom-ins (the output
+# is ~2-3x faster than the source, so this lands around one zoom every ~15-20 s
+# of output), and don't bother zooming scenes too short to complete the ease-in.
+# (Mirrors app.editspec.)
+ZOOM_COOLDOWN_MS = 45_000
+ZOOM_MIN_SCENE_MS = 1_500
+
+# Backdrop presets behind the (inset) recording — ids match the web editor.
+BG_PRESETS: dict[str, tuple[str, str | None]] = {
+    "slate": ("0b0f1a", "1e2637"),
+    "indigo": ("6d5dfb", "a855f7"),
+    "ocean": ("0ea5e9", "6366f1"),
+    "sunset": ("f97316", "ec4899"),
+    "forest": ("10b981", "0d9488"),
+    "light": ("e2e8f0", "f8fafc"),
+}
+BG_INSET = 0.88  # recording occupies 88% of the frame when a backdrop is on
+
+
+def _bg_source(style: str | None, dims: tuple[int, int]) -> str:
+    """lavfi source for the backdrop (gradient or flat color)."""
+    w, h = dims
+    c0, c1 = BG_PRESETS.get(style or "", ("0b0f1a", "1e2637"))
+    if not c1:
+        return f"color=c=0x{c0}:s={w}x{h}"
+    return f"gradients=s={w}x{h}:c0=0x{c0}:c1=0x{c1}:x0=0:y0=0:x1={w}:y1={h}"
 _FONT_CANDIDATES = [
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
     "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    # macOS (local dev runs the worker outside Docker)
+    "/System/Library/Fonts/Supplemental/Arial.ttf",
+    "/System/Library/Fonts/Helvetica.ttc",
 ]
 
 
 def _font() -> str | None:
+    # No font OR no drawtext filter (slim ffmpeg builds lack libfreetype) means
+    # captions can't be burned — skip them rather than failing every segment.
+    proc = subprocess.run(["ffmpeg", "-hide_banner", "-filters"], capture_output=True, text=True)
+    if "drawtext" not in proc.stdout:
+        log.warning("this ffmpeg has no drawtext filter — captions/titles will be skipped")
+        return None
     for f in _FONT_CANDIDATES:
         if Path(f).exists():
             return f
+    log.warning("no caption font found — captions/titles will be skipped")
     return None
 
 
@@ -56,6 +107,27 @@ def _sha(*parts) -> str:
     return hashlib.sha1(json.dumps(parts, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
 
+CAPTION_MAX_CHARS = 86  # ~90% of the frame width at fontsize w/48
+
+
+def _caption_chunks(script: str, max_chars: int = CAPTION_MAX_CHARS) -> list[str]:
+    """Split a scene script into caption-sized pieces: one sentence per caption,
+    with overlong sentences broken further on word boundaries so each caption is
+    a single line that fits the frame."""
+    out: list[str] = []
+    for sent in re.split(r"(?<=[.!?])\s+", script.strip()):
+        sent = sent.strip()
+        while len(sent) > max_chars:
+            cut = sent.rfind(" ", 0, max_chars)
+            if cut <= 0:
+                break
+            out.append(sent[:cut])
+            sent = sent[cut + 1:].strip()
+        if sent:
+            out.append(sent)
+    return out
+
+
 def _drawtext(font: str | None, textfile: Path, size: int, y: str) -> str | None:
     if not font:
         return None
@@ -65,11 +137,15 @@ def _drawtext(font: str | None, textfile: Path, size: int, y: str) -> str | None
     )
 
 
-def _make_still(seg: dict, src_video: Path | None, dims: tuple[int, int], out: Path) -> None:
+def _make_still(seg: dict, src_video: Path | None, dims: tuple[int, int], out: Path,
+                crop: dict | None = None) -> None:
     """Best still for a segment: its screenshot, else a frame from the raw video at
-    the step's start, else a slate. Normalized to cover WxH."""
+    the step's start, else a slate. The user crop (normalized to the ORIGINAL
+    frame) is applied first, then the result covers WxH."""
     w, h = dims
+    pre = _crop_filter(crop)
     cover = f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}"
+    cover = f"{pre},{cover}" if pre else cover
     out.parent.mkdir(parents=True, exist_ok=True)
 
     shot = seg.get("screenshot")
@@ -85,16 +161,56 @@ def _make_still(seg: dict, src_video: Path | None, dims: tuple[int, int], out: P
     _run(["ffmpeg", "-y", "-f", "lavfi", "-i", f"color=c=0x0b0f1a:s={w}x{h}", "-frames:v", "1", str(out)])
 
 
-def _crop_filter(crop: dict | None, dims: tuple[int, int]) -> str | None:
-    """Reframe the WxH still to a normalized (0..1) region, then scale back to fill."""
+def _crop_for_segment(crops: list[dict] | None, seg: dict) -> dict | None:
+    """The crop that applies to THIS scene. Each crop can carry its own time
+    window (start_ms/end_ms) so different parts of the recording get different
+    reframes — the first enabled crop whose window overlaps the scene wins; a
+    crop without a window applies everywhere. Scenes matching none render
+    uncropped."""
+    for crop in crops or []:
+        if not crop or not crop.get("enabled"):
+            continue
+        s_ms, e_ms = int(crop.get("start_ms") or 0), int(crop.get("end_ms") or 0)
+        if e_ms > s_ms:
+            if seg.get("source_end_ms", 0) <= s_ms or seg.get("source_start_ms", 0) >= e_ms:
+                continue
+        return crop
+    return None
+
+
+def _remap_zoom_into_crop(zoom: dict | None, crop: dict | None) -> dict | None:
+    """Zoom centers (click positions) are normalized to the ORIGINAL frame; when a
+    crop reframes the scene first, remap the center into cropped coordinates so
+    the zoom still aims at the same on-screen spot."""
+    if not zoom or not zoom.get("enabled") or not crop:
+        return zoom
+    cw = min(1.0, max(0.05, float(crop.get("w", 1.0))))
+    ch = min(1.0, max(0.05, float(crop.get("h", 1.0))))
+    cx = min(max(0.0, float(crop.get("x", 0.0))), 1.0 - cw)
+    cy = min(max(0.0, float(crop.get("y", 0.0))), 1.0 - ch)
+    return {
+        **zoom,
+        "cx": min(1.0, max(0.0, (float(zoom.get("cx", 0.5)) - cx) / cw)),
+        "cy": min(1.0, max(0.0, (float(zoom.get("cy", 0.5)) - cy) / ch)),
+    }
+
+
+def _crop_filter(crop: dict | None) -> str | None:
+    """Cut the normalized (0..1) region out of the ORIGINAL frame — the same frame
+    the crop was drawn on in the editor. It runs BEFORE any cover/scale so the
+    coordinates always line up; the caller then covers the output WxH, so only
+    the selected content ends up in the video (no source padding leaks back in).
+    The region is clamped inside the frame (x+w ≤ 1) so a crop dragged slightly
+    past the edge still shows exactly the selected area."""
     if not crop or not crop.get("enabled"):
         return None
-    cw, ch = float(crop.get("w", 1.0)), float(crop.get("h", 1.0))
-    cx, cy = float(crop.get("x", 0.0)), float(crop.get("y", 0.0))
+    cw = min(1.0, max(0.05, float(crop.get("w", 1.0))))
+    ch = min(1.0, max(0.05, float(crop.get("h", 1.0))))
+    cx = min(max(0.0, float(crop.get("x", 0.0))), 1.0 - cw)
+    cy = min(max(0.0, float(crop.get("y", 0.0))), 1.0 - ch)
     if cw >= 0.999 and ch >= 0.999 and cx <= 0.001 and cy <= 0.001:
         return None
-    w, h = dims
-    return f"crop=iw*{cw:.4f}:ih*{ch:.4f}:iw*{cx:.4f}:ih*{cy:.4f},scale={w}:{h}"
+    return f"crop=iw*{cw:.4f}:ih*{ch:.4f}:iw*{cx:.4f}:ih*{cy:.4f}"
 
 
 def _hex(color: str, default: str) -> str:
@@ -141,65 +257,145 @@ def _element_filters(elements, dims: tuple[int, int], font: str | None, work: Pa
     return out
 
 
-def _zoom_filter(zoom: dict | None, dims: tuple[int, int]) -> str:
-    """Constant click-centered zoom via scale+crop (robust; ease-in is a V2 nicety)."""
-    w, h = dims
-    if not zoom or not zoom.get("enabled"):
-        return f"scale={w}:{h}"
-    scale = max(1.0, float(zoom.get("scale", 1.6)))
-    sw, sh = int(w * scale), int(h * scale)
-    cx, cy = float(zoom.get("cx", 0.5)), float(zoom.get("cy", 0.5))
-    # crop offset toward the click, clamped inside the scaled frame
-    x = f"min(max({cx}*{sw}-{w}/2\\,0)\\,{sw}-{w})"
-    y = f"min(max({cy}*{sh}-{h}/2\\,0)\\,{sh}-{h})"
-    return f"scale={sw}:{sh},crop={w}:{h}:{x}:{y}"
+def _zoom_ease_s(zoom: dict) -> float:
+    """Ease-in/out duration for a zoom's `speed` setting (1 slow … 5 snappy)."""
+    return {1: 2.0, 2: 1.5, 3: 1.1, 4: 0.7, 5: 0.4}.get(int(zoom.get("speed", 3) or 3), 1.1)
 
 
 def _render_segment(seg, seg_tl, src_video, dims, captions, font, work: Path,
-                    crop=None, elements=None, logo: Path | None = None,
-                    logo_pos: str = "Top Right") -> tuple[Path, bool]:
+                    crops=None, elements=None, logo: Path | None = None,
+                    logo_pos: str = "Top Right", background: dict | None = None) -> tuple[Path, bool]:
     """Return (clip_path, rendered_now). Reuses a cached clip when the content hash
-    matches — this is what makes regenerate touch only changed segments."""
+    matches — this is what makes regenerate touch only changed segments.
+
+    The clip shows the REAL source footage for the scene's window, retimed to fit
+    the narration slot (sped up when the window is longer than the narration;
+    played at natural pace + last-frame freeze when shorter). A still is only the
+    fallback when there is no usable footage."""
     script = effective_script(seg.get("words", []), seg.get("removed", []))
     tts_path = Path(seg["_audio_path"])  # precomputed in run_render (TTS or original audio)
     dur_s = max(0.3, seg_tl.out_duration_ms / 1000.0)
+    src_len_s = max(0.0, (seg_tl.source_end_ms - seg_tl.source_start_ms) / 1000.0)
+    use_footage = (
+        src_video is not None and src_video.exists() and not seg_tl.hold and src_len_s >= 0.2
+    )
 
-    clip_hash = _sha(seg.get("step_id"), script, tts_path.name, seg.get("zoom"),
-                     dims, captions, seg.get("screenshot"), seg.get("source_start_ms"),
-                     crop, elements, str(logo), logo_pos)
+    # each crop honours its optional time window, and the zoom center is remapped
+    # into the cropped frame so it still points at the same on-screen spot
+    crop_eff = _crop_for_segment(crops, seg)
+    zoom_eff = _remap_zoom_into_crop(seg.get("zoom"), crop_eff)
+
+    clip_hash = _sha("v12", seg.get("step_id"), script, tts_path.name, zoom_eff,
+                     dims, captions, font, seg.get("screenshot"), seg.get("source_start_ms"),
+                     seg.get("source_end_ms"), round(dur_s, 3), use_footage,
+                     crop_eff, elements, str(logo), logo_pos, background)
     clip = work / f"seg_{seg_tl.index:03d}_{clip_hash}.mp4"
     if clip.exists():
         return clip, False  # reused — unchanged since last render
 
-    still = work / f"still_{clip_hash}.png"
-    _make_still(seg, src_video, dims, still)
-
-    # crop (reframe) -> zoom -> captions -> overlay elements -> normalize
+    w, h = dims
     parts: list[str] = []
-    cf = _crop_filter(crop, dims)
-    if cf:
-        parts.append(cf)
-    parts.append(_zoom_filter(seg.get("zoom"), dims))
+    cf = _crop_filter(crop_eff)
+    if use_footage:
+        # crop the ORIGINAL frame first (the frame the crop was drawn on), then
+        # normalize the remaining content to cover WxH — only the selected
+        # region reaches the output, so source padding can't leak back in
+        if cf:
+            parts.append(cf)
+        parts.append(f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}")
+        speed = src_len_s / dur_s
+        if speed >= 1.02:
+            parts.append(f"setpts=PTS/{speed:.6f}")  # play faster to fit the slot
+        elif dur_s > src_len_s + 0.05:
+            # narration outlasts the window: natural pace, then hold the last frame
+            parts.append(f"tpad=stop_mode=clone:stop_duration={dur_s - src_len_s:.3f}")
+    else:
+        still = work / f"still_{clip_hash}.png"
+        _make_still(seg, src_video, dims, still, crop=crop_eff)  # crop baked into the still
+
+    # zoom -> captions -> overlay elements -> normalize
+    zoom_on = bool(zoom_eff and zoom_eff.get("enabled"))
+    zoomed = work / f"zoomclip_{clip_hash}.mp4"
+    if zoom_on:
+        # The zoom runs OUTSIDE ffmpeg: zoompan quantizes the camera path to
+        # whole pixels (visible jitter), so a flat CFR base clip is rendered
+        # first and smoothzoom warps each frame with a float-precision affine
+        # instead. Captions/elements are burned afterwards so they stay put.
+        base = work / f"zoombase_{clip_hash}.mp4"
+        pre = parts + [f"fps={FPS}", "format=yuv420p"]
+        if use_footage:
+            cmd_a = ["ffmpeg", "-y", "-ss", f"{seg_tl.source_start_ms / 1000.0:.3f}",
+                     "-t", f"{src_len_s:.3f}", "-i", str(src_video)]
+        else:
+            cmd_a = ["ffmpeg", "-y", "-loop", "1", "-t", f"{dur_s:.3f}", "-i", str(still)]
+        cmd_a += ["-vf", ",".join(pre), "-an", "-c:v", "libx264", "-preset", "veryfast",
+                  "-crf", CRF, "-pix_fmt", "yuv420p", "-t", f"{dur_s:.3f}", str(base)]
+        if not _run(cmd_a):
+            raise RuntimeError(f"segment {seg_tl.index} zoom base render failed")
+        apply_zoom(base, zoomed, scale=float(zoom_eff.get("scale", 1.6)),
+                   cx=float(zoom_eff.get("cx", 0.5)), cy=float(zoom_eff.get("cy", 0.5)),
+                   dur_s=dur_s, ease_s=_zoom_ease_s(zoom_eff), fps=FPS, crf=CRF)
+        parts = []  # geometry + timing are already baked into the zoomed clip
+    else:
+        parts.append(f"scale={w}:{h}")  # normalize the still path; no-op for footage
     if captions and script:
-        capfile = work / f"cap_{clip_hash}.txt"
-        capfile.write_text(script)
-        dt = _drawtext(font, capfile, size=int(dims[0] / 36), y="h-th-40")
-        if dt:
-            parts.append(dt)
+        # One sentence at a time, switching as the voice progresses. TTS gives no
+        # word timestamps, so each chunk's window is proportional to its share of
+        # the script's characters within the voiced part of the slot (the trailing
+        # SCENE_GAP_MS breather stays caption-free).
+        chunks = _caption_chunks(script)
+        voiced_s = max(0.3, dur_s - seg.get("_gap_ms", 0) / 1000.0)
+        total_chars = sum(len(c) for c in chunks) or 1
+        t0 = 0.0
+        for i, chunk in enumerate(chunks):
+            capfile = work / f"cap_{clip_hash}_{i}.txt"
+            capfile.write_text(chunk)
+            t1 = voiced_s if i == len(chunks) - 1 else t0 + voiced_s * len(chunk) / total_chars
+            dt = _drawtext(font, capfile, size=int(dims[0] / 48), y="h-th-40")
+            if dt:
+                parts.append(f"{dt}:enable='between(t,{t0:.3f},{t1:.3f})'")
+            t0 = t1
     parts.extend(_element_filters(elements, dims, font, work, clip_hash,
                                   seg.get("source_start_ms", 0), seg.get("source_end_ms", 0)))
     parts += ["format=yuv420p", f"fps={FPS}", "setsar=1"]
     vf = ",".join(parts)
 
-    cmd = ["ffmpeg", "-y", "-loop", "1", "-t", f"{dur_s:.3f}", "-i", str(still), "-i", str(tts_path)]
-    if logo is not None:
-        cmd += ["-i", str(logo)]  # index 2
-        lh = int(dims[1] / 9)
-        fc = f"[0:v]{vf}[base];[2:v]scale=-1:{lh}[lg];[base][lg]overlay={_overlay_xy(logo_pos)}[v]"
+    if zoom_on:
+        cmd = ["ffmpeg", "-y", "-i", str(zoomed), "-i", str(tts_path)]
+    elif use_footage:
+        ss = seg_tl.source_start_ms / 1000.0
+        cmd = ["ffmpeg", "-y", "-ss", f"{ss:.3f}", "-t", f"{src_len_s:.3f}",
+               "-i", str(src_video), "-i", str(tts_path)]
     else:
-        fc = f"[0:v]{vf}[v]"
-    cmd += ["-filter_complex", fc, "-map", "[v]", "-map", "1:a",
-            "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+        cmd = ["ffmpeg", "-y", "-loop", "1", "-t", f"{dur_s:.3f}", "-i", str(still), "-i", str(tts_path)]
+
+    # Compose: main video -> (inset on backdrop) -> (logo watermark).
+    bg_on = bool(background and background.get("enabled"))
+    idx = 2  # next ffmpeg input index (0 = video/still, 1 = narration audio)
+    logo_idx = bg_idx = None
+    if logo is not None:
+        logo_idx = idx
+        idx += 1
+        cmd += ["-i", str(logo)]
+    if bg_on:
+        bg_idx = idx
+        idx += 1
+        cmd += ["-f", "lavfi", "-i", _bg_source(background.get("style"), dims)]
+
+    steps = [f"[0:v]{vf}[main]"]
+    last = "main"
+    if bg_on:
+        steps.append(f"[{last}]scale=iw*{BG_INSET}:ih*{BG_INSET}[inset]")
+        steps.append(f"[{bg_idx}:v][inset]overlay=(W-w)/2:(H-h)/2[backed]")
+        last = "backed"
+    if logo_idx is not None:
+        lh = int(dims[1] / 9)
+        steps.append(f"[{logo_idx}:v]scale=-1:{lh}[lg]")
+        steps.append(f"[{last}][lg]overlay={_overlay_xy(logo_pos)}[branded]")
+        last = "branded"
+    fc = ";".join(steps)
+    cmd += ["-filter_complex", fc, "-map", f"[{last}]", "-map", "1:a",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", CRF, "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-ar", "24000", "-shortest", "-t", f"{dur_s:.3f}", str(clip)]
     ok = _run(cmd)
     if not ok:
@@ -243,7 +439,7 @@ def _render_titlecard(text, dur_ms, dims, font, work, tag, brand: dict | None = 
     if clip.exists():
         return clip
     capfile = work / f"{tag}_{chash}.txt"
-    capfile.write_text(text or "")
+    capfile.write_text(textwrap.fill(text or "", width=30))
     dt = _drawtext(font, capfile, size=int(w / 20), y="(h-th)/2")
 
     # background: brand gradient (primary -> accent) or the default dark slate
@@ -271,21 +467,104 @@ def _render_titlecard(text, dur_ms, dims, font, work, tag, brand: dict | None = 
     _run([
         "ffmpeg", "-y", *inputs,
         "-filter_complex", fc, "-map", "[v]", "-map", "1:a",
-        "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", CRF, "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-ar", "24000", "-t", f"{dur_s:.3f}", str(clip),
     ])
     return clip
 
 
-def _extract_audio(src_video: Path, start_ms: int, end_ms: int, out: Path) -> int:
-    """Extract the original narration for a step's source window. Returns duration ms."""
+def _music_source(music: dict | None, work: Path) -> Path | None:
+    """The background-music file to loop under the narration: the user's uploaded
+    track when set, else a built-in soft ambient pad synthesized once — two warm
+    chords (A / D major) crossfading on a slow 24 s cycle with a gentle breathing
+    tremolo, low-passed so it sits under speech instead of competing with it."""
+    if not music or not music.get("enabled"):
+        return None
+    key = music.get("storage_key")
+    if key:
+        p = store.local_path(key)
+        if p.exists():
+            return p
+        log.warning("music track %s missing; falling back to the built-in pad", key)
+    pad = work / "ambient_pad.wav"
+    if pad.exists():
+        return pad
+    xa = "(0.5+0.5*sin(2*PI*t/24))"  # chord A weight
+    xb = "(0.5-0.5*sin(2*PI*t/24))"  # chord B weight (complementary)
+    chord_a = f"{xa}*(0.30*sin(2*PI*110*t)+0.22*sin(2*PI*164.81*t)+0.20*sin(2*PI*220*t)+0.12*sin(2*PI*277.18*t))"
+    chord_b = f"{xb}*(0.30*sin(2*PI*146.83*t)+0.22*sin(2*PI*220*t)+0.20*sin(2*PI*293.66*t)+0.12*sin(2*PI*369.99*t))"
+    expr = f"(0.75+0.25*sin(2*PI*0.05*t))*({chord_a}+{chord_b})"
+    ok = _run([
+        "ffmpeg", "-y", "-f", "lavfi", "-i", f"aevalsrc={expr}:s=24000:d=48",
+        "-af", "lowpass=f=1500,afade=t=in:d=2,afade=t=out:st=46:d=2",
+        "-c:a", "pcm_s16le", str(pad),
+    ])
+    return pad if ok and pad.exists() else None
+
+
+def _extract_audio(src_video: Path, start_ms: int, end_ms: int, out: Path, tempo: float = 1.0) -> int:
+    """Extract the original narration for a step's source window, optionally
+    time-compressed (atempo) for pacing. Returns the OUTPUT duration ms."""
     dur_ms = max(300, end_ms - start_ms)
     out.parent.mkdir(parents=True, exist_ok=True)
-    _run([
-        "ffmpeg", "-y", "-ss", f"{start_ms / 1000:.3f}", "-t", f"{dur_ms / 1000:.3f}",
-        "-i", str(src_video), "-vn", "-ac", "1", "-ar", "24000", "-c:a", "pcm_s16le", str(out),
-    ])
-    return dur_ms
+    cmd = ["ffmpeg", "-y", "-ss", f"{start_ms / 1000:.3f}", "-t", f"{dur_ms / 1000:.3f}",
+           "-i", str(src_video), "-vn", "-ac", "1", "-ar", "24000"]
+    if tempo > 1.001:
+        cmd += ["-af", f"atempo={min(2.0, tempo):.3f}"]
+        dur_ms = int(dur_ms / min(2.0, tempo))
+    cmd += ["-c:a", "pcm_s16le", str(out)]
+    _run(cmd)
+    return max(300, dur_ms)
+
+
+def _pad_audio(src: Path, out: Path, pad_ms: int) -> None:
+    """Append pad_ms of silence to a narration clip (the inter-scene breather)."""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    _run(["ffmpeg", "-y", "-i", str(src), "-af", f"apad=pad_dur={pad_ms / 1000:.3f}",
+          "-ac", "1", "-ar", "24000", "-c:a", "pcm_s16le", str(out)])
+
+
+@dataclass
+class StepAudio:
+    path: str
+    duration_ms: int
+    cached: bool
+    gap_ms: int  # SCENE_GAP_MS if this is a narrated (TTS) clip, else 0
+
+
+def compute_step_audio(
+    s: dict[str, Any], *, work: Path, src_video: Path | None, pace: float,
+    voice: dict[str, Any], use_original: bool,
+) -> StepAudio:
+    """Resolve one segment's audio clip + its output-clock duration: the single
+    source of truth for scene pacing, shared by the render and the editor's
+    live-preview so the two can never drift apart. A silent scene keeps its
+    full source length (scaled only by `pace`); a narrated scene takes its
+    real TTS length plus the SCENE_GAP_MS breather every narrated scene gets
+    in the render."""
+    script = effective_script(s.get("words", []), s.get("removed", []))
+    src_ms = max(0, s.get("source_end_ms", 0) - s.get("source_start_ms", 0))
+    if not script.strip():
+        dur_ms = max(300, int(src_ms / pace))
+        apath = work / f"sil_{s['step_id']}_{dur_ms}.wav"
+        if not apath.exists():
+            _silent_wav(apath, dur_ms)
+        return StepAudio(str(apath), dur_ms, False, 0)
+    if use_original and src_video is not None:
+        apath = work / f"orig_{s['step_id']}_{pace:.2f}.wav"
+        dur_ms = _extract_audio(
+            src_video, s.get("source_start_ms", 0), s.get("source_end_ms", 0), apath, tempo=pace,
+        )
+        return StepAudio(str(apath), dur_ms, False, 0)
+    r = synth_step(script, media_root=store.root, voice_id=voice["voice_id"],
+                    speed=voice.get("speed", 1.0) * pace)
+    tts_local = store.local_path(r.storage_key)
+    padded = work / f"pad{SCENE_GAP_MS}_{tts_local.stem}.wav"
+    if not padded.exists():
+        _pad_audio(tts_local, padded, SCENE_GAP_MS)
+    dur_ms = r.duration_ms + SCENE_GAP_MS
+    path = str(padded if padded.exists() else tts_local)
+    return StepAudio(path, dur_ms, r.cached, SCENE_GAP_MS)
 
 
 def run_render(render_job_id: str) -> dict:
@@ -311,10 +590,17 @@ def run_render(render_job_id: str) -> dict:
             .where(WorkflowGraphRow.project_id == vp.project_id)
             .order_by(WorkflowGraphRow.version.desc())
         )
-        src_video = _find_source_video(db, vp.project_id)
+        src_video, src_session_id = _find_source_video(db, vp.project_id)
 
         segs = spec.get("segments", [])
-        crop = spec.get("crop")
+        # skip: scenes flagged "skipped" are dropped from the render entirely.
+        segs = [s for s in segs if not s.get("skipped")]
+        # multi-range crops; a spec saved before `crops` existed falls back to the
+        # legacy single crop. An explicit empty list means "no crops" (do NOT
+        # resurrect the legacy one — the user removed them all).
+        crops = spec.get("crops")
+        if crops is None:
+            crops = [spec["crop"]] if spec.get("crop") else []
         elements = spec.get("elements")
         # trim: keep only scenes whose source start falls inside [start, end].
         trim = spec.get("trim") or {}
@@ -327,55 +613,89 @@ def run_render(render_job_id: str) -> dict:
         work = store.local_path(f"renders/{vp.id}")
         work.mkdir(parents=True, exist_ok=True)
 
-        # Motion/mouse auto-zoom: for each scene, find where the on-screen activity
-        # (cursor movement / clicks cause localized UI change) is and zoom toward it.
-        # Only touches scenes that don't already have an explicit (bbox/user) zoom.
-        if spec.get("motion_zoom") and src_video is not None:
+        # Click/motion auto-zoom, for scenes without an explicit (bbox/user) zoom:
+        # 1) recorded click telemetry — zoom EXACTLY where the mouse clicked;
+        # 2) else frame-diff motion centroid (visual approximation of the click).
+        # Density is throttled: an auto zoom on every scene reads as continuous
+        # zooming, so keep at least ZOOM_COOLDOWN_MS between zoom-ins (user-set
+        # zooms are always honoured and reset the cooldown). Auto zooms already
+        # in the spec that violate the cooldown are thinned out here too, so an
+        # over-zoomed older project calms down on its next render.
+        zoomed_click = zoomed_motion = zoomed_thinned = 0
+        if spec.get("motion_zoom", True) and src_video is not None:
             from worker.pipeline.autoedit import _motion_centroid, probe_dims
 
+            clicks = _click_points(db, src_session_id)
             vdims = probe_dims(src_video)
-            zoomed_auto = 0
+            last_zoom_ms = -ZOOM_COOLDOWN_MS
             for s in segs:
                 z = s.get("zoom") or {}
-                if z.get("enabled"):
-                    continue  # keep an existing bbox / user zoom
-                t0 = s.get("source_start_ms", 0) / 1000.0
-                t1 = max(s.get("source_end_ms", 0) / 1000.0, t0 + 0.6)
-                cx, cy, scale = _motion_centroid(src_video, t0, t1, vdims)
+                t0ms = s.get("source_start_ms", 0)
+                t1ms = max(s.get("source_end_ms", 0), t0ms + 600)
+                if z.get("enabled") and not z.get("auto"):
+                    last_zoom_ms = t0ms  # user zoom: always keep, resets the cooldown
+                    continue
+                due = t0ms - last_zoom_ms >= ZOOM_COOLDOWN_MS and t1ms - t0ms >= ZOOM_MIN_SCENE_MS
+                if z.get("enabled"):  # auto zoom already in the spec
+                    if due:
+                        last_zoom_ms = t0ms
+                    else:
+                        z["enabled"] = False  # too soon after the last one — thin it
+                        zoomed_thinned += 1
+                    continue
+                if z.get("auto") is False:
+                    continue  # user explicitly turned zoom OFF for this scene
+                if not due:
+                    continue
+                # the click that opens the scene (scene windows start at click time)
+                hit = next((c for c in clicks if t0ms - 250 <= c[0] <= t1ms), None)
+                if hit:
+                    cx, cy, scale = hit[1], hit[2], 1.6
+                    zoomed_click += 1
+                else:
+                    cx, cy, scale = _motion_centroid(src_video, t0ms / 1000.0, t1ms / 1000.0, vdims)
+                    zoomed_motion += int(scale > 1.0)
                 if scale > 1.0:
+                    last_zoom_ms = t0ms
                     s["zoom"] = {
                         "enabled": True,
                         "scale": round(min(1.8, scale), 3),
                         "cx": cx,
                         "cy": cy,
                         "speed": 3,
+                        "auto": True,  # added by the renderer; user-tweakable in the Zoom tab
                     }
-                    zoomed_auto += 1
-            log.info("motion auto-zoom: %d/%d scenes", zoomed_auto, len(segs))
+            log.info("auto-zoom: %d click-centered, %d motion-centered, %d thinned of %d scenes",
+                     zoomed_click, zoomed_motion, zoomed_thinned, len(segs))
+            # Persist the auto-added (and thinned) zooms into the edit spec so they
+            # show up in the editor's Zoom tab, where the user can tweak them.
+            if zoomed_click or zoomed_motion or zoomed_thinned:
+                from sqlalchemy.orm.attributes import flag_modified
+
+                flag_modified(vp, "edit_spec_json")
+                db.commit()
+
+        # Pacing: every scene — narrated or silent — runs at the same `pace`
+        # tempo (1.0 = original speed, full source length kept either way).
+        pace = min(1.5, max(1.0, float(spec.get("pace") or DEFAULT_PACE)))
 
         # per-step audio (TTS, or the original narration if "use original voice") -> timeline
         step_inputs = []
         tts_synth = tts_cached = 0
         for s in segs:
-            script = effective_script(s.get("words", []), s.get("removed", []))
-            if use_original:
-                apath = work / f"orig_{s['step_id']}.wav"
-                dur_ms = _extract_audio(
-                    src_video, s.get("source_start_ms", 0), s.get("source_end_ms", 0), apath
-                )
-                s["_audio_path"] = str(apath)
-            else:
-                r = synth_step(script, media_root=store.root,
-                               voice_id=voice["voice_id"], speed=voice.get("speed", 1.0))
-                tts_cached += int(r.cached)
-                tts_synth += int(not r.cached)
-                dur_ms = r.duration_ms
-                s["_audio_path"] = str(store.local_path(r.storage_key))
+            audio = compute_step_audio(
+                s, work=work, src_video=src_video, pace=pace, voice=voice, use_original=use_original,
+            )
+            s["_audio_path"] = audio.path
+            if audio.gap_ms:
+                s["_gap_ms"] = audio.gap_ms  # captions stop before the breather
+                tts_cached += int(audio.cached)
+                tts_synth += int(not audio.cached)
             z = s.get("zoom") or {}
             step_inputs.append(
                 StepInput(
                     step_id=s["step_id"],
-                    tts_duration_ms=dur_ms,
+                    tts_duration_ms=audio.duration_ms,
                     source_start_ms=s.get("source_start_ms", 0),
                     source_end_ms=s.get("source_end_ms", 0),
                     click_x=z.get("cx") if z.get("enabled") else None,
@@ -403,7 +723,8 @@ def run_render(render_job_id: str) -> dict:
                                            dims, font, work, "intro", brand=brand, logo=logo))
         for s, seg_tl in zip(segs, timeline.segments):
             clip, did = _render_segment(s, seg_tl, src_video, dims, captions, font, work,
-                                        crop=crop, elements=elements, logo=logo, logo_pos=logo_pos)
+                                        crops=crops, elements=elements, logo=logo, logo_pos=logo_pos,
+                                        background=spec.get("background"))
             clips.append(clip)
             rendered += int(did)
             reused += int(not did)
@@ -415,14 +736,35 @@ def run_render(render_job_id: str) -> dict:
         # concat (re-encode for safe, uniform output)
         list_file = work / "concat.txt"
         list_file.write_text("".join(f"file '{c}'\n" for c in clips))
-        overall = _sha([c.name for c in clips])
+        music_src = _music_source(spec.get("music"), work)
+        overall = _sha([c.name for c in clips], spec.get("music") or {})
         out_key = f"renders/{vp.id}/final_{overall}.mp4"
         out_path = store.local_path(out_key)
         ok = _run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file),
-                   "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+                   "-c:v", "libx264", "-preset", "veryfast", "-crf", CRF, "-pix_fmt", "yuv420p",
                    "-c:a", "aac", str(out_path)])
         if not ok:
             raise RuntimeError("concat failed")
+
+        # background music: loop the track under the narration at gain_db (video
+        # stream copied — only the audio is remixed). Best-effort: a mix failure
+        # still delivers the video, just without music.
+        if music_src is not None:
+            gain = float((spec.get("music") or {}).get("gain_db") or -18)
+            mixed = work / f"final_{overall}_music.mp4"
+            ok = _run([
+                "ffmpeg", "-y", "-i", str(out_path), "-stream_loop", "-1", "-i", str(music_src),
+                "-filter_complex",
+                f"[1:a]volume={gain:.1f}dB[bg];"
+                f"[0:a][bg]amix=inputs=2:duration=first:normalize=0:dropout_transition=3,"
+                f"alimiter=limit=0.95[a]",
+                "-map", "0:v", "-map", "[a]", "-c:v", "copy", "-c:a", "aac", "-ar", "24000",
+                "-shortest", str(mixed),
+            ])
+            if ok and mixed.exists():
+                mixed.replace(out_path)
+            else:
+                log.warning("music mix failed; delivering the video without music")
 
         stats = {
             "segments_total": len(segs),
@@ -431,6 +773,11 @@ def run_render(render_job_id: str) -> dict:
             "tts_synth": tts_synth,
             "tts_cached": tts_cached,
             "expected_body_ms": timeline.total_duration_ms,
+            "pace": pace,
+            "zoom_click": zoomed_click,
+            "zoom_motion": zoomed_motion,
+            "zoom_thinned": zoomed_thinned,
+            "music": music_src is not None,
             "aspect": spec.get("aspect"),
         }
         job.output_key = out_key
@@ -450,7 +797,9 @@ def run_render(render_job_id: str) -> dict:
         db.close()
 
 
-def _find_source_video(db, project_id: str) -> Path | None:
+def _find_source_video(db, project_id: str) -> tuple[Path | None, str | None]:
+    """Locate the raw source video and the capture session it belongs to (the
+    session carries the click telemetry + viewport used for click-centered zoom)."""
     from app.models import CaptureSession
 
     sess_ids = [
@@ -465,5 +814,29 @@ def _find_source_video(db, project_id: str) -> Path | None:
         if asset:
             p = store.local_path(asset.storage_key)
             if p.exists():
-                return p
-    return None
+                return p, sid
+    return None, None
+
+
+def _click_points(db, session_id: str | None) -> list[tuple[int, float, float]]:
+    """Recorded click positions as [(t_ms, cx, cy)] normalized to the viewport —
+    the ground truth for where to center a zoom. Empty when the session has no
+    telemetry (plain recorder / upload)."""
+    if not session_id:
+        return []
+    from app.models import CaptureSession, Event
+
+    sess = db.get(CaptureSession, session_id)
+    vp = (sess.viewport_json or {}) if sess else {}
+    vw, vh = vp.get("w") or 0, vp.get("h") or 0
+    if not vw or not vh:
+        return []
+    out: list[tuple[int, float, float]] = []
+    for e in db.scalars(select(Event).where(Event.session_id == session_id, Event.type == "click")):
+        b = e.bbox_json
+        if isinstance(b, (list, tuple)) and len(b) == 4:
+            cx = min(1.0, max(0.0, (float(b[0]) + float(b[2]) / 2) / vw))
+            cy = min(1.0, max(0.0, (float(b[1]) + float(b[3]) / 2) / vh))
+            out.append((int(e.t_ms), round(cx, 4), round(cy, 4)))
+    out.sort()
+    return out

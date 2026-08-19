@@ -46,7 +46,7 @@ export function ShareButton({
         <IconShare width={15} height={15} /> {busy ? "…" : "Share"}
       </button>
       {open && (
-        <div className="absolute right-0 z-40 mt-2 w-80 rounded-xl border border-zinc-800 bg-zinc-900 p-3 shadow-2xl">
+        <div className="absolute right-0 z-40 mt-2 w-80 rounded-xl border border-[var(--border)] bg-[var(--card)] p-3 shadow-2xl">
           <div className="mb-2 flex items-center justify-between">
             <span className="text-sm font-medium">Public link</span>
             <button onClick={() => setOpen(false)} className="btn btn-ghost btn-sm">
@@ -54,7 +54,7 @@ export function ShareButton({
             </button>
           </div>
           {error ? (
-            <p className="text-sm text-red-300">{error}</p>
+            <p className="text-sm text-red-600">{error}</p>
           ) : (
             <>
               <div className="flex gap-2">
@@ -63,7 +63,7 @@ export function ShareButton({
                   {copied ? "Copied" : "Copy"}
                 </button>
               </div>
-              <p className="mt-2 text-xs text-zinc-500">
+              <p className="mt-2 text-xs text-[var(--text-2)]">
                 Anyone with this link can view {kind === "doc" ? "the document" : "the video"} — no
                 login needed.
               </p>

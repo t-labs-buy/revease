@@ -39,15 +39,17 @@ def effective_script(words: list[str], removed: list[int]) -> str:
 
 
 def voice_signature(spec: dict[str, Any]) -> str:
-    """Content hash of what the AI-voice track depends on: each segment's spoken
-    text and where it sits on the timeline. Editing the script changes this, so the
-    cached preview rebuilds instead of serving stale audio."""
+    """Content hash of what the AI-voice track (and its pacing timeline) depends
+    on: each segment's spoken text, its source window, and whether it's in the
+    mix at all. Editing the script, trimming a segment, toggling skip, or
+    changing the global pace all change this, so the cached preview rebuilds
+    instead of serving stale audio or stale pacing."""
     payload = [
-        [int(s.get("source_start_ms", 0) or 0),
-         effective_script(s.get("words", []), s.get("removed", []))]
+        [int(s.get("source_start_ms", 0) or 0), int(s.get("source_end_ms", 0) or 0),
+         bool(s.get("skipped")), effective_script(s.get("words", []), s.get("removed", []))]
         for s in spec.get("segments", [])
     ]
-    raw = json.dumps(payload, ensure_ascii=False)
+    raw = json.dumps([payload, spec.get("pace"), spec.get("trim")], ensure_ascii=False)
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
 
 
@@ -57,6 +59,22 @@ def voice_track_key(project_id: str, voice_id: str, speed: float, spec: dict[str
     return f"voicepreview/{project_id}_{voice_id}_{speed}_{voice_signature(spec)}.wav"
 
 
+def voice_timeline_key(project_id: str, voice_id: str, speed: float, spec: dict[str, Any]) -> str:
+    """Storage key for the preview track's pacing timeline (build_timeline's
+    per-segment out_start_ms/speed/hold) — same signature as the audio itself,
+    so the two can never point at mismatched content."""
+    return f"voicepreview/{project_id}_{voice_id}_{speed}_{voice_signature(spec)}.json"
+
+
+# Auto-zoom density: zooming every scene makes the whole video feel like it never
+# stops moving. Keep at least this much SOURCE time between zoom-ins (the output
+# is ~2-3x faster than the source, so this lands around one zoom every ~15-20 s
+# of output), and don't bother zooming scenes too short to complete the ease-in.
+# (Mirrors worker.pipeline.render.)
+ZOOM_COOLDOWN_MS = 45_000
+ZOOM_MIN_SCENE_MS = 1_500
+
+
 def _zoom_from_bbox(bbox: Any, vw: int, vh: int) -> dict[str, Any]:
     # speed: 1 (slow ease-in) .. 5 (snappy); drives the preview transition.
     if not (isinstance(bbox, (list, tuple)) and len(bbox) == 4 and vw and vh):
@@ -64,15 +82,29 @@ def _zoom_from_bbox(bbox: Any, vw: int, vh: int) -> dict[str, Any]:
     x, y, w, h = bbox
     cx = min(1.0, max(0.0, (x + w / 2) / vw))
     cy = min(1.0, max(0.0, (y + h / 2) / vh))
-    return {"enabled": True, "scale": 1.6, "cx": round(cx, 4), "cy": round(cy, 4), "speed": 3}
+    # auto: derived from the click — user-tweakable in the Zoom tab (drops the flag)
+    return {"enabled": True, "scale": 1.6, "cx": round(cx, 4), "cy": round(cy, 4), "speed": 3, "auto": True}
 
 
 def build_edit_spec(graph_json: dict[str, Any], viewport: dict[str, int] | None) -> dict[str, Any]:
     vw = (viewport or {}).get("w", 1280)
     vh = (viewport or {}).get("h", 720)
     segments = []
+    last_zoom_ms = -ZOOM_COOLDOWN_MS  # so the very first scene may zoom
     for step in graph_json.get("steps", []):
-        words = tokenize(step.get("narration") or step.get("target") or "")
+        # Script strictly from the spoken narration — no target-label fallback, so
+        # a silent step has an empty script rather than invented text.
+        words = tokenize(step.get("narration") or "")
+        t0 = int((step.get("t_start") or 0) * 1000)
+        t1 = int((step.get("t_end") or 0) * 1000)
+        zoom = _zoom_from_bbox(step.get("bbox"), vw, vh)
+        # throttle: a zoom on EVERY step reads as continuous zooming — keep only
+        # one per cooldown window (the target stays, so it's easy to re-enable)
+        if zoom["enabled"]:
+            if t0 - last_zoom_ms >= ZOOM_COOLDOWN_MS and t1 - t0 >= ZOOM_MIN_SCENE_MS:
+                last_zoom_ms = t0
+            else:
+                zoom["enabled"] = False
         segments.append(
             {
                 "step_id": step["id"],
@@ -80,9 +112,9 @@ def build_edit_spec(graph_json: dict[str, Any], viewport: dict[str, int] | None)
                 "target": step.get("target"),
                 "words": words,
                 "removed": detect_filler(words),  # filler struck by default
-                "zoom": _zoom_from_bbox(step.get("bbox"), vw, vh),
-                "source_start_ms": int((step.get("t_start") or 0) * 1000),
-                "source_end_ms": int((step.get("t_end") or 0) * 1000),
+                "zoom": zoom,
+                "source_start_ms": t0,
+                "source_end_ms": t1,
                 "screenshot": step.get("screenshot"),
             }
         )
@@ -94,9 +126,20 @@ def build_edit_spec(graph_json: dict[str, Any], viewport: dict[str, int] | None)
         "intro": {"enabled": True, "title": graph_json.get("title", "Workflow"), "duration_ms": 2000},
         "outro": {"enabled": True, "title": "Thanks for watching", "duration_ms": 1500},
         "captions": {"enabled": True},
+        # auto-zoom toward mouse/cursor activity (clicks) per scene at render time,
+        # for scenes without an explicit click/user zoom. On by default.
+        "motion_zoom": True,
+        # pace: uniform tempo (1.0–1.5) applied to every scene, narrated or
+        # silent alike. 1.0 = original speed, full source length kept.
+        "pace": 1.0,
+        # backdrop behind the recording (inset with padding) instead of full-bleed.
+        "background": {"enabled": False, "style": "indigo"},
         "music": {"enabled": False, "storage_key": None, "gain_db": -18},
-        # crop: reframe the whole video to a normalized (0..1) region.
+        # crop: reframe the whole video to a normalized (0..1) region (legacy single).
         "crop": {"enabled": False, "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},
+        # crops: multi-range reframes — each region may carry its own
+        # [start_ms, end_ms] window; the first enabled match per scene wins.
+        "crops": [],
         # trim: keep only the source window [start_ms, end_ms] (scene-level).
         "trim": {"enabled": False, "start_ms": 0, "end_ms": 0},
         # elements: overlay text / highlight boxes, positions normalized (0..1).

@@ -37,11 +37,19 @@ export function ProjectCard({
   sessions,
   index = 0,
   className = "",
+  onDelete,
+  selectable = false,
+  selected = false,
+  onToggleSelect,
 }: {
   project: Project;
   sessions: Session[]; // all sessions (filtered internally by project)
   index?: number;
   className?: string;
+  onDelete?: (id: string) => void; // request deletion (the page shows the styled confirm)
+  selectable?: boolean; // multi-select mode: clicking toggles selection instead of opening
+  selected?: boolean;
+  onToggleSelect?: (id: string) => void;
 }) {
   const [fav, setFav] = useState(!!project.favorite);
   const mine = sessions.filter((s) => s.project_id === project.id);
@@ -49,7 +57,30 @@ export function ProjectCard({
   const st = statusOf(latest);
 
   return (
-    <Link href={`/projects/${project.id}`} className={`card card-hover overflow-hidden ${className}`}>
+    <Link
+      href={`/projects/${project.id}`}
+      onClick={(e) => {
+        if (selectable) {
+          e.preventDefault();
+          onToggleSelect?.(project.id);
+        }
+      }}
+      className={`card card-hover relative overflow-hidden ${
+        selected ? "ring-2 ring-[#6d5dfb]" : ""
+      } ${className}`}
+    >
+      {/* selection check */}
+      {selectable && (
+        <span
+          className={`absolute left-2.5 top-2.5 z-10 flex h-6 w-6 items-center justify-center rounded-full text-[13px] shadow ${
+            selected
+              ? "bg-[#6d5dfb] text-white"
+              : "border border-white/70 bg-black/30 text-transparent backdrop-blur-sm"
+          }`}
+        >
+          ✓
+        </span>
+      )}
       {/* thumbnail */}
       <div className="relative h-36 bg-gradient-to-br from-[#1c1c2e] to-[#2b2b45]">
         {latest?.poster ? (
@@ -90,9 +121,19 @@ export function ProjectCard({
             >
               {fav ? "★" : "☆"}
             </button>
-            <button title="More" onClick={(e) => e.preventDefault()} className="hover:text-[var(--text)]">
-              ⋮
-            </button>
+            {onDelete && !selectable && (
+              <button
+                title="Remove project"
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  onDelete(project.id);
+                }}
+                className="hover:text-red-500"
+              >
+                🗑
+              </button>
+            )}
           </span>
         </div>
       </div>

@@ -8,8 +8,10 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.auth import CurrentUser
 from app.db import get_session
 from app.models import Skill
+from app.ownership import owned_row
 
 router = APIRouter(prefix="/skills", tags=["skills"])
 
@@ -41,13 +43,17 @@ def _out(s: Skill) -> SkillOut:
 
 
 @router.get("", response_model=list[SkillOut])
-def list_skills(db: Session = Depends(get_session)) -> list[SkillOut]:
-    rows = db.scalars(select(Skill).order_by(Skill.created_at.desc()))
+def list_skills(user: CurrentUser, db: Session = Depends(get_session)) -> list[SkillOut]:
+    rows = db.scalars(
+        select(Skill).where(Skill.user_id == user.id).order_by(Skill.created_at.desc())
+    )
     return [_out(s) for s in rows]
 
 
 @router.post("/generate", response_model=SkillOut)
-def generate(payload: GenSkillReq, db: Session = Depends(get_session)) -> SkillOut:
+def generate(
+    payload: GenSkillReq, user: CurrentUser, db: Session = Depends(get_session)
+) -> SkillOut:
     """AI-assistant: design a skill from a description (constrained to tool capabilities)."""
     if not payload.prompt.strip():
         raise HTTPException(status_code=400, detail="describe the skill you want")
@@ -58,6 +64,7 @@ def generate(payload: GenSkillReq, db: Session = Depends(get_session)) -> SkillO
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"AI skill builder failed: {e}")
     s = Skill(
+        user_id=user.id,
         name=built["name"],
         description=built["description"],
         target=built["target"],
@@ -70,18 +77,17 @@ def generate(payload: GenSkillReq, db: Session = Depends(get_session)) -> SkillO
 
 
 @router.get("/{skill_id}", response_model=SkillOut)
-def get_skill(skill_id: str, db: Session = Depends(get_session)) -> SkillOut:
-    s = db.get(Skill, skill_id)
-    if s is None:
-        raise HTTPException(status_code=404, detail="skill not found")
-    return _out(s)
+def get_skill(
+    skill_id: str, user: CurrentUser, db: Session = Depends(get_session)
+) -> SkillOut:
+    return _out(owned_row(db, user, Skill, skill_id, "skill"))
 
 
 @router.put("/{skill_id}", response_model=SkillOut)
-def update_skill(skill_id: str, payload: SkillIn, db: Session = Depends(get_session)) -> SkillOut:
-    s = db.get(Skill, skill_id)
-    if s is None:
-        raise HTTPException(status_code=404, detail="skill not found")
+def update_skill(
+    skill_id: str, payload: SkillIn, user: CurrentUser, db: Session = Depends(get_session)
+) -> SkillOut:
+    s = owned_row(db, user, Skill, skill_id, "skill")
     s.name = payload.name.strip() or s.name
     s.description = payload.description
     s.target = payload.target if payload.target in ("video", "doc") else s.target
@@ -92,8 +98,11 @@ def update_skill(skill_id: str, payload: SkillIn, db: Session = Depends(get_sess
 
 
 @router.post("", response_model=SkillOut)
-def create_skill(payload: SkillIn, db: Session = Depends(get_session)) -> SkillOut:
+def create_skill(
+    payload: SkillIn, user: CurrentUser, db: Session = Depends(get_session)
+) -> SkillOut:
     s = Skill(
+        user_id=user.id,
         name=payload.name.strip() or "Untitled skill",
         description=payload.description,
         target=payload.target if payload.target in ("video", "doc") else "video",
@@ -106,9 +115,7 @@ def create_skill(payload: SkillIn, db: Session = Depends(get_session)) -> SkillO
 
 
 @router.delete("/{skill_id}")
-def delete_skill(skill_id: str, db: Session = Depends(get_session)) -> dict:
-    s = db.get(Skill, skill_id)
-    if s:
-        db.delete(s)
-        db.commit()
+def delete_skill(skill_id: str, user: CurrentUser, db: Session = Depends(get_session)) -> dict:
+    db.delete(owned_row(db, user, Skill, skill_id, "skill"))
+    db.commit()
     return {"ok": True}

@@ -13,13 +13,30 @@ from app.tracing import observe
 log = logging.getLogger("refract.rewrite")
 
 SYSTEM = (
-    "You are a scriptwriter polishing narration for a screen-recording product demo. "
-    "Rewrite each line to be clear, concise, and natural to speak aloud, in a friendly, "
-    "professional voice. Preserve the meaning and keep any product, feature, or proper "
-    "names exactly as written. Keep roughly the same length (one or two sentences). "
+    "You are a technical scriptwriter polishing narration lines that a TTS voice speaks "
+    "over a screen recording of a software product (often technical/enterprise software).\n\n"
+    "Rewrite each line for clarity and correctness:\n"
+    "- Clear, precise, natural to speak aloud. Present tense, active voice.\n"
+    "- Preserve EVERY technical detail: system names, field names, protocol names, file "
+    "types, button/menu labels, numbers, and step order — never summarize, generalize, or "
+    "drop specifics to save space.\n"
+    "- Fix grammar, remove true filler ('um', 'basically', 'so yeah'), and smooth awkward "
+    "phrasing — but do not shorten a line just to make it punchier.\n"
+    "- TTS-safe: plain spoken words only — no emojis, markdown, parentheses, or stage "
+    "directions; expand awkward abbreviations; keep numbers easy to say.\n"
+    "- Preserve the exact meaning and every product, feature, and proper name exactly as "
+    "written.\n"
+    "- Each rewrite should stay close to its original length — moderately longer is fine "
+    "if needed for technical accuracy, but avoid runaway expansion (the video's timing "
+    "still depends on it).\n"
+    "- Never split one input line into multiple output lines, even if it becomes long or "
+    "covers several actions — one input line always produces exactly one output string, no "
+    "matter how much detail it needs to carry. If a line covers multiple steps, write one "
+    "longer sentence connecting them, not two separate lines.\n"
     "Return exactly one rewrite per input line, in the same order — never merge, split, "
     "add, or drop lines."
 )
+
 
 
 def _prompt(lines: list[str], instruction: str | None) -> str:
@@ -40,40 +57,64 @@ def _parse(text: str, n: int) -> list[str]:
 
 
 GEN_SYSTEM = (
-    "You write the spoken narration script for a screen-recording product demo. Given the "
-    "video title and an ordered list of scenes (each with a UI target/action and an optional "
-    "existing note), write ONE natural, friendly spoken line (one or two sentences) of "
-    "narration per scene, forming a coherent walkthrough that flows from start to finish. "
-    "Introduce the product in the first line and wrap up naturally at the end. Keep any "
-    "product or feature names. Return exactly one line per scene, in order."
+    "You are a senior product-marketing scriptwriter creating the voiceover for a "
+    "professional SaaS product-demo video. The script is spoken by a TTS voice over a "
+    "screen recording — one line per scene, in scene order.\n\n"
+    "Write a production-ready walkthrough:\n"
+    "- Scene 1 is the hook: name the product or workflow and the outcome the viewer gets, "
+    "in one tight sentence. Never open with 'In this video we will'.\n"
+    "- Each middle scene narrates what is happening on screen (its action/target) and why "
+    "it matters — action first, benefit second.\n"
+    "- The final scene closes in one sentence with the result achieved — a natural wrap, "
+    "not a sales pitch.\n"
+    "- Voice: confident, warm, professional. Speak to the viewer as 'you'. Present tense, "
+    "active voice. Vary sentence openers so scenes flow as one continuous demo, never a "
+    "list of captions.\n"
+    "- TTS-safe: plain spoken words only — no emojis, markdown, parentheses, stage "
+    "directions, or camera notes. Expand awkward abbreviations; keep numbers easy to say.\n"
+    "- Timing budget: each scene includes its on-screen duration in seconds. Write about "
+    "2 to 2.5 words per second for that scene and NEVER more — the video's final length "
+    "depends on it. Minimum one short sentence.\n"
+    "- Ground truth only: never invent features, results, or UI the scene data does not "
+    "mention. Keep every product and feature name exactly as given.\n"
+    "- Banned words/phrases: 'simply', 'just', 'easy', 'basically', 'as you can see', "
+    "'go ahead', 'now let's'.\n"
+    "Return exactly one narration line per scene, in order."
 )
 
 
 def _gen_prompt(scenes: list[dict], title: str, instruction: str | None) -> str:
     extra = f"\nAlso follow this instruction: {instruction}\n" if instruction else ""
     return (
-        f'Video title: "{title}". Write the narration script. Reply with ONLY a JSON array of '
-        "strings (no prose, no code fences) — exactly one narration line per scene, same order."
+        f'Video title: "{title}". Write the narration script. Respect each scene\'s '
+        '"seconds" budget (about 2 to 2.5 words per second, never more). Reply with ONLY a '
+        "JSON array of strings (no prose, no code fences) — exactly one narration line per "
+        "scene, same order."
         + extra
         + "\n\nScenes:\n"
         + json.dumps(scenes, ensure_ascii=False)
     )
 
 
-def _call_claude(system: str, prompt: str, n: int, budget: int) -> list[str]:
+def _call_claude(system: str, prompt: str, n: int) -> list[str]:
     settings = get_settings()
     if not settings.anthropic_api_key:
         raise RuntimeError("no Anthropic API key configured (set REFRACT_ANTHROPIC_API_KEY in .env)")
     import anthropic
 
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key, timeout=120)
+    # Adaptive thinking spends from the same max_tokens cap as the visible
+    # output, so a budget-scaled cap starves short scripts and truncates the
+    # JSON mid-array. max_tokens is a ceiling, not a spend — keep it high.
     msg = client.messages.create(
         model=settings.anthropic_model,
-        max_tokens=min(16000, 2000 + budget * 2),
+        max_tokens=16000,
         thinking={"type": "adaptive"},
         system=system,
         messages=[{"role": "user", "content": prompt}],
     )
+    if msg.stop_reason == "max_tokens":
+        raise ValueError("model output was truncated (max_tokens reached) — try again")
     text = "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
     return _parse(text, n)
 
@@ -84,8 +125,7 @@ def generate_script(scenes: list[dict], title: str = "Product demo", instruction
     existing note as context)."""
     if not scenes:
         return []
-    budget = sum(len(str(s.get("target", ""))) + len(str(s.get("narration", ""))) for s in scenes) + 120 * len(scenes)
-    return _call_claude(GEN_SYSTEM, _gen_prompt(scenes, title, instruction), len(scenes), budget)
+    return _call_claude(GEN_SYSTEM, _gen_prompt(scenes, title, instruction), len(scenes))
 
 
 SKILL_SYSTEM = (
@@ -174,7 +214,7 @@ def restyle_doc(steps: list[dict], instruction: str) -> list[dict]:
         )
         msg = client.messages.create(
             model=settings.anthropic_model,
-            max_tokens=min(16000, 2000 + sum(len(s.get("body", "")) for s in steps) * 2),
+            max_tokens=16000,
             thinking={"type": "adaptive"},
             system=DOC_SYSTEM,
             messages=[{"role": "user", "content": prompt}],
@@ -223,7 +263,7 @@ def generate_title(text: str) -> str:
         client = anthropic.Anthropic(api_key=settings.anthropic_api_key, timeout=60)
         msg = client.messages.create(
             model=settings.anthropic_model,
-            max_tokens=2000,
+            max_tokens=4000,
             thinking={"type": "adaptive"},
             system=TITLE_SYSTEM,
             messages=[{"role": "user", "content": text[:4000]}],
@@ -263,7 +303,7 @@ def suggest_zooms(scenes: list[dict]) -> list[dict]:
     )
     msg = client.messages.create(
         model=settings.anthropic_model,
-        max_tokens=min(8000, 1500 + len(scenes) * 40),
+        max_tokens=8000,
         thinking={"type": "adaptive"},
         system=ZOOM_SYSTEM,
         messages=[{"role": "user", "content": prompt}],
@@ -293,10 +333,10 @@ def rewrite_lines(lines: list[str], instruction: str | None = None) -> list[str]
     import anthropic
 
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key, timeout=120)
-    max_tokens = min(16000, 2000 + sum(len(ln) for ln in clean) * 2)
+    # thinking tokens count against max_tokens — don't scale the cap to input size
     msg = client.messages.create(
         model=settings.anthropic_model,
-        max_tokens=max_tokens,
+        max_tokens=16000,
         thinking={"type": "adaptive"},
         system=SYSTEM,
         messages=[{"role": "user", "content": _prompt(clean, instruction)}],

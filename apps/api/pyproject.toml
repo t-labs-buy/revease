@@ -1,7 +1,7 @@
 [project]
 name = "refract-api"
 version = "0.1.0"
-description = "Refract V1 API — FastAPI, SQLite, local media storage. Single-user, no auth."
+description = "Refract API — FastAPI, SQLite, local media storage. Per-user spaces behind JWT auth."
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115.0",
@@ -17,6 +17,9 @@ dependencies = [
     "langfuse>=4.13.0",
     "opentelemetry-instrumentation-anthropic>=0.62.1",
     "python-dotenv>=1.2.2",
+    "pyjwt>=2.9.0",
+    "bcrypt>=4.2.0",
+    "email-validator>=2.2.0",
 ]
 
 [dependency-groups]

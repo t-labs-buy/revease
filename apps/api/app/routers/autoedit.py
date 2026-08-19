@@ -6,8 +6,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.auth import CurrentUser
 from app.db import get_session
 from app.models import AutoEditJob, CaptureSession, MediaAsset
+from app.ownership import owned_autoedit_job, owned_project
 from app.queue import enqueue_autoedit
 from app.schemas import AutoEditOut, AutoEditStart
 from app.storage import store
@@ -29,9 +31,11 @@ def _out(job: AutoEditJob) -> AutoEditOut:
 @router.post("/projects/{project_id}/autoedit", response_model=AutoEditOut)
 def start_autoedit(
     project_id: str,
+    user: CurrentUser,
     payload: AutoEditStart | None = None,
     db: Session = Depends(get_session),
 ) -> AutoEditOut:
+    owned_project(db, user, project_id)
     # require a raw video somewhere in the project
     has_video = db.scalar(
         select(MediaAsset.id)
@@ -50,8 +54,7 @@ def start_autoedit(
 
 
 @router.get("/autoedit/{job_id}", response_model=AutoEditOut)
-def get_autoedit(job_id: str, db: Session = Depends(get_session)) -> AutoEditOut:
-    job = db.get(AutoEditJob, job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="job not found")
-    return _out(job)
+def get_autoedit(
+    job_id: str, user: CurrentUser, db: Session = Depends(get_session)
+) -> AutoEditOut:
+    return _out(owned_autoedit_job(db, user, job_id))

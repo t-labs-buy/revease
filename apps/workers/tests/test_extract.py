@@ -31,9 +31,15 @@ def test_build_graph_is_schema_valid_and_linear():
     ]
 
 
-def test_narration_filled_by_fallback_labeler():
+def test_narration_is_verbatim_transcript_span():
+    # Silent step -> empty narration (never an invented sentence)…
     g = build_graph(_candidates(1), workflow_id="wf_test", title="T", version=1)
-    assert g["steps"][0]["narration"]  # non-empty
+    assert g["steps"][0]["narration"] == ""
+    # …and a spoken span is carried through word-for-word.
+    cands = _candidates(1)
+    cands[0]["narration_span"] = "now we open the settings page"
+    g = build_graph(cands, workflow_id="wf_test", title="T", version=1)
+    assert g["steps"][0]["narration"] == "now we open the settings page"
 
 
 def test_single_step_no_edges():

@@ -20,12 +20,15 @@
     <h1>Refract Capture</h1>
     <label for="apiBase">API base</label>
     <input id="apiBase" value="http://localhost:8000" />
+    <label for="token">Access token <span style="color:#888">(web app → Account)</span></label>
+    <input id="token" type="password" placeholder="paste to connect your account" />
     <label for="project">Project</label>
     <select id="project"></select>
     <div class="row">
       <button id="start">Start</button>
       <button id="stop" disabled>Stop &amp; upload</button>
     </div>
+    <button id="autorec" style="width:100%;margin-top:10px;background:#4f46e5;color:#fff;">✨ Auto Record (AI)</button>
     <div id="status"></div>
     <script type="module" src="popup.js"></script>
   </body>

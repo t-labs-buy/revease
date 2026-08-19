@@ -10,12 +10,14 @@ export function Spinner({ className = "" }: { className?: string }) {
 
 type Tone = "green" | "amber" | "red" | "violet" | "zinc";
 
+// 500-level text reads on both themes; the 300s these used to carry were tuned
+// for the dark build and washed out to near-invisible on the light background.
 const TONES: Record<Tone, string> = {
-  green: "bg-emerald-500/15 text-emerald-300 ring-1 ring-inset ring-emerald-500/20",
-  amber: "bg-amber-500/15 text-amber-300 ring-1 ring-inset ring-amber-500/20",
-  red: "bg-red-500/15 text-red-300 ring-1 ring-inset ring-red-500/20",
-  violet: "bg-violet-500/15 text-violet-300 ring-1 ring-inset ring-violet-500/20",
-  zinc: "bg-zinc-500/10 text-zinc-400 ring-1 ring-inset ring-zinc-500/20",
+  green: "bg-emerald-500/10 text-emerald-500 ring-1 ring-inset ring-emerald-500/25",
+  amber: "bg-amber-500/10 text-amber-600 ring-1 ring-inset ring-amber-500/25",
+  red: "bg-red-500/10 text-red-500 ring-1 ring-inset ring-red-500/25",
+  violet: "bg-[#7C3AED]/10 text-[#7C3AED] ring-1 ring-inset ring-[#7C3AED]/25",
+  zinc: "bg-[var(--text-3)]/10 text-[var(--text-2)] ring-1 ring-inset ring-[var(--border-strong)]",
 };
 
 export function Badge({ tone = "zinc", children }: { tone?: Tone; children: ReactNode }) {
@@ -26,7 +28,7 @@ const DOTS: Record<string, string> = {
   done: "bg-emerald-500",
   running: "bg-amber-400 animate-pulse",
   error: "bg-red-500",
-  pending: "bg-zinc-600",
+  pending: "bg-[var(--text-3)]",
 };
 
 export function StatusDot({ status }: { status?: string }) {
@@ -45,14 +47,15 @@ export function ComingSoon({
   return (
     <main className="mx-auto max-w-3xl px-6 py-16">
       <div className="card flex flex-col items-center px-6 py-16 text-center">
-        <span className="badge mb-4 bg-violet-500/15 text-violet-300 ring-1 ring-inset ring-violet-500/20">
+        <span className="badge mb-4 bg-[#7C3AED]/10 text-[#7C3AED] ring-1 ring-inset ring-[#7C3AED]/25">
           Coming in V2
         </span>
-        <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
-        <p className="mt-2 max-w-md text-sm text-zinc-500">{desc}</p>
+        <h1 className="text-2xl font-semibold tracking-tight text-[var(--text)]">{title}</h1>
+        <p className="mt-2 max-w-md text-sm text-[var(--text-2)]">{desc}</p>
         {track && (
-          <p className="mt-4 text-xs text-zinc-600">
-            Planned as <span className="text-zinc-400">{track}</span> in V2-DEVELOPMENT-PLAN.md
+          <p className="mt-4 text-xs text-[var(--text-3)]">
+            Planned as <span className="text-[var(--text-2)]">{track}</span> in
+            V2-DEVELOPMENT-PLAN.md
           </p>
         )}
       </div>

@@ -17,6 +17,7 @@ dependencies = [
     "langfuse>=4.13.0",
     "opentelemetry-instrumentation-anthropic>=0.62.1",
     "python-dotenv>=1.2.2",
+    "opencv-python-headless>=5.0.0.93",
 ]
 
 [project.optional-dependencies]

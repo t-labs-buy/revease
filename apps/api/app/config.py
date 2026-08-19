@@ -49,13 +49,48 @@ class Settings(BaseSettings):
     whisper_device: str = "cpu"
     whisper_compute: str = "int8"
     disable_whisper: bool = False
+    # Comma-separated product/feature names or jargon Whisper should recognize
+    # verbatim instead of guessing at (e.g. "RevEase, Auto Record, webhook").
+    whisper_vocab: str = ""
+
+    # --- Auto Record (AI-driven tab recording) ---
+    # Hard cap on agent decisions per run (server force-ends with `done` when hit).
+    autorecord_max_steps: int = 60
+    # How many recent screenshots to keep in the agent's context window (older
+    # observations keep their text summary but drop the image to bound token cost).
+    autorecord_screenshot_window: int = 3
 
     cors_origins: str = "http://localhost:3000"
+
+    # --- Auth (per-user spaces) ---
+    # Signing key for access tokens. Leave empty for local dev: a key is generated
+    # once and persisted under data_dir so sessions survive a server restart. In
+    # any shared/deployed environment set REFRACT_AUTH_SECRET_KEY explicitly.
+    auth_secret_key: str = ""
+    auth_token_ttl_hours: int = 24 * 14  # how long a login lasts
+    auth_min_password_length: int = 8
 
     def resolved_database_url(self) -> str:
         if self.database_url:
             return self.database_url
         return f"sqlite:///{self.data_dir / 'refract.sqlite3'}"
+
+    def resolved_auth_secret(self) -> str:
+        """The token signing key: the configured one, else a generated key cached
+        on disk (so restarts don't silently log everyone out during local dev)."""
+        if self.auth_secret_key:
+            return self.auth_secret_key
+        key_file = self.data_dir / "auth_secret.key"
+        if key_file.exists():
+            cached = key_file.read_text().strip()
+            if cached:
+                return cached
+        import secrets
+
+        generated = secrets.token_urlsafe(48)
+        key_file.write_text(generated)
+        key_file.chmod(0o600)
+        return generated
 
 
 @lru_cache(maxsize=1)

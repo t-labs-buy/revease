@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
+from app.auth import CurrentUser
+from app.db import get_session
+from app.ownership import owned_project
 from app.rewrite import generate_script, rewrite_lines, suggest_zooms
 
 router = APIRouter(tags=["rewrite"])
@@ -34,7 +38,10 @@ class ZoomOut(BaseModel):
 
 
 @router.post("/projects/{project_id}/rewrite", response_model=RewriteOut)
-def rewrite(project_id: str, payload: RewriteReq) -> RewriteOut:
+def rewrite(
+    project_id: str, payload: RewriteReq, user: CurrentUser, db: Session = Depends(get_session)
+) -> RewriteOut:
+    owned_project(db, user, project_id)
     if not payload.lines:
         return RewriteOut(lines=[])
     try:
@@ -44,7 +51,10 @@ def rewrite(project_id: str, payload: RewriteReq) -> RewriteOut:
 
 
 @router.post("/projects/{project_id}/generate-script", response_model=RewriteOut)
-def generate(project_id: str, payload: GenReq) -> RewriteOut:
+def generate(
+    project_id: str, payload: GenReq, user: CurrentUser, db: Session = Depends(get_session)
+) -> RewriteOut:
+    owned_project(db, user, project_id)
     if not payload.scenes:
         return RewriteOut(lines=[])
     try:
@@ -54,7 +64,10 @@ def generate(project_id: str, payload: GenReq) -> RewriteOut:
 
 
 @router.post("/projects/{project_id}/suggest-zooms", response_model=ZoomOut)
-def suggest(project_id: str, payload: ZoomReq) -> ZoomOut:
+def suggest(
+    project_id: str, payload: ZoomReq, user: CurrentUser, db: Session = Depends(get_session)
+) -> ZoomOut:
+    owned_project(db, user, project_id)
     if not payload.scenes:
         return ZoomOut(zooms=[])
     try:

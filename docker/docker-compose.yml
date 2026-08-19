@@ -1,0 +1,87 @@
+# Refract — full stack for running on another machine.
+#
+#   Pull & run pre-built images (no source needed):
+#     TAG=latest docker compose -f docker-compose.prod.yml up -d
+#   Build locally from source instead of pulling:
+#     docker compose -f docker-compose.prod.yml build
+#
+# Config comes from a .env file next to this compose file (see .env.docker.example).
+# API + worker share one named volume (SQLite + media + TTS model) and MUST stay on
+# the same host.
+
+x-registry: &registry ${REGISTRY:-tlabsdoc/revease}
+
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  api:
+    image: ${REGISTRY:-tlabsdoc/revease}:api-${TAG:-latest}
+    build:
+      context: .
+      dockerfile: infra/docker/api.Dockerfile
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      REFRACT_DATA_DIR: /data
+      REFRACT_MEDIA_DIR: /data/media
+      REFRACT_REDIS_URL: redis://redis:6379/0
+      REFRACT_CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+    volumes:
+      - refract-data:/data
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  worker:
+    image: ${REGISTRY:-tlabsdoc/revease}:worker-${TAG:-latest}
+    build:
+      context: .
+      dockerfile: infra/docker/worker.Dockerfile
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      REFRACT_DATA_DIR: /data
+      REFRACT_MEDIA_DIR: /data/media
+      REFRACT_REDIS_URL: redis://redis:6379/0
+    volumes:
+      - refract-data:/data
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_started
+
+  web:
+    image: ${REGISTRY:-tlabsdoc/revease}:web-${TAG:-latest}
+    build:
+      context: .
+      dockerfile: infra/docker/web.Dockerfile
+      args:
+        # Browser -> API base. For LAN/remote access set WEB_API_BASE=http://<host-ip>:8000
+        NEXT_PUBLIC_API_BASE: ${WEB_API_BASE:-http://localhost:8000}
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    depends_on:
+      api:
+        condition: service_started
+
+volumes:
+  refract-data:
+  redis-data:
+

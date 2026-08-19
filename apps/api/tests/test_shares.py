@@ -1,9 +1,6 @@
 from app.db import SessionLocal
-from app.main import app
 from app.models import RenderJob, VideoProject, WorkflowGraphRow
-from fastapi.testclient import TestClient
-
-client = TestClient(app)
+from tests.helpers import client
 
 GRAPH = {
     "workflow_id": "wf_s", "version": 1, "title": "Shared Demo",

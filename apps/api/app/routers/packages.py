@@ -3,13 +3,15 @@ skills can reference to brand generated output."""
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.auth import CurrentUser
 from app.db import get_session
 from app.models import BrandPackage
+from app.ownership import owned_row
 
 router = APIRouter(prefix="/packages", tags=["packages"])
 
@@ -30,21 +32,31 @@ def _out(p: BrandPackage) -> PackageOut:
 
 
 @router.get("", response_model=list[PackageOut])
-def list_packages(db: Session = Depends(get_session)) -> list[PackageOut]:
-    return [_out(p) for p in db.scalars(select(BrandPackage).order_by(BrandPackage.created_at.desc()))]
+def list_packages(user: CurrentUser, db: Session = Depends(get_session)) -> list[PackageOut]:
+    rows = db.scalars(
+        select(BrandPackage)
+        .where(BrandPackage.user_id == user.id)
+        .order_by(BrandPackage.created_at.desc())
+    )
+    return [_out(p) for p in rows]
 
 
 @router.get("/{package_id}", response_model=PackageOut)
-def get_package(package_id: str, db: Session = Depends(get_session)) -> PackageOut:
-    p = db.get(BrandPackage, package_id)
-    if p is None:
-        raise HTTPException(status_code=404, detail="package not found")
-    return _out(p)
+def get_package(
+    package_id: str, user: CurrentUser, db: Session = Depends(get_session)
+) -> PackageOut:
+    return _out(owned_row(db, user, BrandPackage, package_id, "package"))
 
 
 @router.post("", response_model=PackageOut)
-def create_package(payload: PackageIn, db: Session = Depends(get_session)) -> PackageOut:
-    p = BrandPackage(name=payload.name.strip() or "Untitled package", settings_json=payload.settings)
+def create_package(
+    payload: PackageIn, user: CurrentUser, db: Session = Depends(get_session)
+) -> PackageOut:
+    p = BrandPackage(
+        user_id=user.id,
+        name=payload.name.strip() or "Untitled package",
+        settings_json=payload.settings,
+    )
     db.add(p)
     db.commit()
     db.refresh(p)
@@ -52,10 +64,10 @@ def create_package(payload: PackageIn, db: Session = Depends(get_session)) -> Pa
 
 
 @router.put("/{package_id}", response_model=PackageOut)
-def update_package(package_id: str, payload: PackageIn, db: Session = Depends(get_session)) -> PackageOut:
-    p = db.get(BrandPackage, package_id)
-    if p is None:
-        raise HTTPException(status_code=404, detail="package not found")
+def update_package(
+    package_id: str, payload: PackageIn, user: CurrentUser, db: Session = Depends(get_session)
+) -> PackageOut:
+    p = owned_row(db, user, BrandPackage, package_id, "package")
     p.name = payload.name.strip() or p.name
     p.settings_json = payload.settings
     db.commit()
@@ -64,9 +76,9 @@ def update_package(package_id: str, payload: PackageIn, db: Session = Depends(ge
 
 
 @router.delete("/{package_id}")
-def delete_package(package_id: str, db: Session = Depends(get_session)) -> dict:
-    p = db.get(BrandPackage, package_id)
-    if p:
-        db.delete(p)
-        db.commit()
+def delete_package(
+    package_id: str, user: CurrentUser, db: Session = Depends(get_session)
+) -> dict:
+    db.delete(owned_row(db, user, BrandPackage, package_id, "package"))
+    db.commit()
     return {"ok": True}

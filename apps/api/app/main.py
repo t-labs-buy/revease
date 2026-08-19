@@ -10,6 +10,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import get_settings
 from app.db import init_db
 from app.routers import (
+    auth,
+    auto_record,
     autoedit,
     documents,
     graphs,
@@ -46,8 +48,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(auth.router)
 app.include_router(projects.router)
 app.include_router(sessions.router)
+app.include_router(auto_record.router)
 app.include_router(graphs.router)
 app.include_router(video.router)
 app.include_router(documents.router)

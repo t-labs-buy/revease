@@ -18,6 +18,8 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from worker.pipeline.smoothzoom import apply_zoom
+
 log = logging.getLogger("refract.pipeline.autoedit")
 
 SPEEDUP = 3.0  # silent regions (usually skippable)
@@ -140,25 +142,52 @@ def detect_freezes(video: Path, duration: float) -> list[tuple[float, float]]:
 
 
 def _motion_centroid(video: Path, t0: float, t1: float, dims: tuple[int, int]) -> tuple[float, float, float]:
-    """Zoom target from frame-to-frame change within [t0,t1]. Returns (cx,cy,scale)."""
+    """Zoom target from on-screen activity within [t0,t1]. Returns (cx,cy,scale).
+
+    Two-tier detection so telemetry-less desktop recordings still zoom toward the
+    click area:
+    1. UI reaction — a localized burst of change (menu opening, field focusing)
+       right after the scene starts: zoom to that region. A change covering most
+       of the frame is a page transition — stay wide.
+    2. Cursor trail — no UI burst: track the mouse itself at fine resolution
+       (a 1080p cursor is only a few pixels even at 640x360) and zoom to where it
+       worked; the weighted centroid lands where the cursor lingered."""
     try:
         import numpy as np
     except Exception:
         return 0.5, 0.5, 1.0
-    mid = (t0 + t1) / 2
-    a = _grab(video, max(t0, mid - 0.3))
-    b = _grab(video, min(t1, mid + 0.3))
-    if a is None or b is None:
+    span = max(0.0, t1 - t0)
+    times = [t0 + 0.05, t0 + 0.5, t0 + min(1.2, span / 2), t1 - 0.3]
+    times = sorted({max(t0, min(t1, t)) for t in times})
+    imgs = [im for im in (_grab(video, t) for t in times) if im is not None]
+    if len(imgs) < 2:
         return 0.5, 0.5, 1.0
-    ga = np.asarray(a.convert("L").resize((160, 90)), dtype="int16")
-    gb = np.asarray(b.convert("L").resize((160, 90)), dtype="int16")
-    diff = np.abs(ga - gb)
-    mask = diff > 18
-    if mask.sum() < 40:  # little motion -> no zoom
+
+    # Tier 1: UI reaction burst at coarse resolution (compression-noise proof).
+    W, H = 320, 180
+    coarse = [np.asarray(im.convert("L").resize((W, H)), dtype="int16") for im in imgs]
+    for a, b in zip(coarse, coarse[1:]):
+        mask = np.abs(a - b) > 12
+        n = int(mask.sum())
+        if n < 60:
+            continue  # no burst in this pair
+        if n > 0.35 * W * H:
+            return 0.5, 0.5, 1.0  # full-page transition — keep the wide shot
+        ys, xs = np.nonzero(mask)
+        return round(float(xs.mean()) / W, 3), round(float(ys.mean()) / H, 3), ZOOM_SCALE
+
+    # Tier 2: cursor trail at fine resolution with a low threshold.
+    FW, FH = 640, 360
+    fine = [np.asarray(im.convert("L").resize((FW, FH)), dtype="int16") for im in imgs]
+    acc = np.zeros((FH, FW), dtype="float64")
+    for a, b in zip(fine, fine[1:]):
+        acc += (np.abs(a - b) > 8).astype("float64")
+    if acc.sum() < 6:  # truly static — nothing moved, not even the cursor
         return 0.5, 0.5, 1.0
-    ys, xs = np.nonzero(mask)
-    cx = float(xs.mean()) / 160.0
-    cy = float(ys.mean()) / 90.0
+    ys, xs = np.nonzero(acc)
+    wgt = acc[ys, xs]
+    cx = float((xs * wgt).sum() / wgt.sum()) / FW
+    cy = float((ys * wgt).sum() / wgt.sum()) / FH
     return round(cx, 3), round(cy, 3), ZOOM_SCALE
 
 
@@ -255,17 +284,6 @@ def _atempo_chain(speed: float) -> str:
     return ",".join(f"atempo={f}" for f in factors)
 
 
-def _zoompan_vf(seg: Seg, dims: tuple[int, int]) -> str:
-    """Smooth ease-in zoom toward (cx,cy) up to seg.scale over ~1.5s, then hold."""
-    w, h = dims
-    ease_frames = FPS * min(max(0.3, seg.src_len), 1.5)
-    step = max(0.0005, round((seg.scale - 1.0) / ease_frames, 5))
-    z = f"min(zoom+{step},{seg.scale})"
-    x = f"iw*{seg.cx}-(iw/zoom/2)"
-    y = f"ih*{seg.cy}-(ih/zoom/2)"
-    return f"zoompan=z='{z}':x='{x}':y='{y}':d=1:s={w}x{h}:fps={FPS}"
-
-
 def _fmt_ts(t: float) -> str:
     ms = max(0, int(round(t * 1000)))
     h, ms = divmod(ms, 3600000)
@@ -315,7 +333,6 @@ def build_srt(words: list[dict], segments: list[Seg]) -> str:
 
 def render(video: Path, analysis: Analysis, out: Path, work: Path, srt_path: Path | None = None) -> dict:
     work.mkdir(parents=True, exist_ok=True)
-    dims = probe_dims(video)
     audio = has_audio(video)
     clips: list[Path] = []
     sped = zoomed = 0
@@ -324,9 +341,11 @@ def render(video: Path, analysis: Analysis, out: Path, work: Path, srt_path: Pat
         if seg.src_len < 0.1:
             continue
         clip = work / f"seg_{i:03d}.mp4"
-        if seg.scale > 1.0 and seg.speed == 1.0:
-            # smooth zoom (zoompan sets fps + size itself); speed is 1x here
-            vf = f"{_zoompan_vf(seg, dims)},format=yuv420p,setsar=1"
+        zoom_seg = seg.scale > 1.0 and seg.speed == 1.0
+        if zoom_seg:
+            # rendered flat here; the zoom itself is a float-precision warp pass
+            # below (smoothzoom) — zoompan's whole-pixel camera path jitters
+            vf = ",".join([f"fps={FPS}", "format=yuv420p", "setsar=1"])
         else:
             vf = ",".join([f"setpts=PTS/{seg.speed}", f"fps={FPS}", "format=yuv420p", "setsar=1"])
         cmd = ["ffmpeg", "-y", "-i", str(video), "-ss", f"{seg.t_start:.3f}", "-t",
@@ -341,6 +360,17 @@ def render(video: Path, analysis: Analysis, out: Path, work: Path, srt_path: Pat
         if proc.returncode != 0:
             log.warning("autoedit seg %d failed: %s", i, proc.stderr[-400:])
             continue
+        if zoom_seg:
+            zoom_clip = work / f"seg_{i:03d}_zoom.mp4"
+            apply_zoom(clip, zoom_clip, scale=seg.scale, cx=seg.cx, cy=seg.cy,
+                       dur_s=seg.src_len, ease_s=1.5, fps=FPS)
+            muxed = work / f"seg_{i:03d}_zoomed.mp4"
+            mux = _run(["ffmpeg", "-y", "-i", str(zoom_clip), "-i", str(clip),
+                        "-map", "0:v", "-map", "1:a", "-c", "copy", str(muxed)])
+            if mux.returncode != 0:
+                log.warning("autoedit seg %d zoom mux failed: %s", i, mux.stderr[-400:])
+                continue
+            clip = muxed
         clips.append(clip)
         sped += int(seg.speed > 1.0)
         zoomed += int(seg.scale > 1.0)

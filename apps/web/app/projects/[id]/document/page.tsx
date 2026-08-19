@@ -3,7 +3,7 @@
 import { use, useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import {
-  docExportUrl,
+  downloadDocument,
   getDocument,
   mediaUrl,
   regenerateDocument,
@@ -17,6 +17,19 @@ export default function DocumentPage({ params }: { params: Promise<{ id: string 
   const [doc, setDoc] = useState<SopDoc | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [exporting, setExporting] = useState<"md" | "pdf" | null>(null);
+
+  const exportDoc = async (format: "md" | "pdf") => {
+    setExporting(format);
+    try {
+      const name = (doc?.title ?? "document").replace(/[^a-z0-9]+/gi, "-").toLowerCase();
+      await downloadDocument(id, format, `${name}.${format}`);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setExporting(null);
+    }
+  };
 
   const load = useCallback(async () => {
     try {
@@ -65,12 +78,22 @@ export default function DocumentPage({ params }: { params: Promise<{ id: string 
           >
             {busy ? "…" : "Regenerate"}
           </button>
-          <a href={docExportUrl(id, "md")} className="btn btn-secondary btn-sm" download>
-            Markdown
-          </a>
-          <a href={docExportUrl(id, "pdf")} className="btn btn-primary btn-sm" download>
-            PDF
-          </a>
+          {/* Export is an authenticated route, so download via fetch rather than
+              a bare <a href>, which the browser would send without the token. */}
+          <button
+            onClick={() => void exportDoc("md")}
+            disabled={exporting !== null}
+            className="btn btn-secondary btn-sm"
+          >
+            {exporting === "md" ? "…" : "Markdown"}
+          </button>
+          <button
+            onClick={() => void exportDoc("pdf")}
+            disabled={exporting !== null}
+            className="btn btn-primary btn-sm"
+          >
+            {exporting === "pdf" ? "…" : "PDF"}
+          </button>
           <ShareButton projectId={id} kind="doc" />
         </div>
       </div>

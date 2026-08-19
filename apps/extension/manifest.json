@@ -2,8 +2,8 @@
   "manifest_version": 3,
   "name": "Refract Capture",
   "version": "0.1.0",
-  "description": "Capture click/input/navigation telemetry + per-step screenshots into a Refract session.",
-  "permissions": ["tabs", "storage", "scripting"],
+  "description": "Capture click/input/navigation telemetry + per-step screenshots into a Refract session, or Auto Record a tab with an AI driver.",
+  "permissions": ["activeTab", "tabs", "storage", "scripting", "tabCapture", "offscreen", "debugger", "sidePanel"],
   "host_permissions": ["<all_urls>", "http://localhost:8000/*"],
   "background": {
     "service_worker": "src/background.js",
@@ -20,5 +20,8 @@
   "action": {
     "default_popup": "src/popup.html",
     "default_title": "Refract Capture"
+  },
+  "side_panel": {
+    "default_path": "src/sidepanel.html"
   }
 }
