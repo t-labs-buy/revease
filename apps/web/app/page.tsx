@@ -461,8 +461,8 @@ export default function Home() {
         )}
       </div>
 
-      {/* floating create button */}
-      <div className="group fixed bottom-6 right-6 z-40">
+      {/* floating create button — visually hidden for now, logic kept wired */}
+      <div className="hidden group fixed bottom-6 right-6 z-40">
         <span
           aria-hidden
           className="absolute inset-0 rounded-full bg-gradient-to-br from-[#7C3AED] to-[#8B5CF6] opacity-40 blur-xl transition-opacity duration-[250ms] group-hover:opacity-70"

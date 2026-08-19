@@ -217,8 +217,8 @@ function PrepareInner({ params }: { params: Promise<{ id: string }> }) {
                 English ▾
               </span>
             </div>
-            <span className="pointer-events-none absolute inset-0 flex items-center justify-center px-2">
-              <span className="rounded-full border border-[var(--border)] bg-[var(--card)]/95 px-4 py-2 text-center text-sm font-semibold text-[var(--text)] shadow-[var(--shadow-card)] backdrop-blur-sm">
+            <span className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-2xl border border-[var(--border)] bg-[var(--card)]/95 px-4 text-center text-sm font-semibold text-[var(--text)] shadow-[var(--shadow-card)] backdrop-blur-sm">
+              <span>
                 Click <span className="text-[#7C3AED]">Generate AI content</span> to crop or trim
                 in the editor
               </span>
