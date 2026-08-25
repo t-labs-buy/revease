@@ -94,9 +94,19 @@ services:
       - ./edge/nginx.conf:/etc/nginx/conf.d/default.conf:ro
     ports:
       - "${PUBLIC_PORT:-8020}:8080"
+    # Also on ivolve-network so nginx-proxy-manager can reach this container by
+    # name when the stack moves to https://<host>/ — NPM cannot route back to the
+    # host's public IP from inside its own network.
+    networks:
+      - default
+      - ivolve-network
     depends_on:
       - web
       - api
+
+networks:
+  ivolve-network:
+    external: true
 
 volumes:
   revease-data:

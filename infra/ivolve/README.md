@@ -33,9 +33,16 @@ is not involved in normal use.
 **Screen capture does not work over plain HTTP.** `getDisplayMedia` /
 `getUserMedia` are secure-context only, so `Recorder.tsx` and `CaptureModal.tsx`
 are dead on `http://…:8020` — upload, editing and render are fine. Fixing this
-needs HTTPS: a DNS A record for e.g. `revease.ivolve.cloud` → 13.204.129.141, a
-proxy host in nginx-proxy-manager pointing at `revease-edge:8080`, then a web
-rebuild with `WEB_API_BASE=https://revease.ivolve.cloud/api`.
+needs HTTPS. The plumbing is ready: `edge` is attached to `ivolve-network`, and
+nginx-proxy-manager can already reach `revease-edge:8080` by name. What is missing
+is a DNS A record for e.g. `revease.ivolve.cloud` → 13.204.129.141. Once it
+resolves: add a proxy host in NPM (forward to `revease-edge` port 8080, request a
+Let's Encrypt cert), set `WEB_API_BASE=https://revease.ivolve.cloud/api` and
+`CORS_ORIGINS` to match in `.env`, then `./build.sh web && docker compose up -d`.
+
+Note the edge config proxies to **container names** (`revease-api`, `revease-web`),
+not the compose service names: joining `ivolve-network` puts it in a namespace
+where other stacks already own the names `api` and `web`, and their DNS wins.
 
 ## Images
 
