@@ -2,8 +2,13 @@
 #
 #   cd ~/apps/revease && docker compose up -d
 #
-# Images are built from ./src and pushed to the host's private registry
-# (registry:2 on localhost:5000, htpasswd-protected) — see build.sh.
+# Images are built from ./src, pushed to the host's private registry (registry:2 on
+# localhost:5000, htpasswd-protected) AND tagged with the short local name the
+# containers actually run under — so `docker ps` reads `revease:api-v1` instead of
+# `localhost:5000/revease:api-v1`. build.sh keeps the two in sync. If a local tag
+# ever goes missing, recover it with:
+#     docker pull localhost:5000/revease:api-v1
+#     docker tag  localhost:5000/revease:api-v1 revease:api-v1
 #
 # Everything public goes through the `edge` proxy on 8020: this host's security
 # group only allows 80, 443 and 8020, and 80/443 already belong to
@@ -28,7 +33,7 @@ services:
       retries: 5
 
   api:
-    image: ${REGISTRY:-localhost:5000/revease}:api-${TAG:-v1}
+    image: ${IMAGE_NS:-revease}:api-${TAG:-v1}
     container_name: revease-api
     build:
       context: ./src
@@ -51,7 +56,7 @@ services:
         condition: service_healthy
 
   worker:
-    image: ${REGISTRY:-localhost:5000/revease}:worker-${TAG:-v1}
+    image: ${IMAGE_NS:-revease}:worker-${TAG:-v1}
     container_name: revease-worker
     build:
       context: ./src
@@ -72,7 +77,7 @@ services:
         condition: service_started
 
   web:
-    image: ${REGISTRY:-localhost:5000/revease}:web-${TAG:-v1}
+    image: ${IMAGE_NS:-revease}:web-${TAG:-v1}
     container_name: revease-web
     build:
       context: ./src
