@@ -1,0 +1,103 @@
+# RevEase — ivolve cloud deployment (host: 13.204.129.141).
+#
+#   cd ~/apps/revease && docker compose up -d
+#
+# Images are built from ./src and pushed to the host's private registry
+# (registry:2 on localhost:5000, htpasswd-protected) — see build.sh.
+#
+# Everything public goes through the `edge` proxy on 8020: this host's security
+# group only allows 80, 443 and 8020, and 80/443 already belong to
+# nginx-proxy-manager. So web and api share one origin (see edge/nginx.conf).
+#
+# api + worker share one named volume (SQLite + media + Kokoro TTS model) and must
+# stay on the same host — do not split them.
+
+name: revease
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: revease-redis
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  api:
+    image: ${REGISTRY:-localhost:5000/revease}:api-${TAG:-v1}
+    container_name: revease-api
+    build:
+      context: ./src
+      dockerfile: infra/docker/api.Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      REFRACT_DATA_DIR: /data
+      REFRACT_MEDIA_DIR: /data/media
+      REFRACT_REDIS_URL: redis://redis:6379/0
+      REFRACT_CORS_ORIGINS: ${CORS_ORIGINS:-http://13.204.129.141:8020}
+    volumes:
+      - revease-data:/data
+    # Loopback only — the edge proxy is the public path in. Handy for curl on the host.
+    ports:
+      - "127.0.0.1:${API_DEBUG_PORT:-8021}:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  worker:
+    image: ${REGISTRY:-localhost:5000/revease}:worker-${TAG:-v1}
+    container_name: revease-worker
+    build:
+      context: ./src
+      dockerfile: infra/docker/worker.Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      REFRACT_DATA_DIR: /data
+      REFRACT_MEDIA_DIR: /data/media
+      REFRACT_REDIS_URL: redis://redis:6379/0
+    volumes:
+      - revease-data:/data
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_started
+
+  web:
+    image: ${REGISTRY:-localhost:5000/revease}:web-${TAG:-v1}
+    container_name: revease-web
+    build:
+      context: ./src
+      dockerfile: infra/docker/web.Dockerfile
+      args:
+        # Baked at build time — the browser calls the API directly. Changing this
+        # needs a web image rebuild (./build.sh web), not just a restart.
+        NEXT_PUBLIC_API_BASE: ${WEB_API_BASE:-http://13.204.129.141:8020/api}
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_started
+
+  edge:
+    image: nginx:1.27-alpine
+    container_name: revease-edge
+    restart: unless-stopped
+    volumes:
+      - ./edge/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "${PUBLIC_PORT:-8020}:8080"
+    depends_on:
+      - web
+      - api
+
+volumes:
+  revease-data:
+  redis-data:

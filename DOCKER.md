@@ -23,6 +23,12 @@ Useful flags: `--service web|api|worker`, `--no-push` (build only),
 `--api-base http://<host-ip>:8000` (bake the browser→API URL into web),
 `--no-whisper` (lighter worker), `--platform linux/amd64,linux/arm64` (buildx).
 
+## The live deployment
+
+The ivolve cloud deployment does not use this compose file — it has its own
+(single public port, private registry, backups) under
+[infra/ivolve/](infra/ivolve/README.md). Read that before touching the host.
+
 ## Run on another system
 
 Only Docker + this repo's `docker-compose.prod.yml` and `.env` are needed — the
