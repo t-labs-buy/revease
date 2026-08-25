@@ -4,6 +4,7 @@
 
 import { clearAll, getAll, putEvent, putScreenshot } from "./idb.js";
 import {
+  DEFAULT_API_BASE,
   completeSession,
   createSession,
   postEvents,
@@ -76,7 +77,7 @@ async function finishCapture() {
   await broadcast(false);
 
   const cfg = await chrome.storage.local.get(["apiBase", "projectId"]);
-  const apiBase = cfg.apiBase || "http://localhost:8000";
+  const apiBase = cfg.apiBase || DEFAULT_API_BASE;
   const projectId = cfg.projectId;
   if (!projectId) throw new Error("No project selected");
 

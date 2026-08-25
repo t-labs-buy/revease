@@ -1,4 +1,4 @@
-import { listProjects } from "./api.js";
+import { listProjects, DEFAULT_API_BASE } from "./api.js";
 
 const $ = (id) => document.getElementById(id);
 const apiBaseEl = $("apiBase");
@@ -97,7 +97,7 @@ $("autorec").addEventListener("click", async () => {
 
 (async () => {
   const cfg = await chrome.storage.local.get(["apiBase", "accessToken"]);
-  if (cfg.apiBase) apiBaseEl.value = cfg.apiBase;
+  apiBaseEl.value = cfg.apiBase || DEFAULT_API_BASE;
   if (cfg.accessToken) tokenEl.value = cfg.accessToken;
   await loadProjects();
   await refreshRecordingUI();

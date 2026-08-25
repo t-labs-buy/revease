@@ -6,6 +6,12 @@
 // threaded through every caller, so background.js / agent.js / offscreen.js don't
 // need to know about auth at all.
 
+// Where the backend lives when the popup's "API base" field has never been set.
+// The ivolve deployment serves web and API from one origin, so the API sits under
+// /api (see infra/ivolve/edge/nginx.conf); a local dev backend is plain
+// http://localhost:8000. Whatever the user types in the popup wins over this.
+export const DEFAULT_API_BASE = "http://13.204.129.141:8020/api";
+
 async function accessToken() {
   const { accessToken } = await chrome.storage.local.get("accessToken");
   return accessToken || "";
