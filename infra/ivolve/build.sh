@@ -26,7 +26,7 @@ python3 src/shift.py \
   --service "$SERVICE" \
   --tag "$TAG" \
   --repo "$REPO" \
-  --api-base "${WEB_API_BASE:-http://13.204.129.141:8020/api}"
+  --api-base "${WEB_API_BASE:-/api}"
 
 if [ "$SERVICE" = "all" ]; then SERVICES="api worker web"; else SERVICES="$SERVICE"; fi
 for svc in $SERVICES; do

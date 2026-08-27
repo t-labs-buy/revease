@@ -45,7 +45,7 @@ services:
       REFRACT_DATA_DIR: /data
       REFRACT_MEDIA_DIR: /data/media
       REFRACT_REDIS_URL: redis://redis:6379/0
-      REFRACT_CORS_ORIGINS: ${CORS_ORIGINS:-http://13.204.129.141:8020}
+      REFRACT_CORS_ORIGINS: ${CORS_ORIGINS:-http://13.204.129.141:8020,https://revease.ivolve.cloud}
     volumes:
       - revease-data:/data
     # Loopback only — the edge proxy is the public path in. Handy for curl on the host.
@@ -84,8 +84,10 @@ services:
       dockerfile: infra/docker/web.Dockerfile
       args:
         # Baked at build time — the browser calls the API directly. Changing this
-        # needs a web image rebuild (./build.sh web), not just a restart.
-        NEXT_PUBLIC_API_BASE: ${WEB_API_BASE:-http://13.204.129.141:8020/api}
+        # needs a web image rebuild (./build.sh web), not just a restart. Relative
+        # on purpose: `edge` serves web and API from one origin, so one image works
+        # on the IP:8020 URL and on any domain later put in front of it.
+        NEXT_PUBLIC_API_BASE: ${WEB_API_BASE:-/api}
     restart: unless-stopped
     depends_on:
       api:
@@ -98,10 +100,11 @@ services:
     volumes:
       - ./edge/nginx.conf:/etc/nginx/conf.d/default.conf:ro
     ports:
-      - "${PUBLIC_PORT:-8020}:8080"
+      - "${PUBLIC_PORT:-8020}:8090"
     # Also on ivolve-network so nginx-proxy-manager can reach this container by
     # name when the stack moves to https://<host>/ — NPM cannot route back to the
-    # host's public IP from inside its own network.
+    # host's public IP from inside its own network. NPM forwards to
+    # revease-edge:8090 (the container port, not the published 8020).
     networks:
       - default
       - ivolve-network

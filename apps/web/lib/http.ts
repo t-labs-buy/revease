@@ -10,6 +10,19 @@
 
 export const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
 
+/**
+ * `API_BASE` is origin-relative ("/api") wherever web and API share one origin
+ * behind the edge proxy, so a single web image serves every hostname the stack is
+ * reached by — no rebuild when a domain is added in front of it. Browser fetches
+ * resolve that fine; anything we hand to a *human* to paste into another client
+ * (the extension) must be absolute, so resolve it against the current page.
+ */
+export function absoluteApiBase(): string {
+  if (/^https?:\/\//i.test(API_BASE)) return API_BASE;
+  if (typeof window === "undefined") return API_BASE;
+  return `${window.location.origin}${API_BASE}`;
+}
+
 const TOKEN_KEY = "revease.access_token";
 
 // In-memory mirror of the token so the very first request after login doesn't

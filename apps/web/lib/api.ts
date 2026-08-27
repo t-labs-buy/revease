@@ -1,7 +1,7 @@
-import { API_BASE, apiFetch } from "@/lib/http";
+import { API_BASE, absoluteApiBase, apiFetch } from "@/lib/http";
 
 // Re-exported so callers that build media/asset URLs keep importing it from here.
-export { API_BASE };
+export { API_BASE, absoluteApiBase };
 
 export interface Project {
   id: string;

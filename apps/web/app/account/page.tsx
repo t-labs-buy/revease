@@ -1,14 +1,18 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useAuth } from "@/contexts/AuthContext";
 import { getToken } from "@/lib/auth";
-import { API_BASE } from "@/lib/api";
+import { absoluteApiBase, API_BASE } from "@/lib/api";
 
 export default function AccountPage() {
   const { user, logout } = useAuth();
   const [revealed, setRevealed] = useState(false);
   const [copied, setCopied] = useState<"base" | "token" | null>(null);
+  // Resolved after mount: the deployed base is origin-relative ("/api"), and the
+  // extension is a separate client that can only use an absolute URL.
+  const [apiBase, setApiBase] = useState(API_BASE);
+  useEffect(() => setApiBase(absoluteApiBase()), []);
 
   if (!user) return null; // AuthGate already handles the signed-out case
 
@@ -61,9 +65,9 @@ export default function AccountPage() {
           API base
         </label>
         <div className="mt-1.5 flex gap-2">
-          <input readOnly value={API_BASE} className="input font-mono text-xs" />
+          <input readOnly value={apiBase} className="input font-mono text-xs" />
           <button
-            onClick={() => void copy("base", API_BASE)}
+            onClick={() => void copy("base", apiBase)}
             className="btn btn-secondary btn-sm shrink-0"
           >
             {copied === "base" ? "Copied" : "Copy"}

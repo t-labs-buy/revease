@@ -18,27 +18,70 @@ This directory is the source of truth for everything except `.env` (secrets) and
 
 ## Why one port
 
-Only 80, 443 and 8020 reach this host from outside, and 80/443 belong to
-nginx-proxy-manager. 3000 and 8000 are taken locally by gitea and flowwatcher. So
-an nginx `edge` container owns 8020 and serves both halves from one origin:
+Of this host's ports only **80 and 443 reach the internet** — both owned by
+nginx-proxy-manager. `8020` is published by docker and answers on the host, but the
+security group drops it from outside (measured 2026-08-27; the earlier note here
+claiming 8020 was open was wrong). 3000 and 8000 are taken locally by gitea and
+flowwatcher. So an nginx `edge` container listens on 8090, is published to the host
+as 8020 for local curl, and serves both halves from one origin:
 
 | path | upstream |
 |---|---|
 | `/` | web (Next.js :3000) |
 | `/api/…` | api (FastAPI :8000, prefix stripped) |
 
+**The only public path in is nginx-proxy-manager → `revease-edge:8090`.**
+
 The API is also on `127.0.0.1:8021` for curl on the host. Same origin means CORS
 is not involved in normal use.
 
+Because both halves share an origin, `WEB_API_BASE` is **origin-relative** (`/api`),
+not an absolute URL. One web image therefore serves every hostname the stack is
+reached by — the IP:8020 URL today, a domain in front of it tomorrow — with no
+rebuild. Put an absolute URL there only if web and API are ever split apart.
+
+## HTTPS via nginx-proxy-manager
+
 **Screen capture does not work over plain HTTP.** `getDisplayMedia` /
 `getUserMedia` are secure-context only, so `Recorder.tsx` and `CaptureModal.tsx`
-are dead on `http://…:8020` — upload, editing and render are fine. Fixing this
-needs HTTPS. The plumbing is ready: `edge` is attached to `ivolve-network`, and
-nginx-proxy-manager can already reach `revease-edge:8080` by name. What is missing
-is a DNS A record for e.g. `revease.ivolve.cloud` → 13.204.129.141. Once it
-resolves: add a proxy host in NPM (forward to `revease-edge` port 8080, request a
-Let's Encrypt cert), set `WEB_API_BASE=https://revease.ivolve.cloud/api` and
-`CORS_ORIGINS` to match in `.env`, then `./build.sh web && docker compose up -d`.
+are dead on `http://…:8020` — upload, editing and render are fine. Everything on
+this host's side is ready:
+
+- `edge` is on `ivolve-network` alongside `nginx-proxy-manager-app-1`, and
+  `docker exec nginx-proxy-manager-app-1 curl -s http://revease-edge:8090/api/healthz`
+  already answers `{"status":"ok"}`.
+- The web bundle uses a relative `/api`, so it works on the new hostname with no
+  rebuild.
+
+**The only missing piece is DNS:** `revease.ivolve.cloud` has no A record. Add
+`revease A 13.204.129.141` in the ivolve.cloud zone (same as every other app
+there), then add one proxy host in NPM — admin UI is on `127.0.0.1:81`, not
+reachable from outside, so tunnel with `ssh -N -L 8181:127.0.0.1:81 ivolve_cloud`:
+
+| field | value |
+|---|---|
+| Domain Names | `revease.ivolve.cloud` |
+| Scheme | `http` |
+| Forward Hostname | `revease-edge` (container name) |
+| Forward Port | `8090` (container-internal, **not** the published 8020) |
+| Websockets Support | on |
+| Block Common Exploits / Cache Assets | off |
+
+SSL tab → request a new Let's Encrypt cert, Force SSL, HTTP/2. Advanced tab needs
+this, because NPM's global `client_max_body_size` is 2000m and it buffers by
+default — which would break streamed recording uploads and Range video playback:
+
+```nginx
+client_max_body_size 0;
+proxy_request_buffering off;
+proxy_buffering off;
+proxy_read_timeout 3600s;
+proxy_send_timeout 3600s;
+```
+
+Only **one** proxy host — `edge` already splits `/` and `/api/` internally. Note
+the pattern other apps here follow: `usagetrackerapp.ivolve.cloud` forwards to
+`usage-tracker-frontend:80`, the *container* port, not the 3011 it is published on.
 
 Note the edge config proxies to **container names** (`revease-api`, `revease-web`),
 not the compose service names: joining `ivolve-network` puts it in a namespace
@@ -108,4 +151,9 @@ changes the clip hashes once before it stabilises.
 
 - `REFRACT_ANTHROPIC_API_KEY` is empty, so step labels and narration come from the
   deterministic offline labeler (`intent` reads "Interact with <transcript line>").
-- No HTTPS (see above).
+- No HTTPS yet — blocked on the `revease.ivolve.cloud` DNS record (see above).
+- `DEFAULT_API_BASE` in `apps/extension/src/api.js` still points at
+  `http://13.204.129.141:8020/api`. The extension is a separate origin and cannot
+  use a relative base, so it stays absolute; switch it to the https URL once the
+  domain resolves. The account page shows the right value to paste — it resolves
+  the relative base against whatever origin the UI was loaded from.
