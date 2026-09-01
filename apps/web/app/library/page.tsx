@@ -83,7 +83,7 @@ export default function LibraryPage() {
   }, [projects, sessions, q, filter]);
 
   return (
-    <main className="mx-auto max-w-6xl px-8 py-10">
+    <main className="mx-auto max-w-[1600px] px-8 py-10">
       {/* header */}
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
@@ -182,7 +182,7 @@ export default function LibraryPage() {
           />
         </div>
       ) : (
-        <div className="mt-8 grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+        <div className="mt-8 grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
           {filtered.map((p, i) => (
             <ProjectCard
               key={p.id}
@@ -190,6 +190,9 @@ export default function LibraryPage() {
               sessions={sessions}
               index={i}
               onDelete={(pid) => setPendingIds([pid])}
+              onFavoriteChange={(pid, favorite) =>
+                setProjects((ps) => ps.map((p) => (p.id === pid ? { ...p, favorite: favorite ? 1 : 0 } : p)))
+              }
               selectable={selectMode}
               selected={selected.has(p.id)}
               onToggleSelect={toggleSelect}

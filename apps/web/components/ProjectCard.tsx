@@ -41,6 +41,7 @@ export function ProjectCard({
   selectable = false,
   selected = false,
   onToggleSelect,
+  onFavoriteChange,
 }: {
   project: Project;
   sessions: Session[]; // all sessions (filtered internally by project)
@@ -50,6 +51,7 @@ export function ProjectCard({
   selectable?: boolean; // multi-select mode: clicking toggles selection instead of opening
   selected?: boolean;
   onToggleSelect?: (id: string) => void;
+  onFavoriteChange?: (id: string, favorite: boolean) => void; // keep the page's list in sync
 }) {
   const [fav, setFav] = useState(!!project.favorite);
   const mine = sessions.filter((s) => s.project_id === project.id);
@@ -82,7 +84,7 @@ export function ProjectCard({
         </span>
       )}
       {/* thumbnail */}
-      <div className="relative h-36 bg-gradient-to-br from-[#1c1c2e] to-[#2b2b45]">
+      <div className="relative aspect-video bg-gradient-to-br from-[#1c1c2e] to-[#2b2b45]">
         {latest?.poster ? (
           // eslint-disable-next-line @next/next/no-img-element
           <img src={mediaUrl(latest.poster)} alt={project.name} className="h-full w-full object-cover" />
@@ -101,23 +103,30 @@ export function ProjectCard({
         ) : null}
       </div>
       {/* body */}
-      <div className="p-4">
-        <div className="truncate font-semibold text-[var(--text)]">{project.name}</div>
-        <div className="mt-1 text-xs text-[var(--text-2)]">
+      <div className="p-5">
+        <div className="truncate text-[17px] font-semibold text-[var(--text)]">{project.name}</div>
+        <div className="mt-1 text-sm text-[var(--text-2)]">
           {mine.length} capture{mine.length === 1 ? "" : "s"} • {fmtDate(project.created_at)}
         </div>
         <span className={`badge mt-2.5 px-2.5 py-0.5 ring-1 ring-inset ${st.cls}`}>{st.label}</span>
-        <div className="mt-3 flex items-center justify-between border-t border-[var(--border)] pt-2.5 text-[12px] text-[var(--text-3)]">
+        <div className="mt-3.5 flex items-center justify-between border-t border-[var(--border)] pt-3 text-sm text-[var(--text-3)]">
           <span className="inline-flex items-center gap-1.5">🗂 Project</span>
-          <span className="flex items-center gap-2">
+          <span className="flex items-center gap-1">
             <button
               title={fav ? "Unstar" : "Star — pinned first"}
               onClick={(e) => {
                 e.preventDefault();
-                setFav((v) => !v); // optimistic
-                toggleFavorite(project.id).catch(() => setFav((v) => !v));
+                const next = !fav;
+                setFav(next); // optimistic
+                onFavoriteChange?.(project.id, next);
+                toggleFavorite(project.id).catch(() => {
+                  setFav(!next);
+                  onFavoriteChange?.(project.id, !next);
+                });
               }}
-              className={fav ? "text-amber-400" : "hover:text-[var(--brand-2)]"}
+              className={`rounded-lg p-1.5 text-2xl leading-none transition-colors ${
+                fav ? "text-amber-400" : "hover:text-[var(--brand-2)]"
+              }`}
             >
               {fav ? "★" : "☆"}
             </button>
@@ -129,7 +138,7 @@ export function ProjectCard({
                   e.stopPropagation();
                   onDelete(project.id);
                 }}
-                className="hover:text-red-500"
+                className="rounded-lg p-1.5 text-lg leading-none transition-colors hover:text-red-500"
               >
                 🗑
               </button>
