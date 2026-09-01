@@ -32,7 +32,10 @@ COPY --from=builder /app/package.json /app/package.json
 COPY --from=builder /app/apps/web/package.json ./package.json
 COPY --from=builder /app/apps/web/next.config.mjs ./next.config.mjs
 COPY --from=builder /app/apps/web/.next ./.next
-# public/ is optional — copy if present (kept out of the image otherwise)
+# public/ must be copied explicitly: `npm run start` serves it from the app dir, and
+# without it every static asset 404s in the container — the Tarento logo in the
+# footer went missing on the ivolve deploy for exactly this reason.
+COPY --from=builder /app/apps/web/public ./public
 
 EXPOSE 3000
 CMD ["npm", "run", "start"]
