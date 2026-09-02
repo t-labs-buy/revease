@@ -48,7 +48,7 @@ def _missing(what: str) -> HTTPException:
 
 def owned_project(db: Session, user: User, project_id: str) -> Project:
     project = db.get(Project, project_id)
-    if project is None or project.user_id != user.id:
+    if project is None or (project.user_id != user.id and not user.is_admin):
         raise _missing("project")
     return project
 
@@ -56,7 +56,7 @@ def owned_project(db: Session, user: User, project_id: str) -> Project:
 def owned_row(db: Session, user: User, model: type[_T], row_id: str, what: str) -> _T:
     """Fetch a directly-owned row (Skill / KbArticle / BrandPackage)."""
     row = db.get(model, row_id)
-    if row is None or row.user_id != user.id:
+    if row is None or (row.user_id != user.id and not user.is_admin):
         raise _missing(what)
     return row
 
@@ -96,9 +96,16 @@ def owned_render_job(db: Session, user: User, job_id: str) -> RenderJob:
     return job
 
 
-def project_ids_for(db: Session, user: User) -> list[str]:
-    """Every project id in this user's space — for scoping list queries."""
-    return list(db.scalars(select(Project.id).where(Project.user_id == user.id)))
+def project_ids_for(db: Session, user: User, *, all_spaces: bool = False) -> list[str]:
+    """Every project id in this user's space — for scoping list queries.
+
+    `all_spaces=True` widens to every user's projects, but only for admins;
+    for regular users it is silently ignored, so callers can pass the client's
+    requested scope straight through."""
+    q = select(Project.id)
+    if not (all_spaces and user.is_admin):
+        q = q.where(Project.user_id == user.id)
+    return list(db.scalars(q))
 
 
 # --------------------------------------------------------------------------- #

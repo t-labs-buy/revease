@@ -11,6 +11,7 @@ export interface AuthUser {
   id: string;
   email: string;
   name: string;
+  role?: "user" | "admin" | null; // absent/null means "user"
   created_at: string;
 }
 

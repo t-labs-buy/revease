@@ -2,10 +2,11 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { deleteProject, listProjects, listSessions, type Project, type Session } from "@/lib/api";
+import { deleteProject, listProjects, listSessions, type ListScope, type Project, type Session } from "@/lib/api";
 import { ProjectCard } from "@/components/ProjectCard";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { EmptyState } from "@/components/ui";
+import { ScopeToggle } from "@/components/ScopeToggle";
 
 type Filter = "all" | "starred" | "ready" | "processing";
 const FILTERS: { key: Filter; label: string }[] = [
@@ -21,6 +22,8 @@ export default function LibraryPage() {
   const [error, setError] = useState<string | null>(null);
   const [q, setQ] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
+  // Admins can widen from their own space to every user's ("All projects").
+  const [scope, setScope] = useState<ListScope>("mine");
 
   // remove: single (🗑 on a card) and multi-select mode
   const [selectMode, setSelectMode] = useState(false);
@@ -55,14 +58,14 @@ export default function LibraryPage() {
   }
 
   useEffect(() => {
-    Promise.all([listSessions(), listProjects()])
+    Promise.all([listSessions(undefined, scope), listProjects(scope)])
       .then(([s, ps]) => {
         setSessions(s);
         setProjects(ps); // API sorts starred first
         setError(null);
       })
       .catch((e) => setError(String(e)));
-  }, []);
+  }, [scope]);
 
   const latestStatus = (pid: string) =>
     sessions
@@ -146,6 +149,8 @@ export default function LibraryPage() {
             className="input rounded-full pl-9"
           />
         </div>
+        {/* admin-only: widen from own space to every user's */}
+        <ScopeToggle scope={scope} onChange={setScope} mineLabel="My projects" allLabel="All projects" />
         <div className="flex items-center gap-1.5">
           {FILTERS.map((f) => (
             <button

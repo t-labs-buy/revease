@@ -37,6 +37,10 @@ class User(Base):
     email: Mapped[str] = mapped_column(String, unique=True, index=True, nullable=False)
     name: Mapped[str] = mapped_column(String, default="")
     password_hash: Mapped[str] = mapped_column(String, nullable=False)
+    # "user" | "admin". Admins can see every user's space. Nullable at the DB
+    # level only because SQLite's ADD COLUMN backfill needs it (see module
+    # docstring); treat NULL as "user" via `is_admin`.
+    role: Mapped[str | None] = mapped_column(String, default="user", server_default="user")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     # Present on every other mutable row here, and required by `users` tables
     # created before this model existed (that column is NOT NULL with no default,
@@ -44,6 +48,10 @@ class User(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now
     )
+
+    @property
+    def is_admin(self) -> bool:
+        return (self.role or "user") == "admin"
 
 
 class Project(Base):

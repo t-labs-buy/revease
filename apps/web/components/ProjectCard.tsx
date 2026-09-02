@@ -110,7 +110,14 @@ export function ProjectCard({
         </div>
         <span className={`badge mt-2.5 px-2.5 py-0.5 ring-1 ring-inset ${st.cls}`}>{st.label}</span>
         <div className="mt-3.5 flex items-center justify-between border-t border-[var(--border)] pt-3 text-sm text-[var(--text-3)]">
-          <span className="inline-flex items-center gap-1.5">🗂 Project</span>
+          {/* owner label — present only for admins browsing all spaces */}
+          {project.owner_email ? (
+            <span className="inline-flex min-w-0 items-center gap-1.5" title={project.owner_email}>
+              👤 <span className="truncate">{project.owner_name || project.owner_email}</span>
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1.5">🗂 Project</span>
+          )}
           <span className="flex items-center gap-1">
             <button
               title={fav ? "Unstar" : "Star — pinned first"}

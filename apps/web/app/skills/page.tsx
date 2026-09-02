@@ -3,9 +3,10 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { createSkill, deleteSkill, generateSkill, listSkills, type Skill } from "@/lib/api";
+import { createSkill, deleteSkill, generateSkill, listSkills, type ListScope, type Skill } from "@/lib/api";
 import { markdownToSkill } from "@/lib/skillmd";
 import { Spinner } from "@/components/ui";
+import { ScopeToggle } from "@/components/ScopeToggle";
 
 /* One-click starting points (like installing a ready-made skill). */
 const TEMPLATES: {
@@ -91,6 +92,7 @@ export default function SkillsPage() {
   const [skills, setSkills] = useState<Skill[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [scope, setScope] = useState<ListScope>("mine");
 
   const [aiOpen, setAiOpen] = useState(false);
   const [aiPrompt, setAiPrompt] = useState("");
@@ -110,10 +112,11 @@ export default function SkillsPage() {
     }
   }
 
-  const load = () => listSkills().then(setSkills).catch((e) => setError(String(e)));
+  const load = () => listSkills(scope).then(setSkills).catch((e) => setError(String(e)));
   useEffect(() => {
     load();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scope]);
 
   async function fromTemplate(t: (typeof TEMPLATES)[number]) {
     setBusy(t.name);
@@ -165,6 +168,7 @@ export default function SkillsPage() {
             rest.
           </p>
         </div>
+        <ScopeToggle scope={scope} onChange={setScope} mineLabel="My skills" allLabel="All skills" />
         <button
           onClick={() => importRef.current?.click()}
           disabled={busy === "import"}

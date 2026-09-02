@@ -10,7 +10,14 @@ export interface Project {
   created_at: string;
   has_document?: boolean; // a step-by-step doc has actually been generated
   capture_count?: number; // how many recordings/uploads this project holds
+  // Set only for admins browsing all spaces, and only on other users' projects.
+  owner_email?: string | null;
+  owner_name?: string | null;
 }
+
+/** "mine" (default) = the caller's own space; "all" = every user's space.
+ *  The API honours "all" only for admins and silently ignores it otherwise. */
+export type ListScope = "mine" | "all";
 
 export async function setKeepRanges(sessionId: string, ranges: number[][]): Promise<void> {
   const r = await apiFetch(`/sessions/${sessionId}/keep-ranges`, {
@@ -32,8 +39,8 @@ export async function toggleFavorite(projectId: string): Promise<Project> {
   return r.json();
 }
 
-export async function listProjects(): Promise<Project[]> {
-  const r = await apiFetch(`/projects`, { cache: "no-store" });
+export async function listProjects(scope: ListScope = "mine"): Promise<Project[]> {
+  const r = await apiFetch(`/projects?scope=${scope}`, { cache: "no-store" });
   if (!r.ok) throw new Error(`listProjects failed: ${r.status}`);
   return r.json();
 }
@@ -144,8 +151,8 @@ export async function completeSession(sessionId: string, durationMs?: number): P
   return r.json();
 }
 
-export async function listSessions(projectId?: string): Promise<Session[]> {
-  const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+export async function listSessions(projectId?: string, scope: ListScope = "mine"): Promise<Session[]> {
+  const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : `?scope=${scope}`;
   const r = await apiFetch(`/sessions${qs}`, { cache: "no-store" });
   if (!r.ok) throw new Error(`listSessions failed: ${r.status}`);
   return r.json();
@@ -555,8 +562,8 @@ export interface Skill {
   target: "video" | "doc";
   settings: Record<string, unknown>;
 }
-export async function listSkills(): Promise<Skill[]> {
-  const r = await apiFetch(`/skills`, { cache: "no-store" });
+export async function listSkills(scope: ListScope = "mine"): Promise<Skill[]> {
+  const r = await apiFetch(`/skills?scope=${scope}`, { cache: "no-store" });
   if (!r.ok) throw new Error(`listSkills failed: ${r.status}`);
   return r.json();
 }
@@ -619,8 +626,8 @@ export interface Article {
   tags: string[];
   project_id?: string | null;
 }
-export async function listArticles(): Promise<Article[]> {
-  const r = await apiFetch(`/kb`, { cache: "no-store" });
+export async function listArticles(scope: ListScope = "mine"): Promise<Article[]> {
+  const r = await apiFetch(`/kb?scope=${scope}`, { cache: "no-store" });
   if (!r.ok) throw new Error(`listArticles failed: ${r.status}`);
   return r.json();
 }
@@ -648,8 +655,8 @@ export interface BrandPackage {
   name: string;
   settings: Record<string, unknown>;
 }
-export async function listPackages(): Promise<BrandPackage[]> {
-  const r = await apiFetch(`/packages`, { cache: "no-store" });
+export async function listPackages(scope: ListScope = "mine"): Promise<BrandPackage[]> {
+  const r = await apiFetch(`/packages?scope=${scope}`, { cache: "no-store" });
   if (!r.ok) throw new Error(`listPackages failed: ${r.status}`);
   return r.json();
 }
@@ -879,5 +886,34 @@ export async function renderVideo(projectId: string): Promise<RenderJob> {
 export async function getRender(jobId: string): Promise<RenderJob> {
   const r = await apiFetch(`/render/${jobId}`, { cache: "no-store" });
   if (!r.ok) throw new Error(`getRender failed: ${r.status}`);
+  return r.json();
+}
+
+// ---- admin (all routes 403 for non-admins) ----
+export interface AdminUser {
+  id: string;
+  email: string;
+  name: string;
+  role: "user" | "admin" | null;
+  created_at: string;
+  project_count: number;
+}
+
+export async function listUsers(): Promise<AdminUser[]> {
+  const r = await apiFetch(`/admin/users`, { cache: "no-store" });
+  if (!r.ok) throw new Error(`listUsers failed: ${r.status}`);
+  return r.json();
+}
+
+export async function setUserRole(userId: string, role: "user" | "admin"): Promise<AdminUser> {
+  const r = await apiFetch(`/admin/users/${userId}/role`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ role }),
+  });
+  if (!r.ok) {
+    const detail = await r.json().then((d) => d?.detail).catch(() => null);
+    throw new Error(typeof detail === "string" ? detail : `setUserRole failed: ${r.status}`);
+  }
   return r.json();
 }

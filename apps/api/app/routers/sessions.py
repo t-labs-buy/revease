@@ -135,16 +135,19 @@ def list_sessions(
     user: CurrentUser,
     project_id: str | None = Query(default=None),
     limit: int = Query(default=100, le=500),
+    scope: str = Query(default="mine", pattern="^(mine|all)$"),
     db: Session = Depends(get_session),
 ) -> list[SessionOut]:
     """List captures for one project, or every capture in the caller's space
-    (Library) when project_id is omitted."""
+    (Library) when project_id is omitted. `scope=all` widens to every user's
+    captures for admins (ignored for regular users)."""
     q = select(CaptureSession).order_by(CaptureSession.created_at.desc()).limit(limit)
     if project_id:
         owned_project(db, user, project_id)
         q = q.where(CaptureSession.project_id == project_id)
     else:
-        q = q.where(CaptureSession.project_id.in_(project_ids_for(db, user)))
+        ids = project_ids_for(db, user, all_spaces=scope == "all")
+        q = q.where(CaptureSession.project_id.in_(ids))
     return [_session_out(db, s) for s in db.scalars(q)]
 
 

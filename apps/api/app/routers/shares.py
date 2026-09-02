@@ -6,7 +6,7 @@ authorization model, and that is the point of a share link."""
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -74,12 +74,16 @@ def list_shares(
 
 
 @router.get("/shares", response_model=list[ShareOut])
-def list_all_shares(user: CurrentUser, db: Session = Depends(get_session)) -> list[ShareOut]:
+def list_all_shares(
+    user: CurrentUser,
+    scope: str = Query(default="mine", pattern="^(mine|all)$"),
+    db: Session = Depends(get_session),
+) -> list[ShareOut]:
     rows = db.scalars(
         select(Share)
         .where(
             Share.revoked == False,  # noqa: E712
-            Share.project_id.in_(project_ids_for(db, user)),
+            Share.project_id.in_(project_ids_for(db, user, all_spaces=scope == "all")),
         )
         .order_by(Share.created_at.desc())
     )

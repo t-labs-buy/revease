@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { createArticle, deleteArticle, listArticles, type Article } from "@/lib/api";
+import { createArticle, deleteArticle, listArticles, type Article, type ListScope } from "@/lib/api";
+import { ScopeToggle } from "@/components/ScopeToggle";
 
 /** Tiny markdown renderer: #/## headings, - bullets, **bold**, paragraphs. */
 function Markdown({ text }: { text: string }) {
@@ -61,17 +62,20 @@ export default function KnowledgeBasePage() {
   const [summary, setSummary] = useState("");
   const [tags, setTags] = useState("");
   const [body, setBody] = useState("");
+  const [scope, setScope] = useState<ListScope>("mine");
 
   const load = () =>
-    listArticles()
+    listArticles(scope)
       .then((a) => {
         setArticles(a);
         setSel((s) => s ?? a[0]?.id ?? null);
       })
       .catch((e) => setError(String(e)));
   useEffect(() => {
+    setSel(null); // the previous selection may not exist in the new scope
     load();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scope]);
 
   const filtered = useMemo(() => {
     const t = q.trim().toLowerCase();
@@ -115,6 +119,7 @@ export default function KnowledgeBasePage() {
             Guides and docs — searchable and shareable in one place.
           </p>
         </div>
+        <ScopeToggle scope={scope} onChange={setScope} mineLabel="My articles" allLabel="All articles" />
         <button onClick={() => setCreating((v) => !v)} className="btn btn-primary">
           {creating ? "Cancel" : "+ New article"}
         </button>
