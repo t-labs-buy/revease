@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -44,11 +44,15 @@ def _out(a: KbArticle) -> ArticleOut:
 
 
 @router.get("", response_model=list[ArticleOut])
-def list_articles(user: CurrentUser, db: Session = Depends(get_session)) -> list[ArticleOut]:
-    rows = db.scalars(
-        select(KbArticle).where(KbArticle.user_id == user.id).order_by(KbArticle.created_at.desc())
-    )
-    return [_out(a) for a in rows]
+def list_articles(
+    user: CurrentUser,
+    scope: str = Query(default="mine", pattern="^(mine|all)$"),
+    db: Session = Depends(get_session),
+) -> list[ArticleOut]:
+    q = select(KbArticle).order_by(KbArticle.created_at.desc())
+    if not (scope == "all" and user.is_admin):
+        q = q.where(KbArticle.user_id == user.id)
+    return [_out(a) for a in db.scalars(q)]
 
 
 @router.get("/{article_id}", response_model=ArticleOut)

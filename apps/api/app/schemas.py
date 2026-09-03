@@ -31,6 +31,7 @@ class UserOut(BaseModel):
     id: str
     email: str
     name: str
+    role: str | None = "user"  # "user" | "admin" (NULL rows predate the column)
     created_at: datetime
 
 
@@ -56,6 +57,10 @@ class ProjectOut(BaseModel):
     # the UI can label it truthfully instead of guessing from capture counts.
     has_document: bool = False
     capture_count: int = 0
+    # Populated only for admins browsing across spaces, so the UI can label
+    # whose project each card is.
+    owner_email: str | None = None
+    owner_name: str | None = None
 
 
 class HealthOut(BaseModel):

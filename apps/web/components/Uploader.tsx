@@ -7,8 +7,10 @@ const ACCEPT = ["video/mp4", "video/webm"];
 
 /** Read a video file's real length before uploading. The recorder knows how long
  *  it ran, but an upload has no such context — without this the capture is stored
- *  with duration 0 and shows no length anywhere in the UI. */
-function readDurationMs(file: File): Promise<number | undefined> {
+ *  with duration 0 and shows no length anywhere in the UI. Never rejects: on
+ *  unreadable metadata it resolves undefined and the upload proceeds without a
+ *  duration. (Also used by CaptureModal's upload path.) */
+export function readDurationMs(file: File): Promise<number | undefined> {
   return new Promise((resolve) => {
     const url = URL.createObjectURL(file);
     const probe = document.createElement("video");

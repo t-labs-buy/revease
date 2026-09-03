@@ -12,6 +12,7 @@ import {
 } from "@/lib/api";
 import { IconDoc, IconPlus, IconUpload, IconVideo } from "@/components/icons";
 import { Spinner } from "@/components/ui";
+import { readDurationMs } from "@/components/Uploader";
 
 export type CaptureIntent = "record" | "upload" | "video" | "doc";
 
@@ -237,10 +238,11 @@ export function CaptureModal({
     setError(null);
     try {
       const ext = /\.mov$/i.test(file.name) ? "mov" : "mp4";
+      const durationMs = await readDurationMs(file);
       const project = await createProject(prettyName(file.name));
       const session = await createSession(project.id, "upload");
       await registerAndUpload(session.id, "raw_video", ext, file);
-      await completeSession(session.id);
+      await completeSession(session.id, durationMs);
       goToSession(project.id, session.id);
     } catch (e) {
       setError(String(e));

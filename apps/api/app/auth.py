@@ -116,5 +116,16 @@ def get_current_user(
 CurrentUser = Annotated[User, Depends(get_current_user)]
 
 
+def require_admin(user: CurrentUser) -> User:
+    """Gate for admin-only routes. 403 (not 404) — the routes' existence is not
+    a secret, only their data is."""
+    if not user.is_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="admin access required")
+    return user
+
+
+AdminUser = Annotated[User, Depends(require_admin)]
+
+
 def get_user_by_email(db: Session, email: str) -> User | None:
     return db.scalar(select(User).where(User.email == normalize_email(email)))

@@ -2,10 +2,11 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { deleteProject, listProjects, listSessions, type Project, type Session } from "@/lib/api";
+import { deleteProject, listProjects, listSessions, type ListScope, type Project, type Session } from "@/lib/api";
 import { ProjectCard } from "@/components/ProjectCard";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { EmptyState } from "@/components/ui";
+import { ScopeToggle } from "@/components/ScopeToggle";
 
 type Filter = "all" | "starred" | "ready" | "processing";
 const FILTERS: { key: Filter; label: string }[] = [
@@ -21,6 +22,8 @@ export default function LibraryPage() {
   const [error, setError] = useState<string | null>(null);
   const [q, setQ] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
+  // Admins can widen from their own space to every user's ("All projects").
+  const [scope, setScope] = useState<ListScope>("mine");
 
   // remove: single (🗑 on a card) and multi-select mode
   const [selectMode, setSelectMode] = useState(false);
@@ -55,14 +58,14 @@ export default function LibraryPage() {
   }
 
   useEffect(() => {
-    Promise.all([listSessions(), listProjects()])
+    Promise.all([listSessions(undefined, scope), listProjects(scope)])
       .then(([s, ps]) => {
         setSessions(s);
         setProjects(ps); // API sorts starred first
         setError(null);
       })
       .catch((e) => setError(String(e)));
-  }, []);
+  }, [scope]);
 
   const latestStatus = (pid: string) =>
     sessions
@@ -83,7 +86,7 @@ export default function LibraryPage() {
   }, [projects, sessions, q, filter]);
 
   return (
-    <main className="mx-auto max-w-6xl px-8 py-10">
+    <main className="mx-auto max-w-[1600px] px-8 py-10">
       {/* header */}
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
@@ -146,6 +149,8 @@ export default function LibraryPage() {
             className="input rounded-full pl-9"
           />
         </div>
+        {/* admin-only: widen from own space to every user's */}
+        <ScopeToggle scope={scope} onChange={setScope} mineLabel="My projects" allLabel="All projects" />
         <div className="flex items-center gap-1.5">
           {FILTERS.map((f) => (
             <button
@@ -182,7 +187,7 @@ export default function LibraryPage() {
           />
         </div>
       ) : (
-        <div className="mt-8 grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+        <div className="mt-8 grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
           {filtered.map((p, i) => (
             <ProjectCard
               key={p.id}
@@ -190,6 +195,9 @@ export default function LibraryPage() {
               sessions={sessions}
               index={i}
               onDelete={(pid) => setPendingIds([pid])}
+              onFavoriteChange={(pid, favorite) =>
+                setProjects((ps) => ps.map((p) => (p.id === pid ? { ...p, favorite: favorite ? 1 : 0 } : p)))
+              }
               selectable={selectMode}
               selected={selected.has(p.id)}
               onToggleSelect={toggleSelect}

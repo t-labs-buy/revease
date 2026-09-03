@@ -13,6 +13,7 @@ from app.db import get_session
 from app.models import CaptureSession, Event, Job, MediaAsset
 from app.ownership import owned_project, owned_session, project_ids_for
 from app.queue import enqueue_understanding
+from app.usage import record_event
 from app.schemas import (
     AssetRegister,
     EventsIngest,
@@ -120,11 +121,18 @@ def complete_session(
         select(func.count()).select_from(Event).where(Event.session_id == sess.id)
     )
     sess.telemetry = "present" if (event_count or 0) > 0 else "absent"
+    already_captured = sess.status == "captured"
     sess.status = "captured"
     if payload.duration_ms is not None:
         sess.duration_ms = payload.duration_ms
     db.commit()
     db.refresh(sess)
+    if not already_captured:  # count each capture once, even if complete is re-sent
+        record_event(
+            "upload" if sess.source_type == "upload" else "recording",
+            user.id,
+            sess.duration_ms,
+        )
     # Kick off the understanding pipeline (session -> Workflow Graph).
     enqueue_understanding(sess.id)
     return sess
@@ -135,16 +143,19 @@ def list_sessions(
     user: CurrentUser,
     project_id: str | None = Query(default=None),
     limit: int = Query(default=100, le=500),
+    scope: str = Query(default="mine", pattern="^(mine|all)$"),
     db: Session = Depends(get_session),
 ) -> list[SessionOut]:
     """List captures for one project, or every capture in the caller's space
-    (Library) when project_id is omitted."""
+    (Library) when project_id is omitted. `scope=all` widens to every user's
+    captures for admins (ignored for regular users)."""
     q = select(CaptureSession).order_by(CaptureSession.created_at.desc()).limit(limit)
     if project_id:
         owned_project(db, user, project_id)
         q = q.where(CaptureSession.project_id == project_id)
     else:
-        q = q.where(CaptureSession.project_id.in_(project_ids_for(db, user)))
+        ids = project_ids_for(db, user, all_spaces=scope == "all")
+        q = q.where(CaptureSession.project_id.in_(ids))
     return [_session_out(db, s) for s in db.scalars(q)]
 
 

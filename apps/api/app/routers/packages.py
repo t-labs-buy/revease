@@ -3,7 +3,7 @@ skills can reference to brand generated output."""
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -32,13 +32,15 @@ def _out(p: BrandPackage) -> PackageOut:
 
 
 @router.get("", response_model=list[PackageOut])
-def list_packages(user: CurrentUser, db: Session = Depends(get_session)) -> list[PackageOut]:
-    rows = db.scalars(
-        select(BrandPackage)
-        .where(BrandPackage.user_id == user.id)
-        .order_by(BrandPackage.created_at.desc())
-    )
-    return [_out(p) for p in rows]
+def list_packages(
+    user: CurrentUser,
+    scope: str = Query(default="mine", pattern="^(mine|all)$"),
+    db: Session = Depends(get_session),
+) -> list[PackageOut]:
+    q = select(BrandPackage).order_by(BrandPackage.created_at.desc())
+    if not (scope == "all" and user.is_admin):
+        q = q.where(BrandPackage.user_id == user.id)
+    return [_out(p) for p in db.scalars(q)]
 
 
 @router.get("/{package_id}", response_model=PackageOut)

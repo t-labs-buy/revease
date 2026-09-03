@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import get_settings
 from app.db import init_db
 from app.routers import (
+    admin,
     auth,
     auto_record,
     autoedit,
@@ -49,6 +50,7 @@ app.add_middleware(
 )
 
 app.include_router(auth.router)
+app.include_router(admin.router)
 app.include_router(projects.router)
 app.include_router(sessions.router)
 app.include_router(auto_record.router)

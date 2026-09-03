@@ -3,7 +3,7 @@ shape how AI produces a Video or Doc."""
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -43,11 +43,15 @@ def _out(s: Skill) -> SkillOut:
 
 
 @router.get("", response_model=list[SkillOut])
-def list_skills(user: CurrentUser, db: Session = Depends(get_session)) -> list[SkillOut]:
-    rows = db.scalars(
-        select(Skill).where(Skill.user_id == user.id).order_by(Skill.created_at.desc())
-    )
-    return [_out(s) for s in rows]
+def list_skills(
+    user: CurrentUser,
+    scope: str = Query(default="mine", pattern="^(mine|all)$"),
+    db: Session = Depends(get_session),
+) -> list[SkillOut]:
+    q = select(Skill).order_by(Skill.created_at.desc())
+    if not (scope == "all" and user.is_admin):
+        q = q.where(Skill.user_id == user.id)
+    return [_out(s) for s in db.scalars(q)]
 
 
 @router.post("/generate", response_model=SkillOut)

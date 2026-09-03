@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { listArticles, listProjects, listSessions, mediaUrl, type Project, type Session } from "@/lib/api";
+import { fmtDateIST } from "@/lib/time";
 import { createPortal } from "react-dom";
 import { CaptureModal, type CaptureIntent } from "@/components/CaptureModal";
 import { EmptyState } from "@/components/ui";
@@ -45,7 +46,10 @@ const mmss = (ms: number) =>
 
 const relTime = (iso?: string) => {
   if (!iso) return "recently";
-  const d = new Date(iso).getTime();
+  // API timestamps are UTC but carry no zone marker (SQLite drops it) — without
+  // the "Z" the browser reads them as local time and everything looks ~5.5h old.
+  const utc = /[zZ]|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : iso + "Z";
+  const d = new Date(utc).getTime();
   if (isNaN(d)) return "recently";
   const s = Math.max(1, Math.floor((Date.now() - d) / 1000));
   if (s < 60) return "just now";
@@ -437,11 +441,7 @@ export default function Home() {
                       </button>
                     </div>
                     <div className="mt-1 text-sm text-[var(--text-2)]">
-                      {new Date(p.created_at).toLocaleDateString(undefined, {
-                        day: "numeric",
-                        month: "short",
-                        year: "numeric",
-                      })}
+                      {fmtDateIST(p.created_at)}
                     </div>
                     <div className="mt-3.5 flex items-center justify-between border-t border-[var(--border)] pt-3">
                       <span

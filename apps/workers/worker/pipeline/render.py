@@ -25,11 +25,12 @@ from sqlalchemy import select
 
 from app.db import SessionLocal
 from app.editspec import effective_script
-from app.models import MediaAsset, RenderJob, VideoProject, WorkflowGraphRow
+from app.usage import record_event
+from app.models import MediaAsset, Project, RenderJob, VideoProject, WorkflowGraphRow
 from app.storage import store
 from worker.pipeline.smoothzoom import apply_zoom
 from worker.pipeline.timeline import StepInput, build_timeline
-from worker.pipeline.tts import _silent_wav, synth_step
+from worker.pipeline.tts import _probe_duration_ms, _silent_wav, synth_step
 
 log = logging.getLogger("refract.pipeline.render")
 
@@ -784,6 +785,12 @@ def run_render(render_job_id: str) -> dict:
         job.stats_json = stats
         job.status = "done"
         db.commit()
+        project = db.get(Project, vp.project_id)
+        record_event(
+            "video",
+            project.user_id if project else None,
+            _probe_duration_ms(out_path) or None,
+        )
         log.info("render done: %s", stats)
         return {"render_job_id": render_job_id, **stats}
     except Exception as e:

@@ -7,9 +7,11 @@ import logging
 from sqlalchemy import select
 
 from app.db import SessionLocal
-from app.models import AutoEditJob, CaptureSession, MediaAsset, Transcript
+from app.models import AutoEditJob, CaptureSession, MediaAsset, Project, Transcript
 from app.storage import store
+from app.usage import record_event
 from worker.pipeline import autoedit
+from worker.pipeline.tts import _probe_duration_ms
 
 log = logging.getLogger("refract.pipeline.autoedit_job")
 
@@ -75,6 +77,8 @@ def run_autoedit(job_id: str) -> dict:
         job.stats_json = stats
         job.status = "done"
         db.commit()
+        project = db.get(Project, job.project_id)
+        record_event("video", project.user_id if project else None, _probe_duration_ms(out_path) or None)
         log.info("autoedit done: %s", stats)
         return {"job_id": job_id, **stats}
     except Exception as e:

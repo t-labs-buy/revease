@@ -15,7 +15,7 @@ function initials(name: string, email: string): string {
 }
 
 export function UserMenu() {
-  const { user, logout } = useAuth();
+  const { user, isAdmin, logout } = useAuth();
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
@@ -66,6 +66,11 @@ export function UserMenu() {
               <span className="block truncate text-[11px] leading-tight text-[var(--text-3)]">
                 {user.email}
               </span>
+              {isAdmin && (
+                <span className="mt-0.5 inline-block rounded-md bg-[#6d5dfb]/15 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide text-[var(--brand-2)]">
+                  Admin
+                </span>
+              )}
             </span>
           </div>
 
@@ -78,6 +83,16 @@ export function UserMenu() {
             >
               Account settings
             </Link>
+            {isAdmin && (
+              <Link
+                href="/admin/users"
+                role="menuitem"
+                onClick={() => setOpen(false)}
+                className="block rounded-xl px-3 py-2 text-[13px] text-[var(--text-2)] transition-colors hover:bg-[var(--hover)] hover:text-[var(--text)]"
+              >
+                Manage users
+              </Link>
+            )}
             <button
               role="menuitem"
               onClick={() => {

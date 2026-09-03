@@ -17,6 +17,8 @@ import type { AuthUser } from "@/lib/auth";
 
 interface AuthState {
   user: AuthUser | null;
+  /** True when the signed-in account has the admin role (sees every space). */
+  isAdmin: boolean;
   /** True until the stored token has been resolved — routes must wait it out
    *  rather than treating "no user yet" as "signed out". */
   loading: boolean;
@@ -83,7 +85,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [router]);
 
   const value = useMemo(
-    () => ({ user, loading, login, register, logout }),
+    () => ({ user, isAdmin: user?.role === "admin", loading, login, register, logout }),
     [user, loading, login, register, logout],
   );
 

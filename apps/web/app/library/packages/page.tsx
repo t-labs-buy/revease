@@ -3,18 +3,21 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { createPackage, deletePackage, listPackages, mediaUrl, type BrandPackage } from "@/lib/api";
+import { createPackage, deletePackage, listPackages, mediaUrl, type BrandPackage, type ListScope } from "@/lib/api";
+import { ScopeToggle } from "@/components/ScopeToggle";
 
 export default function PackagesPage() {
   const router = useRouter();
   const [pkgs, setPkgs] = useState<BrandPackage[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [scope, setScope] = useState<ListScope>("mine");
 
-  const load = () => listPackages().then(setPkgs).catch((e) => setError(String(e)));
+  const load = () => listPackages(scope).then(setPkgs).catch((e) => setError(String(e)));
   useEffect(() => {
     load();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scope]);
 
   async function create() {
     setCreating(true);
@@ -48,6 +51,7 @@ export default function PackagesPage() {
             brand generated output.
           </p>
         </div>
+        <ScopeToggle scope={scope} onChange={setScope} mineLabel="My packages" allLabel="All packages" />
         <button onClick={create} disabled={creating} className="btn btn-primary">
           {creating ? "Creating…" : "+ New package"}
         </button>

@@ -69,6 +69,17 @@ class Settings(BaseSettings):
     auth_secret_key: str = ""
     auth_token_ttl_hours: int = 24 * 14  # how long a login lasts
     auth_min_password_length: int = 8
+    # Comma-separated emails promoted to the admin role on register/login — the
+    # bootstrap admins. Further admins can then be promoted from the Admin UI.
+    admin_emails: str = ""
+
+    def admin_email_set(self) -> set[str]:
+        return {e.strip().lower() for e in self.admin_emails.split(",") if e.strip()}
+
+    # --- Usage reporting ---
+    # Static key an external app sends as `X-Report-Key` to pull the usage
+    # report (GET /admin/usage/report). Empty disables the endpoint.
+    usage_report_key: str = ""
 
     def resolved_database_url(self) -> str:
         if self.database_url:
