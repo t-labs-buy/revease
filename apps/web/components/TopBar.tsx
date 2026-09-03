@@ -20,10 +20,12 @@ import { useAuth } from "@/contexts/AuthContext";
 
 // `soon` renders the tab dimmed and inert with a "Soon" pill. The page behind it
 // still exists and works — flip the flag off to bring it back.
+// `adminOnly` shows the tab to admins only.
 const NAV = [
   { label: "Home", href: "/" },
   { label: "Library", href: "/library" },
   { label: "Knowledge Base", href: "/knowledge-base", soon: true },
+  { label: "Usage", href: "/admin/usage", adminOnly: true },
 ];
 
 // The public share viewer and the auth screens get no app chrome.
@@ -53,7 +55,7 @@ const isActive = (pathname: string, href: string) =>
 
 export function TopBar() {
   const pathname = usePathname();
-  const { user } = useAuth();
+  const { user, isAdmin } = useAuth();
   const context = useContext(TopBarContext);
 
   if (HIDE_ON.some((re) => re.test(pathname))) return null;
@@ -71,7 +73,7 @@ export function TopBar() {
       </Link>
 
       <nav className="hidden items-center gap-1 md:flex">
-        {NAV.map((n) =>
+        {NAV.filter((n) => !n.adminOnly || isAdmin).map((n) =>
           n.soon ? (
             <span
               key={n.href}

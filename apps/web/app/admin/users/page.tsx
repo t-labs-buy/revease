@@ -7,13 +7,9 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { listUsers, setUserRole, type AdminUser } from "@/lib/api";
 import { useAuth } from "@/contexts/AuthContext";
+import { fmtDateIST } from "@/lib/time";
 
-const fmtDate = (iso: string) => {
-  const d = new Date(iso);
-  return isNaN(d.getTime())
-    ? "—"
-    : d.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
-};
+const fmtDate = fmtDateIST;
 
 export default function AdminUsersPage() {
   const { user: me, isAdmin, loading } = useAuth();

@@ -11,7 +11,7 @@ auth therefore read as ownerless and belong to nobody; `app.purge` removes them.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text
@@ -69,6 +69,30 @@ class Project(Base):
     graphs: Mapped[list["WorkflowGraphRow"]] = relationship(
         back_populates="project", cascade="all, delete-orphan"
     )
+
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _now_ist() -> datetime:
+    """Naive IST wall-clock time — the storage convention for usage_events only
+    (everything else in this schema stores UTC)."""
+    return datetime.now(IST).replace(tzinfo=None)
+
+
+class UsageEvent(Base):
+    """Usage tracking for admin reporting: one row per event (who did what, when).
+    `user_id` is a plain string on purpose (no FK) and rows are never deleted —
+    they are history, so totals stay correct after projects or accounts go away.
+    `created_at` is stored as naive IST (UTC+05:30) — reports read it verbatim."""
+
+    __tablename__ = "usage_events"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    kind: Mapped[str] = mapped_column(String, nullable=False, index=True)  # "video" | "recording" | "upload"
+    user_id: Mapped[str | None] = mapped_column(String, index=True, nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)  # length of the video/recording
+    created_at: Mapped[datetime] = mapped_column(DateTime(), default=_now_ist, index=True)
 
 
 class CaptureSession(Base):

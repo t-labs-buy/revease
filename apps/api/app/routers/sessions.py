@@ -13,6 +13,7 @@ from app.db import get_session
 from app.models import CaptureSession, Event, Job, MediaAsset
 from app.ownership import owned_project, owned_session, project_ids_for
 from app.queue import enqueue_understanding
+from app.usage import record_event
 from app.schemas import (
     AssetRegister,
     EventsIngest,
@@ -120,11 +121,18 @@ def complete_session(
         select(func.count()).select_from(Event).where(Event.session_id == sess.id)
     )
     sess.telemetry = "present" if (event_count or 0) > 0 else "absent"
+    already_captured = sess.status == "captured"
     sess.status = "captured"
     if payload.duration_ms is not None:
         sess.duration_ms = payload.duration_ms
     db.commit()
     db.refresh(sess)
+    if not already_captured:  # count each capture once, even if complete is re-sent
+        record_event(
+            "upload" if sess.source_type == "upload" else "recording",
+            user.id,
+            sess.duration_ms,
+        )
     # Kick off the understanding pipeline (session -> Workflow Graph).
     enqueue_understanding(sess.id)
     return sess

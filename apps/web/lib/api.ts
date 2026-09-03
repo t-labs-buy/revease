@@ -905,6 +905,56 @@ export async function listUsers(): Promise<AdminUser[]> {
   return r.json();
 }
 
+export interface UsageSummary {
+  videos_generated: number;
+  screens_recorded: number;
+  videos_uploaded: number;
+  video_duration_ms: number; // combined length of the generated videos in range
+  recording_duration_ms: number; // combined length of the screen recordings in range
+  upload_duration_ms: number; // combined length of the uploaded videos in range
+  from_date: string | null;
+  to_date: string | null;
+}
+
+/** Usage totals, optionally limited to an inclusive from/to date range (YYYY-MM-DD). */
+export async function getUsageSummary(from?: string, to?: string): Promise<UsageSummary> {
+  const params = new URLSearchParams();
+  if (from) params.set("from", from);
+  if (to) params.set("to", to);
+  const qs = params.toString();
+  const r = await apiFetch(`/admin/usage${qs ? `?${qs}` : ""}`, { cache: "no-store" });
+  if (!r.ok) throw new Error(`getUsageSummary failed: ${r.status}`);
+  return r.json();
+}
+
+export interface UsageEventRow {
+  kind: "video" | "recording" | "upload";
+  user_email: string | null;
+  user_name: string | null;
+  duration_ms: number | null;
+  created_at: string;
+}
+
+export interface UsageEventsPage {
+  total: number; // events matching the range, across all pages
+  events: UsageEventRow[];
+}
+
+/** One page of per-event usage detail (who did what, when), newest first. */
+export async function listUsageEvents(
+  from?: string,
+  to?: string,
+  limit = 25,
+  offset = 0,
+): Promise<UsageEventsPage> {
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  if (from) params.set("from", from);
+  if (to) params.set("to", to);
+  const r = await apiFetch(`/admin/usage/events?${params}`, { cache: "no-store" });
+  if (!r.ok) throw new Error(`listUsageEvents failed: ${r.status}`);
+  return r.json();
+}
+
 export async function setUserRole(userId: string, role: "user" | "admin"): Promise<AdminUser> {
   const r = await apiFetch(`/admin/users/${userId}/role`, {
     method: "PATCH",

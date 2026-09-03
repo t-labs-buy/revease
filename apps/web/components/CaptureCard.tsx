@@ -2,6 +2,7 @@ import Link from "next/link";
 import { mediaUrl, type Session } from "@/lib/api";
 import { Badge } from "@/components/ui";
 import { IconPlay } from "@/components/icons";
+import { fmtDateIST } from "@/lib/time";
 
 const SOURCE_ICON: Record<string, string> = { recorder: "●", upload: "↑", extension: "◆" };
 
@@ -61,11 +62,7 @@ export function CaptureCard({
         </h3>
         <div className="mt-1 truncate text-sm text-[var(--text-2)]">
           {projectName ? `${s.source_type} · ` : ""}
-          {new Date(s.created_at).toLocaleDateString(undefined, {
-            day: "numeric",
-            month: "short",
-            year: "numeric",
-          })}
+          {fmtDateIST(s.created_at)}
         </div>
         <div className="mt-3.5 flex items-center justify-between border-t border-[var(--border)] pt-3">
           <span

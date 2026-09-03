@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useState } from "react";
 import { mediaUrl, toggleFavorite, type Project, type Session } from "@/lib/api";
+import { fmtDateIST } from "@/lib/time";
 
 const GRADS = [
   "from-[#6d5dfb] to-[#a855f7]",
@@ -14,13 +15,7 @@ const GRADS = [
 const mmss = (ms: number) =>
   `${String(Math.floor(ms / 60000)).padStart(2, "0")}:${String(Math.floor((ms % 60000) / 1000)).padStart(2, "0")}`;
 
-const fmtDate = (iso?: string) => {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  return isNaN(d.getTime())
-    ? "—"
-    : d.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
-};
+const fmtDate = fmtDateIST;
 
 function statusOf(s?: Session): { label: string; cls: string } {
   if (!s) return { label: "Active", cls: "bg-emerald-500/10 text-emerald-500 ring-emerald-500/20" };
