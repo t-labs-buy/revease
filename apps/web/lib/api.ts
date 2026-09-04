@@ -704,7 +704,16 @@ export interface EditSegment {
   target?: string;
   words: string[];
   removed: number[];
-  zoom: { enabled: boolean; scale: number; cx: number; cy: number; speed?: number; auto?: boolean };
+  zoom: {
+    enabled: boolean;
+    scale: number;
+    cx: number;
+    cy: number;
+    speed?: number;
+    auto?: boolean;
+    start_ms?: number; // optional time window (source ms); when end_ms>start_ms the
+    end_ms?: number; //   zoom only runs during [start_ms, end_ms], else whole scene
+  };
   source_start_ms: number;
   source_end_ms: number;
   screenshot?: string | null;
@@ -735,6 +744,27 @@ export interface CropRegion {
   start_ms?: number; // optional time window: crop applies only within
   end_ms?: number; //   [start_ms, end_ms] when end>start, else whole video
 }
+
+/** A standalone zoom dropped on the timeline (independent of scenes): a
+ * source-time window (1s by default, duration editable) with its own center
+ * and level. Several can sit on one clip; where one overlaps a scene's own
+ * zoom, the timeline zoom wins. */
+export interface ZoomRegion {
+  id: string;
+  start_ms: number; // source-time window; moved by dragging on the Zoom track
+  end_ms: number;
+  scale: number;
+  cx: number;
+  cy: number;
+  speed?: number;
+}
+
+/** The timeline zoom in effect at a source-time (ms), if any. */
+export const activeTimelineZoom = (
+  spec: { zooms?: ZoomRegion[] },
+  atMs: number,
+): ZoomRegion | undefined =>
+  (spec.zooms ?? []).find((z) => atMs >= z.start_ms && atMs <= z.end_ms);
 
 /** All crops on a spec, with the legacy single `crop` folded in. */
 export const cropList = (spec: { crop?: CropRegion; crops?: CropRegion[] }): CropRegion[] =>
@@ -773,6 +803,7 @@ export interface EditSpec {
     logo_position?: string;
   };
   elements?: EditElement[];
+  zooms?: ZoomRegion[]; // standalone timeline zooms; win over scene zooms where they overlap
   segments: EditSegment[];
 }
 

@@ -265,7 +265,8 @@ def _zoom_ease_s(zoom: dict) -> float:
 
 def _render_segment(seg, seg_tl, src_video, dims, captions, font, work: Path,
                     crops=None, elements=None, logo: Path | None = None,
-                    logo_pos: str = "Top Right", background: dict | None = None) -> tuple[Path, bool]:
+                    logo_pos: str = "Top Right", background: dict | None = None,
+                    zooms=None) -> tuple[Path, bool]:
     """Return (clip_path, rendered_now). Reuses a cached clip when the content hash
     matches — this is what makes regenerate touch only changed segments.
 
@@ -286,10 +287,48 @@ def _render_segment(seg, seg_tl, src_video, dims, captions, font, work: Path,
     crop_eff = _crop_for_segment(crops, seg)
     zoom_eff = _remap_zoom_into_crop(seg.get("zoom"), crop_eff)
 
+    def _src_to_clip(ms: float) -> float:
+        """Source ms -> clip seconds. The clip is retimed: sped up when the
+        source window outruns the narration slot; natural pace (+ freeze tail)
+        otherwise. Stills map proportionally over the slot."""
+        rel = (ms - seg_tl.source_start_ms) / 1000.0
+        if src_len_s > 0 and (not use_footage or src_len_s / dur_s >= 1.02):
+            rel *= dur_s / src_len_s
+        return max(0.0, min(rel, dur_s))
+
+    # every zoom that touches this scene, as clip-time windows for smoothzoom.
+    # Standalone timeline zooms (spec.zooms) come FIRST so they win ties over
+    # the scene's own zoom where they overlap.
+    zoom_windows: list[dict] = []
+    for tz in zooms or []:
+        t0, t1 = float(tz.get("start_ms") or 0), float(tz.get("end_ms") or 0)
+        if t1 <= t0 or t1 <= seg_tl.source_start_ms or t0 >= seg_tl.source_end_ms:
+            continue
+        tz_eff = _remap_zoom_into_crop({**tz, "enabled": True}, crop_eff) or {}
+        zoom_windows.append({
+            "start_s": round(_src_to_clip(t0), 3),
+            "end_s": round(_src_to_clip(t1), 3),
+            "scale": float(tz_eff.get("scale", 1.6)),
+            "cx": float(tz_eff.get("cx", 0.5)),
+            "cy": float(tz_eff.get("cy", 0.5)),
+            "ease_s": _zoom_ease_s(tz_eff),
+        })
+    if zoom_eff and zoom_eff.get("enabled"):
+        # the scene zoom, over its optional window (else the whole clip)
+        zs, ze = float(zoom_eff.get("start_ms") or 0), float(zoom_eff.get("end_ms") or 0)
+        zoom_windows.append({
+            "start_s": round(_src_to_clip(zs), 3) if ze > zs else None,
+            "end_s": round(_src_to_clip(ze), 3) if ze > zs else None,
+            "scale": float(zoom_eff.get("scale", 1.6)),
+            "cx": float(zoom_eff.get("cx", 0.5)),
+            "cy": float(zoom_eff.get("cy", 0.5)),
+            "ease_s": _zoom_ease_s(zoom_eff),
+        })
+
     clip_hash = _sha("v12", seg.get("step_id"), script, tts_path.name, zoom_eff,
                      dims, captions, font, seg.get("screenshot"), seg.get("source_start_ms"),
                      seg.get("source_end_ms"), round(dur_s, 3), use_footage,
-                     crop_eff, elements, str(logo), logo_pos, background)
+                     crop_eff, elements, str(logo), logo_pos, background, zoom_windows)
     clip = work / f"seg_{seg_tl.index:03d}_{clip_hash}.mp4"
     if clip.exists():
         return clip, False  # reused — unchanged since last render
@@ -315,7 +354,7 @@ def _render_segment(seg, seg_tl, src_video, dims, captions, font, work: Path,
         _make_still(seg, src_video, dims, still, crop=crop_eff)  # crop baked into the still
 
     # zoom -> captions -> overlay elements -> normalize
-    zoom_on = bool(zoom_eff and zoom_eff.get("enabled"))
+    zoom_on = bool(zoom_windows)
     zoomed = work / f"zoomclip_{clip_hash}.mp4"
     if zoom_on:
         # The zoom runs OUTSIDE ffmpeg: zoompan quantizes the camera path to
@@ -333,9 +372,11 @@ def _render_segment(seg, seg_tl, src_video, dims, captions, font, work: Path,
                   "-crf", CRF, "-pix_fmt", "yuv420p", "-t", f"{dur_s:.3f}", str(base)]
         if not _run(cmd_a):
             raise RuntimeError(f"segment {seg_tl.index} zoom base render failed")
-        apply_zoom(base, zoomed, scale=float(zoom_eff.get("scale", 1.6)),
-                   cx=float(zoom_eff.get("cx", 0.5)), cy=float(zoom_eff.get("cy", 0.5)),
-                   dur_s=dur_s, ease_s=_zoom_ease_s(zoom_eff), fps=FPS, crf=CRF)
+        # every window is already in clip time (see zoom_windows above); the
+        # scalar args are only fallbacks for keys a window might omit
+        apply_zoom(base, zoomed, scale=1.6, cx=0.5, cy=0.5,
+                   dur_s=dur_s, ease_s=1.1, fps=FPS, crf=CRF,
+                   windows=zoom_windows)
         parts = []  # geometry + timing are already baked into the zoomed clip
     else:
         parts.append(f"scale={w}:{h}")  # normalize the still path; no-op for footage
@@ -603,6 +644,8 @@ def run_render(render_job_id: str) -> dict:
         if crops is None:
             crops = [spec["crop"]] if spec.get("crop") else []
         elements = spec.get("elements")
+        # standalone timeline zooms (independent of scenes; win over scene zooms)
+        tl_zooms = spec.get("zooms") or []
         # trim: keep only scenes whose source start falls inside [start, end].
         trim = spec.get("trim") or {}
         if trim.get("enabled") and trim.get("end_ms", 0) > trim.get("start_ms", 0):
@@ -725,7 +768,7 @@ def run_render(render_job_id: str) -> dict:
         for s, seg_tl in zip(segs, timeline.segments):
             clip, did = _render_segment(s, seg_tl, src_video, dims, captions, font, work,
                                         crops=crops, elements=elements, logo=logo, logo_pos=logo_pos,
-                                        background=spec.get("background"))
+                                        background=spec.get("background"), zooms=tl_zooms)
             clips.append(clip)
             rendered += int(did)
             reused += int(not did)
