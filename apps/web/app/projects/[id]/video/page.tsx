@@ -522,6 +522,8 @@ export default function VideoEditor({
     setSource(null);
     setVoiceUrl(null);
     setVoiceError(null);
+    setRender(null);
+    setShowRender(false);
     // reset undo history for the new project
     past.current = [];
     future.current = [];
@@ -533,6 +535,11 @@ export default function VideoEditor({
         setSavedSpec(v?.edit_spec ?? null);
         setSource(v?.source_video ?? null);
         baseline.current = v?.edit_spec ?? null;
+        // open on the last generated video (play / download); "back to
+        // preview" returns to the editor
+        const last = v?.latest_render ?? null;
+        setRender(last);
+        setShowRender(!!last?.output_key);
       })
       .catch((e) => setError(String(e)));
   }, [id]);
@@ -1207,7 +1214,7 @@ export default function VideoEditor({
   const inZoomWindow =
     !zWin ||
     (zWin.end_ms ?? 0) <= (zWin.start_ms ?? 0) ||
-    (cur * 1000 >= zWin.start_ms! && cur * 1000 <= zWin.end_ms!);
+    (cur * 1000 >= zWin.start_ms! && cur * 1000 < zWin.end_ms!);
   const segZoomOn =
     !!activeSeg?.zoom.enabled && (playing || tab === "Zoom") && inZoomWindow;
   const zoomSrc =
@@ -1337,6 +1344,15 @@ export default function VideoEditor({
             ))}
           </select>
           <ShareButton projectId={id} kind="video" />
+          {!rendering && !showRender && render?.status === "done" && render.output_key && (
+            <button
+              onClick={() => setShowRender(true)}
+              title="View or download the last generated video"
+              className="btn btn-secondary btn-sm"
+            >
+              ▶ Generated video
+            </button>
+          )}
           <button
             onClick={doRender}
             disabled={rendering}
@@ -2346,7 +2362,9 @@ function ZoomPanel({
     const key = `tl:${z.id}`;
     const open = selZoomId === key;
     const durMs = z.end_ms - z.start_ms;
-    const live = cur * 1000 >= z.start_ms && cur * 1000 <= z.end_ms;
+    // half-open window so a zoom ending at 8s and one starting at 8s never
+    // both read as live when the playhead sits on the seam
+    const live = cur * 1000 >= z.start_ms && cur * 1000 < z.end_ms;
     return (
               <div
                 key={key}
@@ -2485,7 +2503,7 @@ function ZoomPanel({
     const hasWin = (s.zoom.end_ms ?? 0) > (s.zoom.start_ms ?? 0);
     const w0 = hasWin ? s.zoom.start_ms! : s.source_start_ms;
     const w1 = hasWin ? s.zoom.end_ms! : s.source_end_ms;
-    const live = cur * 1000 >= w0 && cur * 1000 <= w1;
+    const live = cur * 1000 >= w0 && cur * 1000 < w1;
     return (
               <div
                 key={key}
@@ -3171,7 +3189,7 @@ function TimelineTracks({
               key={z.id}
               z={z}
               totalMs={totalMs}
-              active={cur * 1000 >= z.start_ms && cur * 1000 <= z.end_ms}
+              active={cur * 1000 >= z.start_ms && cur * 1000 < z.end_ms}
               onMove={(startMs) => onZoomMove(z.id, startMs)}
               onSeek={() => seekTo(z.start_ms / 1000)}
             />
@@ -3191,7 +3209,7 @@ function TimelineTracks({
             const hasWin = (z.end_ms ?? 0) > (z.start_ms ?? 0);
             const s0 = hasWin ? z.start_ms! : b.s.source_start_ms;
             const s1 = hasWin ? z.end_ms! : b.s.source_end_ms;
-            const live = cur * 1000 >= s0 && cur * 1000 <= s1;
+            const live = cur * 1000 >= s0 && cur * 1000 < s1;
             return (
               <div
                 key={b.s.step_id}

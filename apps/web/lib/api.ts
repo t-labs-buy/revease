@@ -764,7 +764,8 @@ export const activeTimelineZoom = (
   spec: { zooms?: ZoomRegion[] },
   atMs: number,
 ): ZoomRegion | undefined =>
-  (spec.zooms ?? []).find((z) => atMs >= z.start_ms && atMs <= z.end_ms);
+  // half-open [start, end): back-to-back zooms never both match at the seam
+  (spec.zooms ?? []).find((z) => atMs >= z.start_ms && atMs < z.end_ms);
 
 /** All crops on a spec, with the legacy single `crop` folded in. */
 export const cropList = (spec: { crop?: CropRegion; crops?: CropRegion[] }): CropRegion[] =>
@@ -813,6 +814,7 @@ export interface VideoSpec {
   graph_version: number;
   edit_spec: EditSpec;
   source_video?: string | null;
+  latest_render?: RenderJob | null; // newest finished render, shown on open
 }
 
 export interface RenderJob {

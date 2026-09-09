@@ -183,12 +183,22 @@ class GraphOut(BaseModel):
 
 
 # ---- video editor / render ----
+class RenderJobOut(BaseModel):
+    id: str
+    status: str
+    output_key: str | None = None
+    output_url: str | None = None
+    stats_json: dict | None = None
+    error_json: dict | None = None
+
+
 class VideoSpecOut(BaseModel):
     video_project_id: str
     project_id: str
     graph_version: int
     edit_spec: dict
     source_video: str | None = None  # storage key of the project's raw recording
+    latest_render: RenderJobOut | None = None  # newest finished render, shown on open
 
 
 class EditSpecPatch(BaseModel):
@@ -200,15 +210,6 @@ class DocumentOut(BaseModel):
     project_id: str
     graph_version: int
     doc: dict
-
-
-class RenderJobOut(BaseModel):
-    id: str
-    status: str
-    output_key: str | None = None
-    output_url: str | None = None
-    stats_json: dict | None = None
-    error_json: dict | None = None
 
 
 class AutoEditStart(BaseModel):
