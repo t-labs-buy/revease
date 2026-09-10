@@ -3,6 +3,10 @@
 The first admin comes from REFRACT_ADMIN_EMAILS (promoted at register/login);
 from there admins can promote or demote anyone here. You cannot change your own
 role, so an admin can never lock themselves out mid-session.
+
+Admins also reset passwords here, since there is no email transport for a
+self-service "forgot password" link: the admin sets a new password and hands it
+to the user out of band. The reset signs the user's existing sessions out.
 """
 
 from __future__ import annotations
@@ -11,16 +15,16 @@ import secrets
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Literal
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.auth import AdminUser
+from app.auth import AdminUser, set_password
 from app.config import get_settings
 from app.db import get_session
 from app.models import Project, UsageEvent, User
-from app.schemas import UserOut
+from app.schemas import PasswordResetIn, UserOut
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -69,6 +73,24 @@ def set_role(
         db.scalar(select(func.count()).select_from(Project).where(Project.user_id == target.id)) or 0
     )
     return AdminUserOut(**UserOut.model_validate(target).model_dump(), project_count=count)
+
+
+@router.post("/users/{user_id}/password", status_code=status.HTTP_204_NO_CONTENT)
+def reset_password(
+    user_id: str, payload: PasswordResetIn, admin: AdminUser, db: Session = Depends(get_session)
+) -> Response:
+    """Set a new password for another account, signing all of its sessions out.
+    Not for yourself: that would revoke the very session making the request."""
+    if user_id == admin.id:
+        raise HTTPException(
+            status_code=400, detail="you cannot reset your own password — ask another admin"
+        )
+    target = db.get(User, user_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="user not found")
+    set_password(target, payload.new_password)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 # --------------------------------------------------------------------------- #

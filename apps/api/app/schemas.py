@@ -25,6 +25,12 @@ class LoginIn(BaseModel):
     password: str = Field(min_length=1, max_length=200)
 
 
+class PasswordResetIn(BaseModel):
+    """Admin-set password for another account (no current password needed)."""
+
+    new_password: str = Field(min_length=8, max_length=200)
+
+
 class UserOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

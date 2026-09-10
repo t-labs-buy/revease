@@ -99,14 +99,6 @@ export default function AccountPage() {
           machine.
         </p>
       </section>
-
-      <section className="card mt-4 p-5">
-        <h2 className="text-sm font-semibold text-[var(--text)]">Password</h2>
-        <p className="mt-1.5 text-sm text-[var(--text-2)]">
-          Changing and resetting your password isn&apos;t available yet — it needs an email
-          service this deployment doesn&apos;t have configured.
-        </p>
-      </section>
     </main>
   );
 }

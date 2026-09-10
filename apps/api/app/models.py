@@ -14,7 +14,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -41,6 +41,12 @@ class User(Base):
     # level only because SQLite's ADD COLUMN backfill needs it (see module
     # docstring); treat NULL as "user" via `is_admin`.
     role: Mapped[str | None] = mapped_column(String, default="user", server_default="user")
+    # Unix time (fractional seconds) of the last password change, or NULL if it
+    # has never changed. Tokens issued before it are refused, which is how a
+    # reset signs the old sessions out despite tokens being stateless. Kept as
+    # a plain number rather than a DateTime so the comparison against the
+    # token's `iat` claim never depends on SQLite's timezone handling.
+    password_changed_at: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     # Present on every other mutable row here, and required by `users` tables
     # created before this model existed (that column is NOT NULL with no default,

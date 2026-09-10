@@ -1,8 +1,9 @@
 /** Account API: register, log in, and identify the current user.
  *
  * Logging out is purely client-side — the token is stateless, so dropping it is
- * the whole operation. There is no password-reset call yet; it needs an email
- * transport the backend doesn't have.
+ * the whole operation. There is no "forgot password" email flow (the backend
+ * has no email transport); a locked-out user asks an admin, who sets a new
+ * password from Admin → Users (see `resetUserPassword` in lib/api.ts).
  */
 
 import { apiFetch, clearToken, errorDetail, getToken, setToken } from "@/lib/http";

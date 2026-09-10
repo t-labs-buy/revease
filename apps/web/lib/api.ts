@@ -1000,3 +1000,19 @@ export async function setUserRole(userId: string, role: "user" | "admin"): Promi
   }
   return r.json();
 }
+
+/** Set a new password for another user (admin only). Signs all their sessions
+ *  out; the admin hands the password to them out of band. */
+export async function resetUserPassword(userId: string, newPassword: string): Promise<void> {
+  const r = await apiFetch(`/admin/users/${userId}/password`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ new_password: newPassword }),
+  });
+  if (!r.ok) {
+    const detail = await r.json().then((d) => d?.detail).catch(() => null);
+    throw new Error(
+      typeof detail === "string" ? detail : `resetUserPassword failed: ${r.status}`,
+    );
+  }
+}
