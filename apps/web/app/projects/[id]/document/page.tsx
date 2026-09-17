@@ -10,7 +10,7 @@ import {
   type SopDoc,
 } from "@/lib/api";
 import { IconDoc, IconVideo } from "@/components/icons";
-import { ShareButton } from "@/components/ShareButton";
+import { ProjectAccess } from "@/components/ProjectAccess";
 
 export default function DocumentPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -94,7 +94,7 @@ export default function DocumentPage({ params }: { params: Promise<{ id: string 
           >
             {exporting === "pdf" ? "…" : "PDF"}
           </button>
-          <ShareButton projectId={id} kind="doc" />
+          <ProjectAccess projectId={id} kind="doc" />
         </div>
       </div>
 

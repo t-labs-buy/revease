@@ -85,6 +85,26 @@ export default function LibraryPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projects, sessions, q, filter]);
 
+  // Projects other people invited me to edit are listed apart from my own.
+  const own = useMemo(() => filtered.filter((p) => !p.shared_with_me), [filtered]);
+  const shared = useMemo(() => filtered.filter((p) => p.shared_with_me), [filtered]);
+
+  const renderCard = (p: Project, i: number) => (
+    <ProjectCard
+      key={p.id}
+      project={p}
+      sessions={sessions}
+      index={i}
+      onDelete={p.shared_with_me ? undefined : (pid) => setPendingIds([pid])}
+      onFavoriteChange={(pid, favorite) =>
+        setProjects((ps) => ps.map((p) => (p.id === pid ? { ...p, favorite: favorite ? 1 : 0 } : p)))
+      }
+      selectable={selectMode && !p.shared_with_me}
+      selected={selected.has(p.id)}
+      onToggleSelect={toggleSelect}
+    />
+  );
+
   return (
     <main className="mx-auto max-w-[1600px] px-8 py-10">
       {/* header */}
@@ -116,7 +136,7 @@ export default function LibraryPage() {
             {selected.size} selected
           </span>
           <button
-            onClick={() => setSelected(new Set(filtered.map((p) => p.id)))}
+            onClick={() => setSelected(new Set(own.map((p) => p.id)))}
             className="text-sm text-[var(--text-2)] hover:text-[var(--text)]"
           >
             Select all
@@ -187,23 +207,26 @@ export default function LibraryPage() {
           />
         </div>
       ) : (
-        <div className="mt-8 grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-          {filtered.map((p, i) => (
-            <ProjectCard
-              key={p.id}
-              project={p}
-              sessions={sessions}
-              index={i}
-              onDelete={(pid) => setPendingIds([pid])}
-              onFavoriteChange={(pid, favorite) =>
-                setProjects((ps) => ps.map((p) => (p.id === pid ? { ...p, favorite: favorite ? 1 : 0 } : p)))
-              }
-              selectable={selectMode}
-              selected={selected.has(p.id)}
-              onToggleSelect={toggleSelect}
-            />
-          ))}
-        </div>
+        <>
+          {own.length > 0 && (
+            <div className="mt-8 grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+              {own.map(renderCard)}
+            </div>
+          )}
+          {shared.length > 0 && (
+            <section className="mt-12">
+              <h2 className="text-[22px] font-semibold tracking-tight text-[var(--text)]">
+                👥 Shared with me
+              </h2>
+              <p className="mt-1 text-sm text-[var(--text-2)]">
+                Projects other people invited you to edit.
+              </p>
+              <div className="mt-5 grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                {shared.map(renderCard)}
+              </div>
+            </section>
+          )}
+        </>
       )}
 
       {/* styled remove confirmation */}

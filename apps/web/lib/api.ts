@@ -10,9 +10,44 @@ export interface Project {
   created_at: string;
   has_document?: boolean; // a step-by-step doc has actually been generated
   capture_count?: number; // how many recordings/uploads this project holds
-  // Set only for admins browsing all spaces, and only on other users' projects.
+  // Set on other users' projects: for admins browsing all spaces, and for
+  // projects shared with the caller.
   owner_email?: string | null;
   owner_name?: string | null;
+  // True when the caller was invited to edit this project rather than owning it.
+  shared_with_me?: boolean;
+}
+
+// ---- share-to-edit (collaborators) ----
+export interface Collaborator {
+  user_id: string;
+  email: string;
+  name: string;
+  created_at: string;
+}
+
+export async function listCollaborators(projectId: string): Promise<Collaborator[]> {
+  const r = await apiFetch(`/projects/${projectId}/collaborators`, { cache: "no-store" });
+  if (!r.ok) throw new Error(`listCollaborators failed: ${r.status}`);
+  return r.json();
+}
+
+/** Owner/admin: invite a registered RevEase user by email. Returns the new list. */
+export async function addCollaborator(projectId: string, email: string): Promise<Collaborator[]> {
+  const r = await apiFetch(`/projects/${projectId}/collaborators`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email }),
+  });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail ?? `invite failed: ${r.status}`);
+  return r.json();
+}
+
+/** Owner/admin removes anyone; a collaborator may remove themselves. Returns the new list. */
+export async function removeCollaborator(projectId: string, userId: string): Promise<Collaborator[]> {
+  const r = await apiFetch(`/projects/${projectId}/collaborators/${userId}`, { method: "DELETE" });
+  if (!r.ok) throw new Error(`removeCollaborator failed: ${r.status}`);
+  return r.json();
 }
 
 /** "mine" (default) = the caller's own space; "all" = every user's space.
@@ -317,7 +352,12 @@ async function saveBlob(response: Response, filename: string): Promise<void> {
 
 // Media reads are public (so <video src> and share links work), hence a plain fetch.
 export async function downloadMedia(storageKey: string, filename: string): Promise<void> {
-  const r = await fetch(mediaUrl(storageKey));
+  await downloadUrl(mediaUrl(storageKey), filename);
+}
+
+/** Download any public URL (e.g. a share page's video_url) via the blob route. */
+export async function downloadUrl(url: string, filename: string): Promise<void> {
+  const r = await fetch(url);
   if (!r.ok) throw new Error(`download failed: ${r.status}`);
   await saveBlob(r, filename);
 }

@@ -14,6 +14,7 @@ from app.routers import (
     auth,
     auto_record,
     autoedit,
+    collaborators,
     documents,
     graphs,
     kb,
@@ -52,6 +53,7 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(admin.router)
 app.include_router(projects.router)
+app.include_router(collaborators.router)
 app.include_router(sessions.router)
 app.include_router(auto_record.router)
 app.include_router(graphs.router)

@@ -7,6 +7,10 @@ Two rules hold everywhere:
   confirm the id exists in someone else's space; 404 leaks nothing.
 * Only the four top-level entities carry `user_id`. Everything else is reached
   through its Project, so `owned_*` walks up to the project and checks that.
+* A project's collaborators (see `ProjectCollaborator`) pass the project check
+  like the owner does, so every edit route accepts them without changes. The
+  few owner-only actions (delete, invite, public share links) pass
+  `owner_only=True`. Admins pass everything.
 """
 
 from __future__ import annotations
@@ -27,6 +31,7 @@ from app.models import (
     Job,
     KbArticle,
     Project,
+    ProjectCollaborator,
     RenderJob,
     Share,
     Skill,
@@ -46,11 +51,31 @@ def _missing(what: str) -> HTTPException:
     return HTTPException(status_code=404, detail=f"{what} not found")
 
 
-def owned_project(db: Session, user: User, project_id: str) -> Project:
+def is_collaborator(db: Session, user: User, project_id: str) -> bool:
+    return (
+        db.scalar(
+            select(ProjectCollaborator.id).where(
+                ProjectCollaborator.project_id == project_id,
+                ProjectCollaborator.user_id == user.id,
+            )
+        )
+        is not None
+    )
+
+
+def owned_project(
+    db: Session, user: User, project_id: str, *, owner_only: bool = False
+) -> Project:
+    """The project if the caller may touch it: its owner, an admin, or (unless
+    `owner_only`) a collaborator invited by the owner. Otherwise 404."""
     project = db.get(Project, project_id)
-    if project is None or (project.user_id != user.id and not user.is_admin):
+    if project is None:
         raise _missing("project")
-    return project
+    if project.user_id == user.id or user.is_admin:
+        return project
+    if not owner_only and is_collaborator(db, user, project_id):
+        return project
+    raise _missing("project")
 
 
 def owned_row(db: Session, user: User, model: type[_T], row_id: str, what: str) -> _T:
@@ -102,10 +127,15 @@ def project_ids_for(db: Session, user: User, *, all_spaces: bool = False) -> lis
     `all_spaces=True` widens to every user's projects, but only for admins;
     for regular users it is silently ignored, so callers can pass the client's
     requested scope straight through."""
-    q = select(Project.id)
-    if not (all_spaces and user.is_admin):
-        q = q.where(Project.user_id == user.id)
-    return list(db.scalars(q))
+    if all_spaces and user.is_admin:
+        return list(db.scalars(select(Project.id)))
+    own = list(db.scalars(select(Project.id).where(Project.user_id == user.id)))
+    shared = list(
+        db.scalars(
+            select(ProjectCollaborator.project_id).where(ProjectCollaborator.user_id == user.id)
+        )
+    )
+    return list(dict.fromkeys([*own, *shared]))  # de-duplicated, own first
 
 
 # --------------------------------------------------------------------------- #
@@ -141,6 +171,7 @@ def delete_project_cascade(db: Session, project: Project) -> tuple[list[str], li
     db.execute(sa_delete(VideoProject).where(VideoProject.project_id == project_id))
     db.execute(sa_delete(Document).where(Document.project_id == project_id))
     db.execute(sa_delete(Share).where(Share.project_id == project_id))
+    db.execute(sa_delete(ProjectCollaborator).where(ProjectCollaborator.project_id == project_id))
     db.execute(sa_delete(AutoEditJob).where(AutoEditJob.project_id == project_id))
     db.execute(sa_delete(AutoRecordRun).where(AutoRecordRun.project_id == project_id))
 

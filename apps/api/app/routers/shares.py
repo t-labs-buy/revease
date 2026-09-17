@@ -33,7 +33,7 @@ def _owned_share(db: Session, user, token: str) -> Share:  # noqa: ANN001
     s = db.scalar(select(Share).where(Share.token == token))
     if s is None:
         raise HTTPException(status_code=404, detail="share not found")
-    owned_project(db, user, s.project_id)  # owner or admin only
+    owned_project(db, user, s.project_id, owner_only=True)  # owner or admin only
     return s
 
 
@@ -53,7 +53,7 @@ def _latest_render_key(db: Session, project_id: str) -> str | None:
 def create_share(
     project_id: str, payload: ShareCreate, user: CurrentUser, db: Session = Depends(get_session)
 ) -> ShareOut:
-    owned_project(db, user, project_id)
+    owned_project(db, user, project_id, owner_only=True)  # public links are the owner's call
     if payload.kind == "video" and _latest_render_key(db, project_id) is None:
         raise HTTPException(status_code=400, detail="generate a video before sharing it")
     # reuse an existing active share of this kind if present
@@ -81,7 +81,7 @@ def create_share(
 def list_shares(
     project_id: str, user: CurrentUser, db: Session = Depends(get_session)
 ) -> list[ShareOut]:
-    owned_project(db, user, project_id)
+    owned_project(db, user, project_id, owner_only=True)
     rows = db.scalars(
         select(Share).where(Share.project_id == project_id, Share.revoked == False)  # noqa: E712
     )

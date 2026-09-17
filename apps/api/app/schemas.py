@@ -63,10 +63,23 @@ class ProjectOut(BaseModel):
     # the UI can label it truthfully instead of guessing from capture counts.
     has_document: bool = False
     capture_count: int = 0
-    # Populated only for admins browsing across spaces, so the UI can label
-    # whose project each card is.
+    # Populated when the project is someone else's: for admins browsing across
+    # spaces, and for collaborators on a project shared with them.
     owner_email: str | None = None
     owner_name: str | None = None
+    # True when the caller was invited to edit this project rather than owning it.
+    shared_with_me: bool = False
+
+
+class CollaboratorCreate(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+
+
+class CollaboratorOut(BaseModel):
+    user_id: str
+    email: str
+    name: str
+    created_at: datetime
 
 
 class HealthOut(BaseModel):

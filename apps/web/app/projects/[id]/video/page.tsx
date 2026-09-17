@@ -29,7 +29,7 @@ import {
 } from "@/lib/api";
 import { Spinner } from "@/components/ui";
 import { VoicePanel } from "@/components/VoicePanel";
-import { ShareButton } from "@/components/ShareButton";
+import { ProjectAccess } from "@/components/ProjectAccess";
 import { PreviewOverlay } from "@/components/PreviewOverlay";
 import { resolveDuration } from "@/components/EditModals";
 import {
@@ -1343,7 +1343,7 @@ export default function VideoEditor({
               </option>
             ))}
           </select>
-          <ShareButton projectId={id} kind="video" />
+          <ProjectAccess projectId={id} kind="video" />
           {!rendering && !showRender && render?.status === "done" && render.output_key && (
             <button
               onClick={() => setShowRender(true)}

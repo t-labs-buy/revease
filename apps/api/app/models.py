@@ -14,7 +14,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -75,6 +75,21 @@ class Project(Base):
     graphs: Mapped[list["WorkflowGraphRow"]] = relationship(
         back_populates="project", cascade="all, delete-orphan"
     )
+
+
+class ProjectCollaborator(Base):
+    """A registered user the owner has invited to edit a project. Collaborators
+    get the owner's edit rights on everything under the project, but cannot
+    delete it, invite others, or manage its public share links."""
+
+    __tablename__ = "project_collaborators"
+    __table_args__ = (UniqueConstraint("project_id", "user_id", name="uq_project_collaborator"),)
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    invited_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
 IST = timezone(timedelta(hours=5, minutes=30))
