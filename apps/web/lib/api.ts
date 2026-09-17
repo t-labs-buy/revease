@@ -381,6 +381,8 @@ export interface Share {
   token: string;
   kind: "video" | "doc";
   revoked: boolean;
+  /** Whether the public page offers a Download button (off by default). */
+  allow_download: boolean;
   created_at: string;
   project_id: string;
 }
@@ -389,6 +391,7 @@ export interface SharePublic {
   kind: "video" | "doc";
   title: string;
   project_id: string;
+  allow_download: boolean;
   video_url: string | null;
   doc: SopDoc | null;
 }
@@ -416,9 +419,20 @@ export async function getSharePublic(token: string): Promise<SharePublic> {
   return j;
 }
 
-export async function listAllShares(): Promise<Share[]> {
-  const r = await apiFetch(`/shares`, { cache: "no-store" });
+export async function listAllShares(scope: ListScope = "mine"): Promise<Share[]> {
+  const r = await apiFetch(`/shares?scope=${scope}`, { cache: "no-store" });
   if (!r.ok) throw new Error(`listShares failed: ${r.status}`);
+  return r.json();
+}
+
+/** Owner/admin: show or hide the Download button on the public share page. */
+export async function setShareDownload(token: string, allowDownload: boolean): Promise<Share> {
+  const r = await apiFetch(`/shares/${token}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ allow_download: allowDownload }),
+  });
+  if (!r.ok) throw new Error(`updateShare failed: ${r.status}`);
   return r.json();
 }
 

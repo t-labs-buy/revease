@@ -226,12 +226,19 @@ class AutoEditStart(BaseModel):
 
 class ShareCreate(BaseModel):
     kind: Literal["video", "doc"] = "video"
+    # None = leave as-is when reusing an existing link (a new link defaults to off).
+    allow_download: bool | None = None
+
+
+class ShareUpdate(BaseModel):
+    allow_download: bool
 
 
 class ShareOut(BaseModel):
     token: str
     kind: str
     revoked: bool
+    allow_download: bool
     created_at: datetime
     project_id: str
 
@@ -240,6 +247,7 @@ class SharePublic(BaseModel):
     kind: str
     title: str
     project_id: str
+    allow_download: bool = False
     video_url: str | None = None
     doc: dict | None = None
 

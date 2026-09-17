@@ -38,11 +38,20 @@ export default function SharePage({ params }: { params: Promise<{ token: string 
             {data.kind === "video" && data.video_url && (
               <div className="mt-5">
                 <div className="rounded-2xl bg-gradient-to-br from-violet-500/25 via-blue-500/20 to-emerald-500/20 p-4 sm:p-6">
-                  <video src={data.video_url} controls className="w-full rounded-xl bg-black" />
+                  <video
+                    src={data.video_url}
+                    controls
+                    // Hide the browser's own download control when the owner turned downloads off.
+                    controlsList={data.allow_download ? undefined : "nodownload"}
+                    onContextMenu={data.allow_download ? undefined : (e) => e.preventDefault()}
+                    className="w-full rounded-xl bg-black"
+                  />
                 </div>
-                <a href={data.video_url} download className="btn btn-primary mt-4">
-                  ↓ Download video
-                </a>
+                {data.allow_download && (
+                  <a href={data.video_url} download className="btn btn-primary mt-4">
+                    ↓ Download video
+                  </a>
+                )}
               </div>
             )}
 

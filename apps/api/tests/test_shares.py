@@ -42,6 +42,19 @@ def test_share_video_requires_render_then_public_view():
     assert pub.json()["kind"] == "video"
     assert pub.json()["video_url"].endswith("final.mp4")
     assert pub.json()["title"] == "Shared Demo"
+    # download is hidden by default
+    assert pub.json()["allow_download"] is False
+
+    # owner turns download on; public page reflects it
+    upd = client.patch(f"/shares/{token}", json={"allow_download": True})
+    assert upd.status_code == 200 and upd.json()["allow_download"] is True
+    assert client.get(f"/shares/{token}").json()["allow_download"] is True
+
+    # re-sharing with an explicit value updates the same link; omitting it keeps it
+    r = client.post(f"/projects/{pid}/share", json={"kind": "video", "allow_download": False})
+    assert r.json()["token"] == token and r.json()["allow_download"] is False
+    assert client.post(f"/projects/{pid}/share", json={"kind": "video"}).json()["allow_download"] is False
+    assert client.patch("/shares/nope", json={"allow_download": True}).status_code == 404
 
     # listed + revocable
     assert any(s["token"] == token for s in client.get(f"/projects/{pid}/shares").json())

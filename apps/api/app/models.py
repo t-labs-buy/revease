@@ -256,6 +256,9 @@ class Share(Base):
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
     kind: Mapped[str] = mapped_column(String, default="video")  # video | doc
     revoked: Mapped[bool] = mapped_column(default=False)
+    # Whether the public share page offers a Download button. Off by default;
+    # the owner (or an admin) opts in per link.
+    allow_download: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 

@@ -15,7 +15,7 @@ from app.db import get_session
 from app.docgen import build_document
 from app.models import RenderJob, Share, VideoProject, WorkflowGraphRow
 from app.ownership import owned_project, project_ids_for
-from app.schemas import ShareCreate, SharePublic, ShareOut
+from app.schemas import ShareCreate, SharePublic, ShareOut, ShareUpdate
 from app.storage import store
 
 router = APIRouter(tags=["shares"])
@@ -24,8 +24,17 @@ router = APIRouter(tags=["shares"])
 def _out(s: Share) -> ShareOut:
     return ShareOut(
         token=s.token, kind=s.kind, revoked=s.revoked,
+        allow_download=bool(s.allow_download),
         created_at=s.created_at, project_id=s.project_id,
     )
+
+
+def _owned_share(db: Session, user, token: str) -> Share:  # noqa: ANN001
+    s = db.scalar(select(Share).where(Share.token == token))
+    if s is None:
+        raise HTTPException(status_code=404, detail="share not found")
+    owned_project(db, user, s.project_id)  # owner or admin only
+    return s
 
 
 def _latest_render_key(db: Session, project_id: str) -> str | None:
@@ -54,8 +63,14 @@ def create_share(
         )
     )
     if existing:
+        if payload.allow_download is not None and existing.allow_download != payload.allow_download:
+            existing.allow_download = payload.allow_download
+            db.commit()
         return _out(existing)
-    share = Share(project_id=project_id, kind=payload.kind)
+    share = Share(
+        project_id=project_id, kind=payload.kind,
+        allow_download=bool(payload.allow_download),
+    )
     db.add(share)
     db.commit()
     db.refresh(share)
@@ -90,12 +105,20 @@ def list_all_shares(
     return [_out(s) for s in rows]
 
 
+@router.patch("/shares/{token}", response_model=ShareOut)
+def update_share(
+    token: str, payload: ShareUpdate, user: CurrentUser, db: Session = Depends(get_session)
+) -> ShareOut:
+    """Owner/admin: toggle whether the public page offers a Download button."""
+    s = _owned_share(db, user, token)
+    s.allow_download = payload.allow_download
+    db.commit()
+    return _out(s)
+
+
 @router.delete("/shares/{token}")
 def revoke_share(token: str, user: CurrentUser, db: Session = Depends(get_session)) -> dict:
-    s = db.scalar(select(Share).where(Share.token == token))
-    if s is None:
-        raise HTTPException(status_code=404, detail="share not found")
-    owned_project(db, user, s.project_id)  # only the owner can revoke their link
+    s = _owned_share(db, user, token)  # only the owner (or an admin) can revoke a link
     s.revoked = True
     db.commit()
     return {"revoked": True}
@@ -113,13 +136,14 @@ def get_share(token: str, db: Session = Depends(get_session)) -> SharePublic:
         .order_by(WorkflowGraphRow.version.desc())
     )
     title = (graph.graph_json.get("title") if graph else None) or "Refract video"
+    allow_download = bool(s.allow_download)
     if s.kind == "doc":
         if graph is None:
             raise HTTPException(status_code=404, detail="no document to share")
         return SharePublic(kind="doc", title=title, project_id=s.project_id,
-                           doc=build_document(graph.graph_json))
+                           allow_download=allow_download, doc=build_document(graph.graph_json))
     key = _latest_render_key(db, s.project_id)
     if key is None:
         raise HTTPException(status_code=404, detail="no rendered video yet")
     return SharePublic(kind="video", title=title, project_id=s.project_id,
-                       video_url=store.download_url(key))
+                       allow_download=allow_download, video_url=store.download_url(key))
