@@ -2831,6 +2831,27 @@ function BackgroundPanel({
   );
 }
 
+function getVideoDurationMs(file: File): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const video = document.createElement("video");
+    video.preload = "metadata";
+    const url = URL.createObjectURL(file);
+    video.src = url;
+    video.onloadedmetadata = () => {
+      URL.revokeObjectURL(url);
+      if (Number.isFinite(video.duration) && video.duration > 0) {
+        resolve(Math.round(video.duration * 1000));
+      } else {
+        reject(new Error("Invalid duration"));
+      }
+    };
+    video.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("Failed to load video metadata"));
+    };
+  });
+}
+
 function IntroOutroPanel({
   spec,
   patchSpec,
@@ -2865,13 +2886,26 @@ function IntroOutroPanel({
     setUploading(key);
     setUploadError(null);
     try {
+      let durationMs: number | undefined;
+      if (mediaType === "video") {
+        try {
+          durationMs = await getVideoDurationMs(file);
+        } catch {
+          // ignore probe error
+        }
+      }
       const ext = file.name.split(".").pop() || (mediaType === "video" ? "mp4" : "png");
       const storageKey = await uploadMedia(
         `projects/${projectId}/${which}_${mediaType}_${Date.now()}.${ext}`,
         file,
       );
       const card = which === "intro" ? intro : outro;
-      const patch = { ...card, media_key: storageKey, media_type: mediaType };
+      const patch = {
+        ...card,
+        media_key: storageKey,
+        media_type: mediaType,
+        ...(durationMs ? { duration_ms: durationMs } : {}),
+      };
       patchSpec(which === "intro" ? { intro: patch } : { outro: patch });
     } catch (e) {
       setUploadError(String(e));
@@ -2882,7 +2916,12 @@ function IntroOutroPanel({
 
   function removeMedia(which: "intro" | "outro") {
     const card = which === "intro" ? intro : outro;
-    const patch = { ...card, media_key: undefined, media_type: undefined };
+    const patch = {
+      ...card,
+      media_key: undefined,
+      media_type: undefined,
+      duration_ms: Math.min(5000, Math.max(500, card.duration_ms || 2000)),
+    };
     patchSpec(which === "intro" ? { intro: patch } : { outro: patch });
   }
 
@@ -2917,29 +2956,41 @@ function IntroOutroPanel({
             {card.enabled && (
               <div className="mt-3 space-y-3">
                 {/* Title text */}
-                <input
-                  value={card.title}
-                  onChange={(e) => set({ title: e.target.value })}
-                  placeholder={`${label} text`}
-                  className="input"
-                />
-                {/* Duration slider */}
-                <div className="flex items-center gap-3 text-xs">
-                  <span className="text-[var(--text-3)]">Short</span>
+                {!card.media_key && (
                   <input
-                    type="range"
-                    min={minMs}
-                    max={maxMs}
-                    step={100}
-                    value={card.duration_ms}
-                    onChange={(e) => set({ duration_ms: Number(e.target.value) })}
-                    className="flex-1 accent-[#6d5dfb]"
+                    value={card.title}
+                    onChange={(e) => set({ title: e.target.value })}
+                    placeholder={`${label} text`}
+                    className="input"
                   />
-                  <span className="text-[var(--text-3)]">Long</span>
-                  <span className="w-14 text-right font-mono text-[var(--text-2)]">
-                    {(card.duration_ms / 1000).toFixed(1)}s
-                  </span>
-                </div>
+                )}
+                {/* Duration slider */}
+                {card.media_type !== "video" && (
+                  <div className="flex items-center gap-3 text-xs">
+                    <span className="text-[var(--text-3)]">Short</span>
+                    <input
+                      type="range"
+                      min={minMs}
+                      max={maxMs}
+                      step={100}
+                      value={card.duration_ms}
+                      onChange={(e) => set({ duration_ms: Number(e.target.value) })}
+                      className="flex-1 accent-[#6d5dfb]"
+                    />
+                    <span className="text-[var(--text-3)]">Long</span>
+                    <span className="w-14 text-right font-mono text-[var(--text-2)]">
+                      {(card.duration_ms / 1000).toFixed(1)}s
+                    </span>
+                  </div>
+                )}
+                {card.media_key && card.media_type === "video" && card.duration_ms > 0 && (
+                  <div className="flex items-center justify-between text-xs text-[var(--text-3)]">
+                    <span>Clip duration</span>
+                    <span className="font-mono text-[var(--text-2)]">
+                      {(card.duration_ms / 1000).toFixed(1)}s
+                    </span>
+                  </div>
+                )}
 
                 {/* Upload controls */}
                 <div className="space-y-2">
@@ -3014,6 +3065,15 @@ function IntroOutroPanel({
                       src={mediaUrl(card.media_key)}
                       controls
                       className="mt-2 w-full rounded-lg bg-black"
+                      onLoadedMetadata={(e) => {
+                        const dur = (e.currentTarget as HTMLVideoElement).duration;
+                        if (Number.isFinite(dur) && dur > 0) {
+                          const ms = Math.round(dur * 1000);
+                          if (card.duration_ms !== ms) {
+                            set({ duration_ms: ms });
+                          }
+                        }
+                      }}
                     />
                   )}
                   {card.media_key && card.media_type === "image" && (
