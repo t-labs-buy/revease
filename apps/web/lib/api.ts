@@ -777,12 +777,13 @@ export interface EditSegment {
 
 export interface EditElement {
   id: string;
-  type: "text" | "box";
+  type: "text" | "box" | "image";
   x: number;
   y: number;
   w: number;
   h: number;
   text?: string;
+  media_key?: string;
   color?: string;
   size?: number; // text height as a fraction of the frame (e.g. 0.06)
   start_ms?: number; // optional time window (source ms); when end_ms>start_ms the
@@ -839,8 +840,8 @@ export interface EditSpec {
   title: string;
   voice: { voice_id: string; speed: number; use_original?: boolean };
   aspect: "16:9" | "9:16" | "1:1";
-  intro: { enabled: boolean; title: string; duration_ms: number };
-  outro: { enabled: boolean; title: string; duration_ms: number };
+  intro: IntroOutroCard;
+  outro: IntroOutroCard;
   captions: { enabled: boolean };
   music: { enabled: boolean; storage_key: string | null; gain_db: number };
   crop?: CropRegion; // legacy single crop — superseded by `crops`
@@ -860,6 +861,14 @@ export interface EditSpec {
   elements?: EditElement[];
   zooms?: ZoomRegion[]; // standalone timeline zooms; win over scene zooms where they overlap
   segments: EditSegment[];
+}
+
+export interface IntroOutroCard {
+  enabled: boolean;
+  title: string;
+  duration_ms: number;
+  media_key?: string | null;
+  media_type?: "image" | "video" | null;
 }
 
 export interface VideoSpec {

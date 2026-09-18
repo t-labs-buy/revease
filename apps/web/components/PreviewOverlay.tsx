@@ -1,7 +1,7 @@
 "use client";
 
 import { Rnd } from "react-rnd";
-import type { EditSpec, EditElement, CropRegion } from "@/lib/api";
+import { mediaUrl, type EditSpec, type EditElement, type CropRegion } from "@/lib/api";
 
 type Frame = { w: number; h: number };
 
@@ -54,7 +54,10 @@ export function PreviewOverlay({
 
   const setCrop = (patch: Partial<CropRegion>) => onPatchCrop?.(sel, patch);
   const setEl = (id: string, patch: Partial<EditElement>) =>
-    setSpec({ ...spec, elements: elements.map((e) => (e.id === id ? { ...e, ...patch } : e)) });
+    setSpec({
+      ...spec,
+      elements: allElements.map((e) => (e.id === id ? { ...e, ...patch } : e)),
+    });
 
   const L = (crop?.x ?? 0) * 100,
     T = (crop?.y ?? 0) * 100,
@@ -95,9 +98,8 @@ export function PreviewOverlay({
         return (
           <Rnd
             key={el.id}
-            className={`${elEdit ? "pointer-events-auto cursor-move" : "pointer-events-none"} ${
-              sel && elEdit ? "outline outline-2 outline-violet-400" : ""
-            }`}
+            className={`${elEdit ? "pointer-events-auto cursor-move" : "pointer-events-none"} ${sel && elEdit ? "outline outline-2 outline-violet-400" : ""
+              }`}
             bounds="parent"
             disableDragging={!elEdit}
             enableResizing={elEdit}
@@ -114,7 +116,15 @@ export function PreviewOverlay({
               })
             }
           >
-            {el.type === "box" ? (
+            {el.type === "image" && el.media_key ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={mediaUrl(el.media_key)}
+                alt=""
+                className="h-full w-full object-contain"
+                draggable={false}
+              />
+            ) : el.type === "box" ? (
               <div
                 className="h-full w-full rounded-sm"
                 style={{ background: `${el.color ?? "#facc15"}44`, border: `2px solid ${el.color ?? "#facc15"}` }}

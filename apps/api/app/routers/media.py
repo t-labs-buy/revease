@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from app.auth import CurrentUser
 from app.db import get_session
 from app.models import BrandPackage, User
-from app.ownership import owned_row, owned_session
+from app.ownership import owned_project, owned_row, owned_session
 from app.storage import store
 
 router = APIRouter(prefix="/media", tags=["media"])
@@ -34,6 +34,9 @@ def _authorize_write(db: Session, user: User, storage_key: str) -> None:
         return
     if len(parts) >= 2 and parts[0] == "packages":
         owned_row(db, user, BrandPackage, parts[1], "package")
+        return
+    if len(parts) >= 2 and parts[0] == "projects":
+        owned_project(db, user, parts[1])
         return
     raise HTTPException(status_code=403, detail="cannot upload to this storage key")
 
