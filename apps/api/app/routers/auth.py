@@ -53,6 +53,13 @@ def register(payload: RegisterIn, db: Session = Depends(get_session)) -> User:
     New spaces start with the sample skill + onboarding articles so Skills and the
     Knowledge Base aren't empty on first visit."""
     email = normalize_email(payload.email)
+    allowed_domains = get_settings().allowed_registration_domains()
+    if allowed_domains and not any(email.endswith(f"@{d}") for d in allowed_domains):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Account creation is not allowed for this email domain",
+        )
+
     if get_user_by_email(db, email) is not None:
         raise HTTPException(status_code=409, detail="an account with this email already exists")
 

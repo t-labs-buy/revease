@@ -73,8 +73,19 @@ class Settings(BaseSettings):
     # bootstrap admins. Further admins can then be promoted from the Admin UI.
     admin_emails: str = ""
 
+    # Comma-separated domains permitted for account registration (e.g. "tarento.com").
+    # Empty string disables domain restriction.
+    auth_allowed_email_domain: str = ""
+
     def admin_email_set(self) -> set[str]:
         return {e.strip().lower() for e in self.admin_emails.split(",") if e.strip()}
+
+    def allowed_registration_domains(self) -> list[str]:
+        return [
+            d.strip().lower().lstrip("@")
+            for d in self.auth_allowed_email_domain.split(",")
+            if d.strip()
+        ]
 
     # --- Usage reporting ---
     # Static key an external app sends as `X-Report-Key` to pull the usage

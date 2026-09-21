@@ -86,6 +86,40 @@ def test_register_rejects_an_invalid_email():
     assert r.status_code == 422
 
 
+def test_register_domain_restriction(monkeypatch):
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    monkeypatch.setenv("REFRACT_AUTH_ALLOWED_EMAIL_DOMAIN", "tarento.com")
+
+    # Disallowed domains are rejected with generic message that does not mention tarento.com
+    r_bad = anon.post(
+        "/auth/register",
+        json={"email": "intruder@gmail.com", "password": PASSWORD, "name": "Intruder"},
+    )
+    assert r_bad.status_code == 400
+    assert r_bad.json()["detail"] == "Account creation is not allowed for this email domain"
+    assert "tarento.com" not in r_bad.json()["detail"]
+
+    # Suffixes that do not end with @tarento.com are rejected
+    r_bad_suffix = anon.post(
+        "/auth/register",
+        json={"email": "user@evil-tarento.com", "password": PASSWORD, "name": "Fake"},
+    )
+    assert r_bad_suffix.status_code == 400
+    assert r_bad_suffix.json()["detail"] == "Account creation is not allowed for this email domain"
+
+    # Valid tarento.com email is accepted case-insensitively
+    r_good = anon.post(
+        "/auth/register",
+        json={"email": "NEWUSER@TARENTO.COM", "password": PASSWORD, "name": "Tarento User"},
+    )
+    assert r_good.status_code == 201
+    assert r_good.json()["email"] == "newuser@tarento.com"
+
+    get_settings.cache_clear()
+
+
 def test_login_succeeds_and_is_case_insensitive_on_email():
     r = anon.post("/auth/login", json={"email": "Owner@Example.COM", "password": PASSWORD})
     assert r.status_code == 200, r.text
