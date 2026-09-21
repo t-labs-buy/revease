@@ -14,7 +14,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -41,6 +41,12 @@ class User(Base):
     # level only because SQLite's ADD COLUMN backfill needs it (see module
     # docstring); treat NULL as "user" via `is_admin`.
     role: Mapped[str | None] = mapped_column(String, default="user", server_default="user")
+    # Unix time (fractional seconds) of the last password change, or NULL if it
+    # has never changed. Tokens issued before it are refused, which is how a
+    # reset signs the old sessions out despite tokens being stateless. Kept as
+    # a plain number rather than a DateTime so the comparison against the
+    # token's `iat` claim never depends on SQLite's timezone handling.
+    password_changed_at: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     # Present on every other mutable row here, and required by `users` tables
     # created before this model existed (that column is NOT NULL with no default,
@@ -69,6 +75,21 @@ class Project(Base):
     graphs: Mapped[list["WorkflowGraphRow"]] = relationship(
         back_populates="project", cascade="all, delete-orphan"
     )
+
+
+class ProjectCollaborator(Base):
+    """A registered user the owner has invited to edit a project. Collaborators
+    get the owner's edit rights on everything under the project, but cannot
+    delete it, invite others, or manage its public share links."""
+
+    __tablename__ = "project_collaborators"
+    __table_args__ = (UniqueConstraint("project_id", "user_id", name="uq_project_collaborator"),)
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    invited_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -250,6 +271,9 @@ class Share(Base):
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
     kind: Mapped[str] = mapped_column(String, default="video")  # video | doc
     revoked: Mapped[bool] = mapped_column(default=False)
+    # Whether the public share page offers a Download button. Off by default;
+    # the owner (or an admin) opts in per link.
+    allow_download: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 

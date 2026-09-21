@@ -4,7 +4,9 @@ import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
   activeCrop,
+  activeTimelineZoom,
   cropList,
+  type ZoomRegion,
   downloadMedia,
   fetchPreviewTimeline,
   getRender,
@@ -17,6 +19,7 @@ import {
   rewriteLines,
   startVoiceTrack,
   suggestZooms,
+  uploadMedia,
   type CropRegion,
   type EditElement,
   type EditSegment,
@@ -27,7 +30,7 @@ import {
 } from "@/lib/api";
 import { Spinner } from "@/components/ui";
 import { VoicePanel } from "@/components/VoicePanel";
-import { ShareButton } from "@/components/ShareButton";
+import { ProjectAccess } from "@/components/ProjectAccess";
 import { PreviewOverlay } from "@/components/PreviewOverlay";
 import { resolveDuration } from "@/components/EditModals";
 import {
@@ -175,10 +178,14 @@ const mmss = (t: number) =>
 // (~20 min) covers even a very long narration's first build; every later build
 // hits the per-line cache and returns immediately.
 const MAX_VOICE_POLLS = 800;
-const clock = (t: number) =>
-  `${String(Math.floor(t / 60)).padStart(2, "0")}:${String(Math.floor(t % 60)).padStart(2, "0")}.${String(
-    Math.floor((t % 1) * 100),
-  ).padStart(2, "0")}`;
+const clock = (t: number) => {
+  if (!Number.isFinite(t) || t < 0) return "00:00.00";
+  const cs = Math.round(t * 100);
+  const m = Math.floor(cs / 6000);
+  const s = Math.floor((cs % 6000) / 100);
+  const remCs = cs % 100;
+  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}.${String(remCs).padStart(2, "0")}`;
+};
 // Slice the full-source waveform peaks down to the portion covering [a, b] source-ms.
 const peaksInRange = (
   peaks: number[],
@@ -224,7 +231,6 @@ export default function VideoEditor({
 
   const [q, setQ] = useState("");
   const [editIdx, setEditIdx] = useState<number | null>(null);
-  const [zoomIdx, setZoomIdx] = useState<number | null>(null);
   const [selEl, setSelEl] = useState<string | null>(null);
   const [rate, setRate] = useState(1);
   const [tlZoom, setTlZoom] = useState(1);
@@ -326,6 +332,29 @@ export default function VideoEditor({
   const aiVoiceActive = !!voiceUrl && wantAiVoice;
   const dirty =
     !!spec && !!savedSpec && JSON.stringify(spec) !== JSON.stringify(savedSpec);
+  // Only the fields the narration audio actually depends on. Visual edits —
+  // zoom, crop, elements, captions, background… — must NOT prompt a voice
+  // refresh: the voice track never hears them.
+  const voiceSigOf = (s: EditSpec) =>
+    JSON.stringify({
+      voice: s.voice,
+      pace: s.pace ?? null,
+      segs: s.segments.map((g) => [
+        g.step_id,
+        g.words,
+        g.removed,
+        g.skipped ?? false,
+        g.source_start_ms,
+        g.source_end_ms,
+      ]),
+    });
+  // signature of the spec the CURRENT voice track was built from
+  const [voiceBuiltSig, setVoiceBuiltSig] = useState<string | null>(null);
+  const voiceStale =
+    wantAiVoice &&
+    !!spec &&
+    !!voiceBuiltSig &&
+    voiceSigOf(spec) !== voiceBuiltSig;
 
   useEffect(() => {
     if (!spec || useOriginal) {
@@ -340,6 +369,9 @@ export default function VideoEditor({
     setVoiceUrl(null);
     setVoiceWaitedMs(0);
     setPreviewTimeline(null);
+    // this build bakes in the CURRENT voice-relevant spec — record it so only
+    // later voice-relevant edits mark the track stale
+    setVoiceBuiltSig(voiceSigOf(spec));
     const applyReady = async (url: string, timelineUrl: string | null) => {
       if (cancelled) return;
       setVoiceUrl(url);
@@ -409,7 +441,7 @@ export default function VideoEditor({
           a.currentTime = liveTimeline
             ? srcToOutMs(v.currentTime * 1000, liveTimeline) / 1000
             : v.currentTime;
-        void a.play().catch(() => {});
+        void a.play().catch(() => { });
       };
       // A fresh voiceUrl (e.g. after "Refresh voice") reloads the <audio>
       // element from scratch — reset to position 0, paused, with no metadata
@@ -477,7 +509,7 @@ export default function VideoEditor({
           }
           if (video.paused) {
             conductorResumingRef.current = true;
-            void video.play().catch(() => {});
+            void video.play().catch(() => { });
           }
           const wantRate = Math.min(8, Math.max(0.1, segRate)) * rate;
           if (Math.abs(video.playbackRate - wantRate) > 0.01) video.playbackRate = wantRate;
@@ -495,6 +527,8 @@ export default function VideoEditor({
     setSource(null);
     setVoiceUrl(null);
     setVoiceError(null);
+    setRender(null);
+    setShowRender(false);
     // reset undo history for the new project
     past.current = [];
     future.current = [];
@@ -506,6 +540,11 @@ export default function VideoEditor({
         setSavedSpec(v?.edit_spec ?? null);
         setSource(v?.source_video ?? null);
         baseline.current = v?.edit_spec ?? null;
+        // open on the last generated video (play / download); "back to
+        // preview" returns to the editor
+        const last = v?.latest_render ?? null;
+        setRender(last);
+        setShowRender(!!last?.output_key);
       })
       .catch((e) => setError(String(e)));
   }, [id]);
@@ -547,11 +586,11 @@ export default function VideoEditor({
     setSpec((s) =>
       s
         ? {
-            ...s,
-            segments: s.segments.map((seg, i) =>
-              i === idx ? { ...seg, ...patch } : seg,
-            ),
-          }
+          ...s,
+          segments: s.segments.map((seg, i) =>
+            i === idx ? { ...seg, ...patch } : seg,
+          ),
+        }
         : s,
     );
   }, []);
@@ -600,11 +639,11 @@ export default function VideoEditor({
     setSpec((s) =>
       s
         ? {
-            ...s,
-            segments: s.segments.map((seg, i) =>
-              i === idx ? { ...seg, skipped: !seg.skipped } : seg,
-            ),
-          }
+          ...s,
+          segments: s.segments.map((seg, i) =>
+            i === idx ? { ...seg, skipped: !seg.skipped } : seg,
+          ),
+        }
         : s,
     );
   }, []);
@@ -790,10 +829,11 @@ export default function VideoEditor({
     return () => ro.disconnect();
   }, [source, showRender]);
 
-  const addElement = useCallback((type: EditElement["type"]) => {
-    const el: EditElement =
-      type === "text"
-        ? {
+  const addElement = useCallback(
+    (type: EditElement["type"], mediaKey?: string) => {
+      const el: EditElement =
+        type === "text"
+          ? {
             id: `el_${Date.now()}`,
             type,
             x: 0.1,
@@ -804,28 +844,40 @@ export default function VideoEditor({
             color: "#111827",
             size: 0.07,
           }
-        : {
-            id: `el_${Date.now()}`,
-            type,
-            x: 0.35,
-            y: 0.35,
-            w: 0.3,
-            h: 0.2,
-            color: "#6d5dfb",
-          };
-    setSpec((s) => (s ? { ...s, elements: [...(s.elements ?? []), el] } : s));
-    setSelEl(el.id);
-  }, []);
+          : type === "box"
+            ? {
+              id: `el_${Date.now()}`,
+              type,
+              x: 0.35,
+              y: 0.35,
+              w: 0.3,
+              h: 0.2,
+              color: "#6d5dfb",
+            }
+            : {
+              id: `el_${Date.now()}`,
+              type,
+              x: 0.35,
+              y: 0.35,
+              w: 0.25,
+              h: 0.25,
+              media_key: mediaKey,
+            };
+      setSpec((s) => (s ? { ...s, elements: [...(s.elements ?? []), el] } : s));
+      setSelEl(el.id);
+    },
+    [],
+  );
   const updateElement = useCallback(
     (elId: string, patch: Partial<EditElement>) =>
       setSpec((s) =>
         s
           ? {
-              ...s,
-              elements: (s.elements ?? []).map((e) =>
-                e.id === elId ? { ...e, ...patch } : e,
-              ),
-            }
+            ...s,
+            elements: (s.elements ?? []).map((e) =>
+              e.id === elId ? { ...e, ...patch } : e,
+            ),
+          }
           : s,
       ),
     [],
@@ -1010,9 +1062,9 @@ export default function VideoEditor({
         const segs = s.segments.map((seg, i) =>
           zs[i]
             ? {
-                ...seg,
-                zoom: { ...seg.zoom, enabled: zs[i].zoom, scale: zs[i].scale },
-              }
+              ...seg,
+              zoom: { ...seg.zoom, enabled: zs[i].zoom, scale: zs[i].scale },
+            }
             : seg,
         );
         return { ...s, segments: segs };
@@ -1143,10 +1195,10 @@ export default function VideoEditor({
 
   const activeIdx = spec
     ? spec.segments.findIndex(
-        (s) =>
-          cur * 1000 >= s.source_start_ms &&
-          cur * 1000 < Math.max(s.source_end_ms, s.source_start_ms + 300),
-      )
+      (s) =>
+        cur * 1000 >= s.source_start_ms &&
+        cur * 1000 < Math.max(s.source_end_ms, s.source_start_ms + 300),
+    )
     : -1;
 
   useEffect(() => {
@@ -1170,13 +1222,32 @@ export default function VideoEditor({
   }
 
   const activeSeg = activeIdx >= 0 ? spec.segments[activeIdx] : null;
-  const zoomOn = !!activeSeg?.zoom.enabled && (playing || tab === "Zoom");
-  const zoomSpeed = activeSeg?.zoom.speed ?? 3;
+  // Which zoom is live at the playhead? A standalone timeline zoom wins over
+  // the scene's own zoom; a scene zoom with a time window only runs inside it —
+  // paused or playing, so the preview always matches the render (aiming still
+  // works: selecting a zoom card seeks into its window). Outside the Zoom tab
+  // a paused player stays unzoomed, as before.
+  const tlz = activeTimelineZoom(spec, cur * 1000);
+  const zWin = activeSeg?.zoom;
+  const inZoomWindow =
+    !zWin ||
+    (zWin.end_ms ?? 0) <= (zWin.start_ms ?? 0) ||
+    (cur * 1000 >= zWin.start_ms! && cur * 1000 < zWin.end_ms!);
+  const segZoomOn =
+    !!activeSeg?.zoom.enabled && (playing || tab === "Zoom") && inZoomWindow;
+  const zoomSrc =
+    playing || tab === "Zoom"
+      ? (tlz ?? (segZoomOn ? activeSeg!.zoom : null))
+      : null;
+  const zoomOn = !!zoomSrc;
+  const zoomSpeed = zoomSrc?.speed ?? 3;
   const zoomStyle: React.CSSProperties = {
-    transform: zoomOn ? `scale(${activeSeg!.zoom.scale})` : "scale(1)",
-    transformOrigin: activeSeg
-      ? `${activeSeg.zoom.cx * 100}% ${activeSeg.zoom.cy * 100}%`
-      : "center",
+    transform: zoomOn ? `scale(${zoomSrc!.scale})` : "scale(1)",
+    transformOrigin: zoomSrc
+      ? `${zoomSrc.cx * 100}% ${zoomSrc.cy * 100}%`
+      : activeSeg
+        ? `${activeSeg.zoom.cx * 100}% ${activeSeg.zoom.cy * 100}%`
+        : "center",
     transition: `transform ${((6 - zoomSpeed) * 0.3).toFixed(2)}s ease`,
   };
   const captionText = spec.captions.enabled && activeSeg ? eff(activeSeg) : "";
@@ -1207,12 +1278,12 @@ export default function VideoEditor({
   const cropStyle: React.CSSProperties =
     cropOn && activeTool !== "crop"
       ? {
-          transform: `translate(${((0.5 - (cx + cw / 2)) * 100).toFixed(2)}%, ${(
-            (0.5 - (cy + ch / 2)) *
-            100
-          ).toFixed(2)}%) scale(${cropScale.toFixed(4)})`,
-          transformOrigin: `${((cx + cw / 2) * 100).toFixed(2)}% ${((cy + ch / 2) * 100).toFixed(2)}%`,
-        }
+        transform: `translate(${((0.5 - (cx + cw / 2)) * 100).toFixed(2)}%, ${(
+          (0.5 - (cy + ch / 2)) *
+          100
+        ).toFixed(2)}%) scale(${cropScale.toFixed(4)})`,
+        transformOrigin: `${((cx + cw / 2) * 100).toFixed(2)}% ${((cy + ch / 2) * 100).toFixed(2)}%`,
+      }
       : {};
 
   const totalMs =
@@ -1227,14 +1298,14 @@ export default function VideoEditor({
     icon: string;
     soon?: boolean;
   }[] = [
-    { key: "trim", label: "Trim", icon: "✂" },
-    { key: "crop", label: "Crop", icon: "⛶" },
-    { key: "soon", label: "Rotate", icon: "⟳", soon: true },
-    { key: "soon", label: "Blur", icon: "◐", soon: true },
-    { key: "Elements", label: "Elements", icon: "✦" },
-    { key: "Captions", label: "Captions", icon: "CC" },
-    { key: "enhance", label: "AI Enhance", icon: "✨" },
-  ];
+      { key: "trim", label: "Trim", icon: "✂" },
+      { key: "crop", label: "Crop", icon: "⛶" },
+      { key: "soon", label: "Rotate", icon: "⟳", soon: true },
+      { key: "soon", label: "Blur", icon: "◐", soon: true },
+      { key: "Elements", label: "Elements", icon: "✦" },
+      { key: "Captions", label: "Captions", icon: "CC" },
+      { key: "enhance", label: "AI Enhance", icon: "✨" },
+    ];
 
   return (
     <div className="flex h-screen flex-col bg-[var(--bg)] text-[var(--text)]">
@@ -1290,7 +1361,16 @@ export default function VideoEditor({
               </option>
             ))}
           </select>
-          <ShareButton projectId={id} kind="video" />
+          <ProjectAccess projectId={id} kind="video" />
+          {!rendering && !showRender && render?.status === "done" && render.output_key && (
+            <button
+              onClick={() => setShowRender(true)}
+              title="View or download the last generated video"
+              className="btn btn-secondary btn-sm"
+            >
+              ▶ Generated video
+            </button>
+          )}
           <button
             onClick={doRender}
             disabled={rendering}
@@ -1322,25 +1402,27 @@ export default function VideoEditor({
               <button
                 key={t}
                 onClick={() => setTab(t)}
-                className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
-                  tab === t
-                    ? "bg-[#6d5dfb]/10 text-[#6d5dfb]"
-                    : "text-[var(--text-2)] hover:bg-[var(--hover)]"
-                }`}
+                className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${tab === t
+                  ? "bg-[#6d5dfb]/10 text-[#6d5dfb]"
+                  : "text-[var(--text-2)] hover:bg-[var(--hover)]"
+                  }`}
               >
                 {t}
               </button>
             ))}
             {TOOL_TABS.includes(tab) && (
-              <span className="ml-auto flex items-center gap-2 text-xs text-[var(--text-2)]">
-                {tab}
+              <div className="ml-auto flex items-center">
                 <button
-                  onClick={() => setTab("Script")}
-                  className="btn btn-ghost btn-sm"
+                  onClick={() => {
+                    setTab("Script");
+                    void save();
+                  }}
+                  disabled={saving}
+                  className="btn btn-sm bg-black text-white shadow-sm hover:bg-neutral-800"
                 >
-                  Done
+                  {saving ? "Saving…" : "Done"}
                 </button>
-              </span>
+              </div>
             )}
           </nav>
 
@@ -1367,7 +1449,7 @@ export default function VideoEditor({
                       >
                         {saving ? "Saving…" : "Keep changes"}
                       </button>
-                      {!useOriginal && (
+                      {!useOriginal && voiceStale && (
                         <button
                           onClick={refreshVoice}
                           disabled={saving || voiceLoading}
@@ -1448,11 +1530,10 @@ export default function VideoEditor({
                     <div
                       key={seg.step_id}
                       ref={activeIdx === i ? activeRef : null}
-                      className={`group rounded-xl border px-3 py-2.5 transition-colors ${
-                        activeIdx === i
-                          ? "border-[#6d5dfb]/30 bg-[#6d5dfb]/5"
-                          : "border-transparent hover:bg-[var(--hover)]"
-                      }`}
+                      className={`group rounded-xl border px-3 py-2.5 transition-colors ${activeIdx === i
+                        ? "border-[#6d5dfb]/30 bg-[#6d5dfb]/5"
+                        : "border-transparent hover:bg-[var(--hover)]"
+                        }`}
                     >
                       <div className="mb-1 flex items-center gap-2">
                         <button
@@ -1526,11 +1607,10 @@ export default function VideoEditor({
                                   }
                                 }}
                                 title="click to play · shift-click to strike"
-                                className={`mr-1 rounded px-0.5 ${
-                                  struck
-                                    ? "text-[#c4c9d6] line-through"
-                                    : "hover:bg-[#6d5dfb]/10"
-                                }`}
+                                className={`mr-1 rounded px-0.5 ${struck
+                                  ? "text-[#c4c9d6] line-through"
+                                  : "hover:bg-[#6d5dfb]/10"
+                                  }`}
                               >
                                 {w}
                               </button>
@@ -1570,7 +1650,7 @@ export default function VideoEditor({
                   <button
                     onClick={refreshVoice}
                     disabled={voiceLoading || saving}
-                    className={`btn btn-sm w-full ${dirty ? "btn-primary" : "btn-secondary"}`}
+                    className={`btn btn-sm w-full ${voiceStale ? "btn-primary" : "btn-secondary"}`}
                   >
                     {voiceLoading ? (
                       <>
@@ -1587,14 +1667,12 @@ export default function VideoEditor({
             {tab === "Zoom" && (
               <ZoomPanel
                 spec={spec}
-                zoomIdx={zoomIdx}
-                setZoomIdx={setZoomIdx}
-                activeIdx={activeIdx}
                 mutateSeg={mutateSeg}
                 patchSpec={patchSpec}
                 seekTo={seekTo}
                 onSuggest={aiZooms}
                 suggesting={zoomBusy}
+                cur={cur}
               />
             )}
 
@@ -1603,7 +1681,7 @@ export default function VideoEditor({
             )}
 
             {tab === "Intro" && (
-              <IntroOutroPanel spec={spec} patchSpec={patchSpec} />
+              <IntroOutroPanel spec={spec} patchSpec={patchSpec} projectId={id} />
             )}
 
             {tab === "Elements" && (
@@ -1614,8 +1692,9 @@ export default function VideoEditor({
                 addElement={addElement}
                 updateElement={updateElement}
                 deleteElement={deleteElement}
-                dur={dur}
+                totalMs={totalMs}
                 cur={cur}
+                projectId={id}
               />
             )}
           </div>
@@ -1628,13 +1707,12 @@ export default function VideoEditor({
               <div className="mb-2 flex items-center gap-2 text-sm">
                 <span className="text-[var(--text-2)]">Generated video</span>
                 <span
-                  className={`badge ${
-                    render.status === "done"
-                      ? "bg-emerald-100 text-emerald-700"
-                      : render.status === "error"
-                        ? "bg-red-100 text-red-700"
-                        : "bg-amber-100 text-amber-700"
-                  }`}
+                  className={`badge ${render.status === "done"
+                    ? "bg-emerald-100 text-emerald-700"
+                    : render.status === "error"
+                      ? "bg-red-100 text-red-700"
+                      : "bg-amber-100 text-amber-700"
+                    }`}
                 >
                   {render.status}
                 </span>
@@ -1650,9 +1728,8 @@ export default function VideoEditor({
                 )}
                 <button
                   onClick={() => setShowRender(false)}
-                  className={`btn btn-ghost btn-sm ${
-                    render.status === "done" && render.output_key ? "" : "ml-auto"
-                  }`}
+                  className={`btn btn-ghost btn-sm ${render.status === "done" && render.output_key ? "" : "ml-auto"
+                    }`}
                 >
                   ← back to preview
                 </button>
@@ -1776,11 +1853,11 @@ export default function VideoEditor({
                             if (aiVoiceActive && audioRef.current) {
                               audioRef.current.currentTime = liveTimeline
                                 ? srcToOutMs(
-                                    e.currentTarget.currentTime * 1000,
-                                    liveTimeline,
-                                  ) / 1000
+                                  e.currentTarget.currentTime * 1000,
+                                  liveTimeline,
+                                ) / 1000
                                 : e.currentTarget.currentTime;
-                              void audioRef.current.play().catch(() => {});
+                              void audioRef.current.play().catch(() => { });
                             }
                           }}
                           onPause={() => {
@@ -1804,9 +1881,9 @@ export default function VideoEditor({
                             if (aiVoiceActive && audioRef.current)
                               audioRef.current.currentTime = liveTimeline
                                 ? srcToOutMs(
-                                    e.currentTarget.currentTime * 1000,
-                                    liveTimeline,
-                                  ) / 1000
+                                  e.currentTarget.currentTime * 1000,
+                                  liveTimeline,
+                                ) / 1000
                                 : e.currentTarget.currentTime;
                           }}
                         />
@@ -1873,7 +1950,7 @@ export default function VideoEditor({
                   type="range"
                   min={0}
                   max={dur || 1}
-                  step={0.05}
+                  step="any"
                   value={Math.min(dur, cur)}
                   onChange={(e) => seekTo(Number(e.target.value))}
                   className="flex-1 accent-[#6d5dfb]"
@@ -2002,11 +2079,10 @@ export default function VideoEditor({
                   setActiveTool((t) => (t === "crop" ? null : "crop"));
                 } else setTab(c.key as Tab);
               }}
-              className={`inline-flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-sm font-medium transition-all ${
-                active || capOn
-                  ? "border-[#6d5dfb] bg-[#6d5dfb]/10 text-[#6d5dfb]"
-                  : "border-[var(--border)] bg-[var(--bg)] text-[var(--text-2)] hover:bg-[var(--hover)]"
-              } ${c.soon ? "opacity-40" : ""}`}
+              className={`inline-flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-sm font-medium transition-all ${active || capOn
+                ? "border-[#6d5dfb] bg-[#6d5dfb]/10 text-[#6d5dfb]"
+                : "border-[var(--border)] bg-[var(--bg)] text-[var(--text-2)] hover:bg-[var(--hover)]"
+                } ${c.soon ? "opacity-40" : ""}`}
             >
               {busy ? (
                 <Spinner />
@@ -2081,6 +2157,19 @@ export default function VideoEditor({
           onMove={moveSegment}
           onResize={resizeSegment}
           onResizeStart={resizeSegmentStart}
+          onZoomMove={(zid, startMs) =>
+            patchSpec({
+              zooms: (spec.zooms ?? []).map((z) =>
+                z.id === zid
+                  ? {
+                    ...z,
+                    start_ms: Math.round(startMs),
+                    end_ms: Math.round(startMs) + (z.end_ms - z.start_ms),
+                  }
+                  : z,
+              ),
+            })
+          }
         />
       )}
     </div>
@@ -2107,11 +2196,10 @@ function IconBtn({
       onClick={onClick}
       disabled={disabled}
       title={title}
-      className={`rounded-md px-1.5 py-1 text-xs transition-colors disabled:opacity-40 ${
-        danger
-          ? "text-[var(--text-3)] hover:bg-red-50 hover:text-red-500"
-          : "text-[var(--text-2)] hover:bg-[var(--hover)]"
-      }`}
+      className={`rounded-md px-1.5 py-1 text-xs transition-colors disabled:opacity-40 ${danger
+        ? "text-[var(--text-3)] hover:bg-red-50 hover:text-red-500"
+        : "text-[var(--text-2)] hover:bg-[var(--hover)]"
+        }`}
     >
       {children}
     </button>
@@ -2120,27 +2208,25 @@ function IconBtn({
 
 function ZoomPanel({
   spec,
-  zoomIdx,
-  setZoomIdx,
-  activeIdx,
   mutateSeg,
   patchSpec,
   seekTo,
   onSuggest,
   suggesting,
+  cur,
 }: {
   spec: EditSpec;
-  zoomIdx: number | null;
-  setZoomIdx: (n: number) => void;
-  activeIdx: number;
   mutateSeg: (i: number, p: Partial<EditSegment>) => void;
   patchSpec: (p: Partial<EditSpec>) => void;
   seekTo: (s: number) => void;
   onSuggest: () => void;
   suggesting: boolean;
+  cur: number;
 }) {
+  // selection key: `tl:<id>` for a playhead-added zoom, `seg:<step_id>` for a
+  // scene-attached one — one list, one selection
+  const [selZoomId, setSelZoomId] = useState<string | null>(null);
   const motionZoom = spec.motion_zoom ?? true;
-  const zi = zoomIdx ?? (activeIdx >= 0 ? activeIdx : 0);
   if (!spec.segments.length)
     return <p className="text-sm text-[var(--text-3)]">No scenes to zoom.</p>;
   // a manual tweak takes ownership of an auto-added zoom (drops the "auto" badge)
@@ -2158,6 +2244,68 @@ function ZoomPanel({
       ),
     });
   };
+
+  // ---- standalone timeline zooms (spec.zooms) ----
+  const tlZooms = spec.zooms ?? [];
+  const clipEndMs = Math.max(
+    1000,
+    ...spec.segments.map((s) => s.source_end_ms),
+  );
+  const patchTlZoom = (id: string, p: Partial<ZoomRegion>) =>
+    patchSpec({
+      zooms: tlZooms.map((z) => (z.id === id ? { ...z, ...p } : z)),
+    });
+  const addTlZoom = () => {
+    // 1s block at the playhead (kept inside the clip); drag it into place
+    const start = Math.round(
+      Math.max(0, Math.min(cur * 1000, clipEndMs - 1000)),
+    );
+    const z: ZoomRegion = {
+      id: `z${Date.now().toString(36)}`,
+      start_ms: start,
+      end_ms: start + 1000,
+      scale: 1.6,
+      cx: 0.5,
+      cy: 0.5,
+      speed: 3,
+    };
+    // stored sorted so the new zoom slots between its neighbours in time
+    patchSpec({
+      zooms: [...tlZooms, z].sort((a, b) => a.start_ms - b.start_ms),
+    });
+    setSelZoomId(`tl:${z.id}`);
+  };
+  const pickTlPos = (id: string) => (e: React.PointerEvent<HTMLDivElement>) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    patchTlZoom(id, {
+      cx: Number(
+        Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)).toFixed(3),
+      ),
+      cy: Number(
+        Math.min(1, Math.max(0, (e.clientY - r.top) / r.height)).toFixed(3),
+      ),
+    });
+  };
+
+  // ONE time-ordered list: playhead-added zooms and scene-attached zooms
+  // (manual, auto, AI) merged and sorted by when they fire.
+  type ZoomEntry =
+    | { kind: "tl"; z: ZoomRegion; start: number }
+    | { kind: "seg"; i: number; start: number };
+  const entries: ZoomEntry[] = [
+    ...tlZooms.map((z) => ({ kind: "tl" as const, z, start: z.start_ms })),
+    ...spec.segments.flatMap((s, i) => {
+      if (!s.zoom.enabled) return [];
+      const hasWin = (s.zoom.end_ms ?? 0) > (s.zoom.start_ms ?? 0);
+      return [
+        {
+          kind: "seg" as const,
+          i,
+          start: hasWin ? s.zoom.start_ms! : s.source_start_ms,
+        },
+      ];
+    }),
+  ].sort((a, b) => a.start - b.start);
   return (
     <div className="space-y-5">
       <label className="flex cursor-pointer items-start justify-between gap-3 rounded-xl border border-[var(--border)] bg-[var(--card)] p-3">
@@ -2189,231 +2337,397 @@ function ZoomPanel({
           "✨ Suggest zooms with AI"
         )}
       </button>
+      {/* ONE time-ordered list of every zoom on the clip. A new zoom sorts
+          into place between its neighbours. */}
       <div>
         <div className="mb-1 flex items-center justify-between">
-          <span className="label">Scenes</span>
-          <span className="text-xs text-[var(--text-3)]">
-            {
-              spec.segments.filter(
-                (s) => s.zoom.enabled || s.zoom.auto !== false,
-              ).length
-            }{" "}
-            of {spec.segments.length} zoomed
-          </span>
+          <span className="label">Zooms</span>
+          <div className="flex items-center gap-2">
+            {entries.length > 0 && (
+              <span className="text-xs text-[var(--text-3)]">
+                {entries.length}
+              </span>
+            )}
+            <button
+              onClick={addTlZoom}
+              className="btn btn-secondary btn-sm"
+              title="Add a 1s zoom at the playhead, then drag it on the Zoom track"
+            >
+              ＋ Add at playhead
+            </button>
+          </div>
         </div>
-        {/* one box per scene — click to expand its own position / level / speed editor.
-            Default state is ACTIVE (auto): the generator zooms toward the mouse click
-            unless the user turns the scene off. */}
+        {!entries.length && (
+          <p className="text-xs text-[var(--text-3)]">
+            No zooms yet — add one at the playhead, then drag the yellow block
+            on the Zoom track to position it. Auto and AI zooms show up here
+            too once created.
+          </p>
+        )}
         <div className="space-y-2 pr-0.5">
-          {spec.segments.map((s, i) => {
-            const open = zi === i;
-            const displayOn = s.zoom.enabled || s.zoom.auto !== false; // auto is the default
-            return (
-              <div
-                key={s.step_id}
-                onClick={() => {
-                  setZoomIdx(i);
-                  seekTo(s.source_start_ms / 1000);
-                }}
-                className={`cursor-pointer rounded-xl border p-2.5 transition-colors ${
-                  open
-                    ? "border-[#6d5dfb] bg-[#6d5dfb]/5"
-                    : displayOn
-                      ? "border-[var(--border)] bg-[var(--card)] hover:bg-[var(--hover)]"
-                      : "border-dashed border-[var(--border)] bg-[var(--bg)] hover:bg-[var(--hover)]"
-                }`}
-              >
-                <div className="flex items-center gap-2">
-                  <span className="w-5 flex-none text-right font-mono text-[11px] text-[var(--text-3)]">
-                    {i + 1}
-                  </span>
-                  <span className="flex-none font-mono text-[11px] text-[#6d5dfb]">
-                    {mmss(s.source_start_ms / 1000)}
-                  </span>
-                  <span className="min-w-0 flex-1 truncate text-[13px] font-medium">
-                    {s.target ?? "Scene"}
-                  </span>
-                  {displayOn && !open && (
-                    <span
-                      className={`badge flex-none ${
-                        s.zoom.enabled && !s.zoom.auto
-                          ? "bg-[#6d5dfb]/10 text-[#6d5dfb]"
-                          : "bg-amber-100 text-amber-700"
-                      }`}
-                    >
-                      {s.zoom.enabled
-                        ? `${s.zoom.auto ? "auto" : "zoom"} ${Math.round(s.zoom.scale * 100)}%`
-                        : "auto"}
-                    </span>
-                  )}
-                  <label
-                    onClick={(e) => e.stopPropagation()}
-                    className="flex flex-none cursor-pointer items-center gap-1.5 text-[11px] font-medium text-[var(--text-2)]"
-                    title={
-                      displayOn
-                        ? "Turn zoom off for this scene"
-                        : "Turn zoom back on (auto position)"
-                    }
-                  >
-                    {displayOn ? "Active" : "Off"}
-                    <input
-                      type="checkbox"
-                      checked={displayOn}
-                      onChange={(e) =>
-                        // off = explicit opt-out (generator respects it);
-                        // on = back to auto (position picked from the click at generate)
-                        mutateSeg(i, {
-                          zoom: {
-                            ...s.zoom,
-                            enabled: false,
-                            auto: e.target.checked,
-                          },
-                        })
-                      }
-                      className="h-4 w-8 accent-[#6d5dfb]"
-                    />
-                  </label>
-                </div>
-
-                {/* expanded editor for the selected scene */}
-                {open && s.zoom.enabled && (
-                  <div
-                    onClick={(e) => e.stopPropagation()}
-                    className="mt-2.5 cursor-default space-y-3 border-t border-[var(--border)] pt-2.5"
-                  >
-                    <div className="flex items-center gap-2">
-                      <span
-                        className={`badge ${s.zoom.auto ? "bg-amber-100 text-amber-700" : "bg-[#6d5dfb]/10 text-[#6d5dfb]"}`}
-                      >
-                        {s.zoom.auto ? "auto zoom" : "zoom"}
-                      </span>
-                      <span className="text-[11px] text-[var(--text-3)]">
-                        center {Math.round(s.zoom.cx * 100)},
-                        {Math.round(s.zoom.cy * 100)}
-                      </span>
-                    </div>
-                    <div>
-                      <div className="mb-1 text-[11px] font-medium text-[var(--text-2)]">
-                        Zoom position — click to aim
-                      </div>
-                      <div
-                        onPointerDown={(e) => {
-                          e.currentTarget.setPointerCapture(e.pointerId);
-                          pickPosAt(i)(e);
-                        }}
-                        onPointerMove={(e) =>
-                          e.buttons === 1 && pickPosAt(i)(e)
-                        }
-                        className="relative grid aspect-video w-full cursor-crosshair grid-cols-6 grid-rows-4 overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--bg)]"
-                      >
-                        {Array.from({ length: 24 }).map((_, k) => (
-                          <div
-                            key={k}
-                            className="border border-[var(--border)]/70"
-                          />
-                        ))}
-                        <span
-                          style={{
-                            left: `${s.zoom.cx * 100}%`,
-                            top: `${s.zoom.cy * 100}%`,
-                          }}
-                          className="pointer-events-none absolute h-4 w-4 -translate-x-1/2 -translate-y-1/2 rounded-full bg-[#6d5dfb] shadow ring-2 ring-white"
-                        />
-                      </div>
-                    </div>
-                    {(
-                      [
-                        [
-                          "Zoom level",
-                          Math.round(s.zoom.scale * 100),
-                          100,
-                          250,
-                          5,
-                          (v: number) =>
-                            setZoomAt(i, { enabled: true, scale: v / 100 }),
-                        ],
-                        [
-                          "Zoom speed",
-                          s.zoom.speed ?? 3,
-                          1,
-                          5,
-                          1,
-                          (v: number) => setZoomAt(i, { speed: v }),
-                        ],
-                      ] as const
-                    ).map(([label, val, min, max, step, on]) => (
-                      <div key={label}>
-                        <div className="mb-1 flex items-center justify-between">
-                          <span className="text-[11px] font-medium text-[var(--text-2)]">
-                            {label}
-                          </span>
-                          <span className="rounded border border-[var(--border)] px-1.5 text-xs">
-                            {val}
-                          </span>
-                        </div>
-                        <input
-                          type="range"
-                          min={min}
-                          max={max}
-                          step={step}
-                          value={val}
-                          onChange={(e) => on(Number(e.target.value))}
-                          className="w-full accent-[#6d5dfb]"
-                        />
-                      </div>
-                    ))}
-                    <button
-                      onClick={() => setZoomAt(i, { enabled: false })}
-                      className="btn btn-secondary btn-sm w-full"
-                    >
-                      🗑 Remove zoom from this scene
-                    </button>
-                  </div>
-                )}
-
-                {open && !s.zoom.enabled && displayOn && (
-                  <div
-                    onClick={(e) => e.stopPropagation()}
-                    className="mt-2.5 cursor-default space-y-2.5 border-t border-[var(--border)] pt-2.5"
-                  >
-                    <p className="text-[11px] text-[var(--text-3)]">
-                      <span className="badge mr-1.5 bg-amber-100 text-amber-700">
-                        auto
-                      </span>
-                      Position is picked from your mouse click when the video
-                      generates. Click the grid to set it manually instead.
-                    </p>
-                    <div
-                      onPointerDown={(e) => {
-                        e.currentTarget.setPointerCapture(e.pointerId);
-                        pickPosAt(i)(e);
-                      }}
-                      onPointerMove={(e) => e.buttons === 1 && pickPosAt(i)(e)}
-                      className="relative grid aspect-video w-full cursor-crosshair grid-cols-6 grid-rows-4 overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--bg)]"
-                    >
-                      {Array.from({ length: 24 }).map((_, k) => (
-                        <div
-                          key={k}
-                          className="border border-[var(--border)]/70"
-                        />
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {open && !displayOn && (
-                  <p className="mt-2 pl-7 text-[11px] text-[var(--text-3)]">
-                    Zoom is off for this scene — the generator will leave it
-                    wide. Switch to Active to zoom again.
-                  </p>
-                )}
-              </div>
-            );
-          })}
+          {entries.map((en) =>
+            en.kind === "tl" ? renderTlCard(en.z) : renderSegCard(en.i),
+          )}
         </div>
       </div>
     </div>
   );
+
+  function renderTlCard(z: ZoomRegion) {
+    const key = `tl:${z.id}`;
+    const open = selZoomId === key;
+    const durMs = z.end_ms - z.start_ms;
+    // half-open window so a zoom ending at 8s and one starting at 8s never
+    // both read as live when the playhead sits on the seam
+    const live = cur * 1000 >= z.start_ms && cur * 1000 < z.end_ms;
+    return (
+      <div
+        key={key}
+        onClick={() => {
+          setSelZoomId(open ? null : key);
+          seekTo(z.start_ms / 1000);
+        }}
+        className={`cursor-pointer rounded-xl border p-2.5 transition-colors ${open
+          ? "border-amber-400 bg-amber-400/5"
+          : "border-[var(--border)] bg-[var(--card)] hover:bg-[var(--hover)]"
+          } ${live ? "ring-2 ring-amber-500" : ""}`}
+      >
+        <div className="flex items-center gap-2">
+          <span className="flex-none text-[13px]">⛶</span>
+          {live && (
+            <span className="badge flex-none animate-pulse bg-amber-500 text-white">
+              ● active
+            </span>
+          )}
+          <span className="flex-none font-mono text-[11px] text-amber-600">
+            {mmss(z.start_ms / 1000)}–{mmss(z.end_ms / 1000)}
+          </span>
+          <span className="min-w-0 flex-1 truncate text-[13px] font-medium">
+            {(durMs / 1000).toFixed(1)}s zoom
+          </span>
+          <span className="badge flex-none bg-amber-100 text-amber-700">
+            {Math.round(z.scale * 100)}%
+          </span>
+          <IconBtn
+            danger
+            title="Remove this zoom"
+            onClick={() =>
+              patchSpec({
+                zooms: tlZooms.filter((x) => x.id !== z.id),
+              })
+            }
+          >
+            🗑
+          </IconBtn>
+        </div>
+        {open && (
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="mt-2.5 cursor-default space-y-3 border-t border-[var(--border)] pt-2.5"
+          >
+            <div>
+              <div className="mb-1 text-[11px] font-medium text-[var(--text-2)]">
+                Zoom position — click to aim
+              </div>
+              <div
+                onPointerDown={(e) => {
+                  e.currentTarget.setPointerCapture(e.pointerId);
+                  pickTlPos(z.id)(e);
+                }}
+                onPointerMove={(e) => e.buttons === 1 && pickTlPos(z.id)(e)}
+                className="relative grid aspect-video w-full cursor-crosshair grid-cols-6 grid-rows-4 overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--bg)]"
+              >
+                {Array.from({ length: 24 }).map((_, k) => (
+                  <div key={k} className="border border-[var(--border)]/70" />
+                ))}
+                <span
+                  style={{
+                    left: `${z.cx * 100}%`,
+                    top: `${z.cy * 100}%`,
+                  }}
+                  className="pointer-events-none absolute h-4 w-4 -translate-x-1/2 -translate-y-1/2 rounded-full bg-amber-500 shadow ring-2 ring-white"
+                />
+              </div>
+            </div>
+            {(
+              [
+                [
+                  "Duration (s)",
+                  durMs / 1000,
+                  0.5,
+                  8,
+                  0.1,
+                  (v: number) =>
+                    patchTlZoom(z.id, {
+                      end_ms: Math.min(
+                        clipEndMs,
+                        z.start_ms + Math.round(v * 1000),
+                      ),
+                    }),
+                ],
+                [
+                  "Zoom level",
+                  Math.round(z.scale * 100),
+                  100,
+                  250,
+                  5,
+                  (v: number) => patchTlZoom(z.id, { scale: v / 100 }),
+                ],
+                [
+                  "Zoom speed",
+                  z.speed ?? 3,
+                  1,
+                  5,
+                  1,
+                  (v: number) => patchTlZoom(z.id, { speed: v }),
+                ],
+              ] as const
+            ).map(([label, val, min, max, step, on]) => (
+              <div key={label}>
+                <div className="mb-1 flex items-center justify-between">
+                  <span className="text-[11px] font-medium text-[var(--text-2)]">
+                    {label}
+                  </span>
+                  <span className="rounded border border-[var(--border)] px-1.5 text-xs">
+                    {val}
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={min}
+                  max={max}
+                  step={step}
+                  value={val}
+                  onChange={(e) => on(Number(e.target.value))}
+                  className="w-full accent-amber-500"
+                />
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  function renderSegCard(i: number) {
+    const s = spec.segments[i];
+    const key = `seg:${s.step_id}`;
+    const open = selZoomId === key;
+    // the zoom's own window, else the whole scene
+    const hasWin = (s.zoom.end_ms ?? 0) > (s.zoom.start_ms ?? 0);
+    const w0 = hasWin ? s.zoom.start_ms! : s.source_start_ms;
+    const w1 = hasWin ? s.zoom.end_ms! : s.source_end_ms;
+    const live = cur * 1000 >= w0 && cur * 1000 < w1;
+    return (
+      <div
+        key={key}
+        onClick={() => {
+          setSelZoomId(open ? null : key);
+          seekTo(w0 / 1000);
+        }}
+        className={`cursor-pointer rounded-xl border p-2.5 transition-colors ${open
+          ? "border-amber-400 bg-amber-400/5"
+          : "border-[var(--border)] bg-[var(--card)] hover:bg-[var(--hover)]"
+          } ${live ? "ring-2 ring-amber-500" : ""}`}
+      >
+        <div className="flex items-center gap-2">
+          <span className="flex-none text-[13px]">⛶</span>
+          {live && (
+            <span className="badge flex-none animate-pulse bg-amber-500 text-white">
+              ● active
+            </span>
+          )}
+          <span className="flex-none font-mono text-[11px] text-amber-600">
+            {mmss(w0 / 1000)}–{mmss(w1 / 1000)}
+          </span>
+          <span className="min-w-0 flex-1 truncate text-[13px] font-medium">
+            {s.target ?? "Scene"}
+          </span>
+          <span
+            className={`badge flex-none ${s.zoom.auto
+              ? "bg-amber-100 text-amber-700"
+              : "bg-[#6d5dfb]/10 text-[#6d5dfb]"
+              }`}
+          >
+            {s.zoom.auto ? "auto" : "zoom"}{" "}
+            {Math.round(s.zoom.scale * 100)}%
+          </span>
+          <IconBtn
+            danger
+            title="Remove this zoom — auto-zoom will leave this scene wide"
+            onClick={() =>
+              mutateSeg(i, {
+                zoom: { ...s.zoom, enabled: false, auto: false },
+              })
+            }
+          >
+            🗑
+          </IconBtn>
+        </div>
+
+        {/* expanded editor */}
+        {open && (
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="mt-2.5 cursor-default space-y-3 border-t border-[var(--border)] pt-2.5"
+          >
+            <div className="flex items-center gap-2">
+              <span
+                className={`badge ${s.zoom.auto ? "bg-amber-100 text-amber-700" : "bg-[#6d5dfb]/10 text-[#6d5dfb]"}`}
+              >
+                {s.zoom.auto ? "auto zoom" : "zoom"}
+              </span>
+              <span className="text-[11px] text-[var(--text-3)]">
+                center {Math.round(s.zoom.cx * 100)},
+                {Math.round(s.zoom.cy * 100)}
+              </span>
+            </div>
+            <div>
+              <div className="mb-1 text-[11px] font-medium text-[var(--text-2)]">
+                Zoom position — click to aim
+              </div>
+              <div
+                onPointerDown={(e) => {
+                  e.currentTarget.setPointerCapture(e.pointerId);
+                  pickPosAt(i)(e);
+                }}
+                onPointerMove={(e) =>
+                  e.buttons === 1 && pickPosAt(i)(e)
+                }
+                className="relative grid aspect-video w-full cursor-crosshair grid-cols-6 grid-rows-4 overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--bg)]"
+              >
+                {Array.from({ length: 24 }).map((_, k) => (
+                  <div
+                    key={k}
+                    className="border border-[var(--border)]/70"
+                  />
+                ))}
+                <span
+                  style={{
+                    left: `${s.zoom.cx * 100}%`,
+                    top: `${s.zoom.cy * 100}%`,
+                  }}
+                  className="pointer-events-none absolute h-4 w-4 -translate-x-1/2 -translate-y-1/2 rounded-full bg-[#6d5dfb] shadow ring-2 ring-white"
+                />
+              </div>
+            </div>
+            {(
+              [
+                [
+                  "Zoom level",
+                  Math.round(s.zoom.scale * 100),
+                  100,
+                  250,
+                  5,
+                  (v: number) =>
+                    setZoomAt(i, { enabled: true, scale: v / 100 }),
+                ],
+                [
+                  "Zoom speed",
+                  s.zoom.speed ?? 3,
+                  1,
+                  5,
+                  1,
+                  (v: number) => setZoomAt(i, { speed: v }),
+                ],
+              ] as const
+            ).map(([label, val, min, max, step, on]) => (
+              <div key={label}>
+                <div className="mb-1 flex items-center justify-between">
+                  <span className="text-[11px] font-medium text-[var(--text-2)]">
+                    {label}
+                  </span>
+                  <span className="rounded border border-[var(--border)] px-1.5 text-xs">
+                    {val}
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={min}
+                  max={max}
+                  step={step}
+                  value={val}
+                  onChange={(e) => on(Number(e.target.value))}
+                  className="w-full accent-[#6d5dfb]"
+                />
+              </div>
+            ))}
+            {(() => {
+              // Zoom window: which part of the scene actually zooms.
+              // Stored in absolute source ms (same convention as crops
+              // and elements); no window = the whole scene.
+              const segLen = Math.max(
+                400,
+                s.source_end_ms - s.source_start_ms,
+              );
+              const hasWin =
+                (s.zoom.end_ms ?? 0) > (s.zoom.start_ms ?? 0);
+              const relStart = hasWin
+                ? Math.max(0, s.zoom.start_ms! - s.source_start_ms)
+                : 0;
+              const relEnd = hasWin
+                ? Math.min(segLen, s.zoom.end_ms! - s.source_start_ms)
+                : segLen;
+              const setWin = (a: number, b: number) =>
+                setZoomAt(i, {
+                  start_ms: s.source_start_ms + Math.max(0, a),
+                  end_ms:
+                    s.source_start_ms +
+                    Math.min(segLen, Math.max(b, a + 300)),
+                });
+              return (
+                <div>
+                  <div className="mb-1 flex items-center justify-between">
+                    <span className="text-[11px] font-medium text-[var(--text-2)]">
+                      Zoom timing
+                    </span>
+                    <span className="rounded border border-[var(--border)] px-1.5 text-xs">
+                      {mmss((s.source_start_ms + relStart) / 1000)}–
+                      {mmss((s.source_start_ms + relEnd) / 1000)}
+                    </span>
+                  </div>
+                  {(
+                    [
+                      ["Zoom in at", relStart, (v: number) => setWin(v, relEnd)],
+                      ["Zoom out at", relEnd, (v: number) => setWin(Math.min(relStart, v - 300), v)],
+                    ] as const
+                  ).map(([label, val, on]) => (
+                    <div key={label} className="flex items-center gap-2">
+                      <span className="w-16 flex-none text-[11px] text-[var(--text-3)]">
+                        {label}
+                      </span>
+                      <input
+                        type="range"
+                        min={0}
+                        max={segLen}
+                        step={100}
+                        value={val}
+                        onChange={(e) => on(Number(e.target.value))}
+                        className="w-full accent-[#6d5dfb]"
+                      />
+                    </div>
+                  ))}
+                  {hasWin && (
+                    <button
+                      onClick={() =>
+                        setZoomAt(i, {
+                          start_ms: undefined,
+                          end_ms: undefined,
+                        })
+                      }
+                      className="mt-1 text-[11px] text-[var(--text-3)] underline"
+                    >
+                      Reset — zoom the whole scene
+                    </button>
+                  )}
+                </div>
+              );
+            })()}
+          </div>
+        )}
+      </div>
+    );
+  }
 }
 
 function BackgroundPanel({
@@ -2451,11 +2765,10 @@ function BackgroundPanel({
           <button
             key={p.id}
             onClick={() => pick(p.id)}
-            className={`rounded-xl border p-2 text-left transition-all ${
-              cur === p.id
-                ? "border-[#6d5dfb] ring-2 ring-[#6d5dfb]/40"
-                : "border-[var(--border)] hover:bg-[var(--hover)]"
-            }`}
+            className={`rounded-xl border p-2 text-left transition-all ${cur === p.id
+              ? "border-[#6d5dfb] ring-2 ring-[#6d5dfb]/40"
+              : "border-[var(--border)] hover:bg-[var(--hover)]"
+              }`}
           >
             <span
               className="mb-1.5 block h-12 w-full rounded-lg"
@@ -2518,12 +2831,35 @@ function BackgroundPanel({
   );
 }
 
+function getVideoDurationMs(file: File): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const video = document.createElement("video");
+    video.preload = "metadata";
+    const url = URL.createObjectURL(file);
+    video.src = url;
+    video.onloadedmetadata = () => {
+      URL.revokeObjectURL(url);
+      if (Number.isFinite(video.duration) && video.duration > 0) {
+        resolve(Math.round(video.duration * 1000));
+      } else {
+        reject(new Error("Invalid duration"));
+      }
+    };
+    video.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("Failed to load video metadata"));
+    };
+  });
+}
+
 function IntroOutroPanel({
   spec,
   patchSpec,
+  projectId,
 }: {
   spec: EditSpec;
   patchSpec: (p: Partial<EditSpec>) => void;
+  projectId: string;
 }) {
   const intro = spec.intro ?? {
     enabled: false,
@@ -2535,74 +2871,229 @@ function IntroOutroPanel({
     title: "Thanks for watching",
     duration_ms: 1500,
   };
+
+  const [uploading, setUploading] = useState<
+    null | "intro_video" | "intro_image" | "outro_video" | "outro_image"
+  >(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+
+  async function handleUpload(
+    which: "intro" | "outro",
+    mediaType: "video" | "image",
+    file: File,
+  ) {
+    const key = `${which}_${mediaType}` as typeof uploading;
+    setUploading(key);
+    setUploadError(null);
+    try {
+      let durationMs: number | undefined;
+      if (mediaType === "video") {
+        try {
+          durationMs = await getVideoDurationMs(file);
+        } catch {
+          // ignore probe error
+        }
+      }
+      const ext = file.name.split(".").pop() || (mediaType === "video" ? "mp4" : "png");
+      const storageKey = await uploadMedia(
+        `projects/${projectId}/${which}_${mediaType}_${Date.now()}.${ext}`,
+        file,
+      );
+      const card = which === "intro" ? intro : outro;
+      const patch = {
+        ...card,
+        media_key: storageKey,
+        media_type: mediaType,
+        ...(durationMs ? { duration_ms: durationMs } : {}),
+      };
+      patchSpec(which === "intro" ? { intro: patch } : { outro: patch });
+    } catch (e) {
+      setUploadError(String(e));
+    } finally {
+      setUploading(null);
+    }
+  }
+
+  function removeMedia(which: "intro" | "outro") {
+    const card = which === "intro" ? intro : outro;
+    const patch = {
+      ...card,
+      media_key: undefined,
+      media_type: undefined,
+      duration_ms: Math.min(5000, Math.max(500, card.duration_ms || 2000)),
+    };
+    patchSpec(which === "intro" ? { intro: patch } : { outro: patch });
+  }
+
   return (
     <div className="space-y-5">
       <p className="text-xs text-[var(--text-3)]">
         Title cards shown before and after the recording. Turn either off to
-        skip it entirely.
+        skip it entirely. Optionally attach a short video clip or image to play
+        instead of the plain title card.
       </p>
 
-      {(
-        [
-          [
-            "Intro",
-            intro,
-            (p: Partial<EditSpec["intro"]>) =>
-              patchSpec({ intro: { ...intro, ...p } }),
-            500,
-            5000,
-          ],
-          [
-            "Outro",
-            outro,
-            (p: Partial<EditSpec["outro"]>) =>
-              patchSpec({ outro: { ...outro, ...p } }),
-            500,
-            5000,
-          ],
-        ] as const
-      ).map(([label, card, set, minMs, maxMs]) => (
-        <div
-          key={label}
-          className="rounded-xl border border-[var(--border)] p-3"
-        >
-          <label className="flex cursor-pointer items-center justify-between">
-            <span className="text-sm font-medium">{label}</span>
-            <input
-              type="checkbox"
-              checked={card.enabled}
-              onChange={(e) => set({ enabled: e.target.checked })}
-              className="h-4 w-8 accent-[#6d5dfb]"
-            />
-          </label>
-          {card.enabled && (
-            <div className="mt-3 space-y-3">
+      {(["intro", "outro"] as const).map((which) => {
+        const card = (which === "intro" ? intro : outro) as EditSpec["intro"];
+        const set = (p: Partial<EditSpec["intro"]>) =>
+          patchSpec(which === "intro" ? { intro: { ...intro, ...p } } : { outro: { ...outro, ...p } });
+        const minMs = 500;
+        const maxMs = 5000;
+        const label = which === "intro" ? "Intro" : "Outro";
+        const isUploadingVideo = uploading === `${which}_video`;
+        const isUploadingImage = uploading === `${which}_image`;
+        return (
+          <div key={which} className="rounded-xl border border-[var(--border)] p-3">
+            <label className="flex cursor-pointer items-center justify-between">
+              <span className="text-sm font-medium">{label}</span>
               <input
-                value={card.title}
-                onChange={(e) => set({ title: e.target.value })}
-                placeholder={`${label} text`}
-                className="input"
+                type="checkbox"
+                checked={card.enabled}
+                onChange={(e) => set({ enabled: e.target.checked })}
+                className="h-4 w-8 accent-[#6d5dfb]"
               />
-              <div className="flex items-center gap-3 text-xs">
-                <span className="text-[var(--text-3)]">Short</span>
-                <input
-                  type="range"
-                  min={minMs}
-                  max={maxMs}
-                  step={100}
-                  value={card.duration_ms}
-                  onChange={(e) => set({ duration_ms: Number(e.target.value) })}
-                  className="flex-1 accent-[#6d5dfb]"
-                />
-                <span className="text-[var(--text-3)]">Long</span>
-                <span className="w-14 text-right font-mono text-[var(--text-2)]">
-                  {(card.duration_ms / 1000).toFixed(1)}s
-                </span>
+            </label>
+            {card.enabled && (
+              <div className="mt-3 space-y-3">
+                {/* Title text */}
+                {!card.media_key && (
+                  <input
+                    value={card.title}
+                    onChange={(e) => set({ title: e.target.value })}
+                    placeholder={`${label} text`}
+                    className="input"
+                  />
+                )}
+                {/* Duration slider */}
+                {card.media_type !== "video" && (
+                  <div className="flex items-center gap-3 text-xs">
+                    <span className="text-[var(--text-3)]">Short</span>
+                    <input
+                      type="range"
+                      min={minMs}
+                      max={maxMs}
+                      step={100}
+                      value={card.duration_ms}
+                      onChange={(e) => set({ duration_ms: Number(e.target.value) })}
+                      className="flex-1 accent-[#6d5dfb]"
+                    />
+                    <span className="text-[var(--text-3)]">Long</span>
+                    <span className="w-14 text-right font-mono text-[var(--text-2)]">
+                      {(card.duration_ms / 1000).toFixed(1)}s
+                    </span>
+                  </div>
+                )}
+                {card.media_key && card.media_type === "video" && card.duration_ms > 0 && (
+                  <div className="flex items-center justify-between text-xs text-[var(--text-3)]">
+                    <span>Clip duration</span>
+                    <span className="font-mono text-[var(--text-2)]">
+                      {(card.duration_ms / 1000).toFixed(1)}s
+                    </span>
+                  </div>
+                )}
+
+                {/* Upload controls */}
+                <div className="space-y-2">
+                  <p className="text-[11px] text-[var(--text-3)]">
+                    Attach media — replaces the plain title card:
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    {/* Upload Video */}
+                    <label
+                      className={`btn btn-secondary btn-sm flex cursor-pointer items-center gap-1.5 ${isUploadingVideo ? "opacity-60 pointer-events-none" : ""}`}
+                    >
+                      {isUploadingVideo ? (
+                        <Spinner />
+                      ) : (
+                        <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                          <path d="M15 10l4.553-2.276A1 1 0 0121 8.723v6.554a1 1 0 01-1.447.894L15 14M3 8a2 2 0 012-2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8z" />
+                        </svg>
+                      )}
+                      {card.media_key && card.media_type === "video" ? "Replace video" : "+ Video"}
+                      <input
+                        type="file"
+                        accept="video/mp4,video/quicktime,video/webm"
+                        className="sr-only"
+                        onChange={(e) => {
+                          const f = e.target.files?.[0];
+                          if (f) handleUpload(which, "video", f);
+                          e.target.value = "";
+                        }}
+                      />
+                    </label>
+
+                    {/* Upload Image */}
+                    <label
+                      className={`btn btn-secondary btn-sm flex cursor-pointer items-center gap-1.5 ${isUploadingImage ? "opacity-60 pointer-events-none" : ""}`}
+                    >
+                      {isUploadingImage ? (
+                        <Spinner />
+                      ) : (
+                        <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                          <rect x="3" y="3" width="18" height="18" rx="2" />
+                          <circle cx="8.5" cy="8.5" r="1.5" />
+                          <path d="M21 15l-5-5L5 21" />
+                        </svg>
+                      )}
+                      {card.media_key && card.media_type === "image" ? "Replace image" : "+ Image"}
+                      <input
+                        type="file"
+                        accept="image/*"
+                        className="sr-only"
+                        onChange={(e) => {
+                          const f = e.target.files?.[0];
+                          if (f) handleUpload(which, "image", f);
+                          e.target.value = "";
+                        }}
+                      />
+                    </label>
+
+                    {/* Remove media */}
+                    {card.media_key && (
+                      <button
+                        onClick={() => removeMedia(which)}
+                        className="btn btn-ghost btn-sm text-red-400"
+                      >
+                        Remove media
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Media preview */}
+                  {card.media_key && card.media_type === "video" && (
+                    <video
+                      src={mediaUrl(card.media_key)}
+                      controls
+                      className="mt-2 w-full rounded-lg bg-black"
+                      onLoadedMetadata={(e) => {
+                        const dur = (e.currentTarget as HTMLVideoElement).duration;
+                        if (Number.isFinite(dur) && dur > 0) {
+                          const ms = Math.round(dur * 1000);
+                          if (card.duration_ms !== ms) {
+                            set({ duration_ms: ms });
+                          }
+                        }
+                      }}
+                    />
+                  )}
+                  {card.media_key && card.media_type === "image" && (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={mediaUrl(card.media_key)}
+                      alt={`${label} media`}
+                      className="mt-2 w-full rounded-lg object-cover"
+                    />
+                  )}
+                </div>
               </div>
-            </div>
-          )}
-        </div>
-      ))}
+            )}
+          </div>
+        );
+      })}
+
+      {uploadError && (
+        <p className="text-xs text-red-400">{uploadError}</p>
+      )}
     </div>
   );
 }
@@ -2614,26 +3105,32 @@ function ElementsPanel({
   addElement,
   updateElement,
   deleteElement,
-  dur,
+  totalMs,
   cur,
+  projectId,
 }: {
   spec: EditSpec;
   selEl: string | null;
   setSelEl: (id: string | null) => void;
-  addElement: (t: EditElement["type"]) => void;
+  addElement: (t: EditElement["type"], mediaKey?: string) => void;
   updateElement: (id: string, p: Partial<EditElement>) => void;
   deleteElement: (id: string) => void;
-  dur: number;
+  totalMs: number;
   cur: number;
+  projectId: string;
 }) {
+  const [imageUploading, setImageUploading] = useState(false);
+  const [imageError, setImageError] = useState<string | null>(null);
   const els = spec.elements ?? [];
   const sel = els.find((e) => e.id === selEl) ?? null;
+  // Ceiling for start_ms/end_ms sliders matches the actual video duration exactly (in centiseconds)
+  const elMaxMs = Math.max(100, Math.round(totalMs / 10) * 10);
   return (
     <div className="space-y-4">
       <p className="text-xs text-[var(--text-3)]">
-        Add text or a highlight box, then drag/resize it on the preview.
+        Add text, a highlight box, or an image overlay, then drag/resize it on the preview.
       </p>
-      <div className="flex gap-2">
+      <div className="flex flex-wrap gap-2">
         <button
           onClick={() => addElement("text")}
           className="btn btn-secondary btn-sm"
@@ -2646,7 +3143,38 @@ function ElementsPanel({
         >
           + Highlight box
         </button>
+        <label className="btn btn-secondary btn-sm cursor-pointer">
+          {imageUploading ? <Spinner /> : "+ Image"}
+          <input
+            type="file"
+            accept="image/*"
+            className="hidden"
+            disabled={imageUploading}
+            onChange={async (e) => {
+              const file = e.target.files?.[0];
+              if (!file) return;
+              setImageUploading(true);
+              setImageError(null);
+              try {
+                const ext = file.name.split(".").pop() || "png";
+                const storageKey = await uploadMedia(
+                  `projects/${projectId}/element_${Date.now()}.${ext}`,
+                  file,
+                );
+                addElement("image", storageKey);
+              } catch (err) {
+                setImageError(err instanceof Error ? err.message : String(err));
+              } finally {
+                setImageUploading(false);
+                e.target.value = "";
+              }
+            }}
+          />
+        </label>
       </div>
+      {imageError && (
+        <p className="text-xs text-red-500">{imageError}</p>
+      )}
       {els.length === 0 && (
         <p className="text-xs text-[var(--text-3)]">No elements yet.</p>
       )}
@@ -2655,17 +3183,20 @@ function ElementsPanel({
           <button
             key={el.id}
             onClick={() => setSelEl(el.id)}
-            className={`flex w-full items-center gap-2 rounded-xl border px-3 py-2 text-left text-sm ${
-              selEl === el.id
-                ? "border-[#6d5dfb]/40 bg-[#6d5dfb]/5"
-                : "border-[var(--border)] hover:bg-[var(--hover)]"
-            }`}
+            className={`flex w-full items-center gap-2 rounded-xl border px-3 py-2 text-left text-sm ${selEl === el.id
+              ? "border-[#6d5dfb]/40 bg-[#6d5dfb]/5"
+              : "border-[var(--border)] hover:bg-[var(--hover)]"
+              }`}
           >
             <span className="text-xs uppercase text-[var(--text-3)]">
               {el.type}
             </span>
             <span className="truncate">
-              {el.type === "text" ? el.text || "Text" : "Highlight"}
+              {el.type === "text"
+                ? el.text || "Text"
+                : el.type === "box"
+                  ? "Highlight"
+                  : "Image"}
             </span>
           </button>
         ))}
@@ -2684,21 +3215,74 @@ function ElementsPanel({
               />
             </div>
           )}
-          <div className="flex items-center gap-3">
-            <span className="label">Color</span>
-            <input
-              type="color"
-              value={sel.color ?? (sel.type === "box" ? "#6d5dfb" : "#111827")}
-              onChange={(e) => updateElement(sel.id, { color: e.target.value })}
-              className="h-7 w-10 rounded border border-[var(--border)] bg-transparent"
-            />
-            <button
-              onClick={() => deleteElement(sel.id)}
-              className="btn btn-ghost btn-sm ml-auto text-red-500"
-            >
-              🗑 Delete
-            </button>
-          </div>
+          {sel.type === "image" && (
+            <div className="space-y-2">
+              <div className="label mb-1">Image</div>
+              {sel.media_key && (
+                <div className="relative flex h-28 w-full items-center justify-center overflow-hidden rounded-lg border border-[var(--border)] bg-black/40">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={mediaUrl(sel.media_key)}
+                    alt="Element"
+                    className="max-h-full max-w-full object-contain"
+                  />
+                </div>
+              )}
+              <div className="flex items-center gap-2">
+                <label className="btn btn-secondary btn-sm flex-1 cursor-pointer justify-center">
+                  {imageUploading ? <Spinner /> : "Replace image"}
+                  <input
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    disabled={imageUploading}
+                    onChange={async (e) => {
+                      const file = e.target.files?.[0];
+                      if (!file) return;
+                      setImageUploading(true);
+                      setImageError(null);
+                      try {
+                        const ext = file.name.split(".").pop() || "png";
+                        const storageKey = await uploadMedia(
+                          `projects/${projectId}/element_${Date.now()}.${ext}`,
+                          file,
+                        );
+                        updateElement(sel.id, { media_key: storageKey });
+                      } catch (err) {
+                        setImageError(err instanceof Error ? err.message : String(err));
+                      } finally {
+                        setImageUploading(false);
+                        e.target.value = "";
+                      }
+                    }}
+                  />
+                </label>
+                <button
+                  onClick={() => deleteElement(sel.id)}
+                  className="btn btn-ghost btn-sm text-red-500"
+                >
+                  🗑 Delete
+                </button>
+              </div>
+            </div>
+          )}
+          {sel.type !== "image" && (
+            <div className="flex items-center gap-3">
+              <span className="label">Color</span>
+              <input
+                type="color"
+                value={sel.color ?? (sel.type === "box" ? "#6d5dfb" : "#111827")}
+                onChange={(e) => updateElement(sel.id, { color: e.target.value })}
+                className="h-7 w-10 rounded border border-[var(--border)] bg-transparent"
+              />
+              <button
+                onClick={() => deleteElement(sel.id)}
+                className="btn btn-ghost btn-sm ml-auto text-red-500"
+              >
+                🗑 Delete
+              </button>
+            </div>
+          )}
           <div className="border-t border-[var(--border)] pt-3">
             <label className="flex items-center justify-between">
               <span className="text-sm">Show only for a time range</span>
@@ -2710,9 +3294,18 @@ function ElementsPanel({
                     sel.id,
                     e.target.checked
                       ? {
-                          start_ms: Math.round(cur * 1000),
-                          end_ms: Math.round(Math.min(dur, cur + 5) * 1000),
-                        }
+                        start_ms: Math.min(
+                          elMaxMs,
+                          Math.max(0, Math.round((cur * 1000) / 10) * 10),
+                        ),
+                        end_ms: Math.min(
+                          elMaxMs,
+                          Math.max(
+                            Math.round((cur * 1000) / 10) * 10 + 500,
+                            Math.round(Math.min(elMaxMs / 1000, cur + 5) * 100) * 10,
+                          ),
+                        ),
+                      }
                       : { start_ms: 0, end_ms: 0 },
                   )
                 }
@@ -2722,8 +3315,12 @@ function ElementsPanel({
             {(sel.end_ms ?? 0) > (sel.start_ms ?? 0) && (
               <div className="mt-2 space-y-2">
                 {(["From", "To"] as const).map((which) => {
-                  const val =
+                  const rawVal =
                     which === "From" ? (sel.start_ms ?? 0) : (sel.end_ms ?? 0);
+                  const val = Math.min(
+                    elMaxMs,
+                    Math.max(0, Math.round(rawVal / 10) * 10),
+                  );
                   return (
                     <div key={which} className="flex items-center gap-2">
                       <span className="w-9 text-xs text-[var(--text-3)]">
@@ -2732,8 +3329,8 @@ function ElementsPanel({
                       <input
                         type="range"
                         min={0}
-                        max={(dur || 1) * 1000}
-                        step={100}
+                        max={elMaxMs}
+                        step={10}
                         value={val}
                         onChange={(e) => {
                           const v = Number(e.target.value);
@@ -2741,23 +3338,23 @@ function ElementsPanel({
                             sel.id,
                             which === "From"
                               ? {
-                                  start_ms: Math.min(
-                                    v,
-                                    (sel.end_ms ?? 0) - 200,
-                                  ),
-                                }
+                                start_ms: Math.min(
+                                  v,
+                                  Math.max(0, (sel.end_ms ?? elMaxMs) - 50),
+                                ),
+                              }
                               : {
-                                  end_ms: Math.max(
-                                    v,
-                                    (sel.start_ms ?? 0) + 200,
-                                  ),
-                                },
+                                end_ms: Math.min(
+                                  Math.max(v, (sel.start_ms ?? 0) + 50),
+                                  elMaxMs,
+                                ),
+                              },
                           );
                         }}
                         className="flex-1 accent-[#6d5dfb]"
                       />
-                      <span className="w-11 text-right font-mono text-xs text-[var(--text-2)]">
-                        {mmss(val / 1000)}
+                      <span className="w-14 text-right font-mono text-xs text-[var(--text-2)]">
+                        {clock(val / 1000)}
                       </span>
                     </div>
                   );
@@ -2785,6 +3382,7 @@ function TimelineTracks({
   onMove,
   onResize,
   onResizeStart,
+  onZoomMove,
 }: {
   sectionRef?: React.RefObject<HTMLElement>;
   spec: EditSpec;
@@ -2799,6 +3397,7 @@ function TimelineTracks({
   onMove: (i: number, startMs: number) => void;
   onResize: (i: number, endMs: number) => void;
   onResizeStart: (i: number, startMs: number) => void;
+  onZoomMove: (id: string, startMs: number) => void;
 }) {
   const frames = useFilmstrip(source, 24);
   const peaks = useWaveform(source, 400);
@@ -2809,7 +3408,7 @@ function TimelineTracks({
       ((Math.max(s.source_end_ms, s.source_start_ms + 400) -
         s.source_start_ms) /
         totalMs) *
-        100,
+      100,
     );
     return { s, i, left, width, text: eff(s) };
   });
@@ -2850,49 +3449,81 @@ function TimelineTracks({
         useOriginal
           ? null
           : blocks.map((b) => (
-              <TlBlock
-                key={b.s.step_id}
-                b={b}
-                active={false}
-                onClick={() => seekTo(b.s.source_start_ms / 1000)}
-                tone="voice"
-              />
-            )),
+            <TlBlock
+              key={b.s.step_id}
+              b={b}
+              active={false}
+              onClick={() => seekTo(b.s.source_start_ms / 1000)}
+              tone="voice"
+            />
+          )),
     },
     {
       label: "Captions",
       render: () =>
         spec.captions.enabled
           ? blocks.map((b) => (
-              <TlBlock
-                key={b.s.step_id}
-                b={b}
-                active={false}
-                onClick={() => seekTo(b.s.source_start_ms / 1000)}
-                tone="cap"
-                label={b.text}
-              />
-            ))
+            <TlBlock
+              key={b.s.step_id}
+              b={b}
+              active={false}
+              onClick={() => seekTo(b.s.source_start_ms / 1000)}
+              tone="cap"
+              label={b.text}
+            />
+          ))
           : null,
     },
     {
       label: "Zoom",
-      render: () =>
-        blocks
-          .filter((b) => b.s.zoom.enabled)
-          .map((b) => (
-            <div
-              key={b.s.step_id}
-              onClick={() => seekTo(b.s.source_start_ms / 1000)}
-              style={{ left: `${b.left}%` }}
-              className="absolute top-1/2 flex h-5 w-5 -translate-x-1/2 -translate-y-1/2 cursor-pointer items-center justify-center rounded-full bg-amber-400/90 text-[10px] text-[var(--text)]"
-              title="zoom"
-            >
-              ⛶
-            </div>
-          )),
+      render: () => (
+        <>
+          {/* standalone timeline zooms: fixed-duration blocks, drag to move */}
+          {(spec.zooms ?? []).map((z) => (
+            <TlZoomBlock
+              key={z.id}
+              z={z}
+              totalMs={totalMs}
+              active={cur * 1000 >= z.start_ms && cur * 1000 < z.end_ms}
+              onMove={(startMs) => onZoomMove(z.id, startMs)}
+              onSeek={() => seekTo(z.start_ms / 1000)}
+            />
+          ))}
+          {renderSceneZoomBars()}
+        </>
+      ),
     },
   ];
+  function renderSceneZoomBars() {
+    return blocks
+      .filter((b) => b.s.zoom.enabled)
+      .map((b) => {
+        // the bar spans exactly where the zoom runs: its time window when
+        // set, else the whole scene
+        const z = b.s.zoom;
+        const hasWin = (z.end_ms ?? 0) > (z.start_ms ?? 0);
+        const s0 = hasWin ? z.start_ms! : b.s.source_start_ms;
+        const s1 = hasWin ? z.end_ms! : b.s.source_end_ms;
+        const live = cur * 1000 >= s0 && cur * 1000 < s1;
+        return (
+          <div
+            key={b.s.step_id}
+            onClick={() => seekTo(s0 / 1000)}
+            style={{
+              left: `${(s0 / totalMs) * 100}%`,
+              width: `${Math.max(0.75, ((s1 - s0) / totalMs) * 100)}%`,
+            }}
+            className={`absolute top-1/2 flex h-5 -translate-y-1/2 cursor-pointer items-center justify-center rounded-full text-[10px] text-[var(--text)] ${live
+              ? "bg-amber-500 ring-2 ring-amber-600 shadow-[0_0_8px_rgba(245,158,11,0.8)]"
+              : "bg-amber-400/60"
+              }`}
+            title={`zoom ${mmss(s0 / 1000)}–${mmss(s1 / 1000)}`}
+          >
+            ⛶
+          </div>
+        );
+      });
+  }
 
   return (
     <section
@@ -3190,7 +3821,7 @@ function TrimTrack({
         trailing={
           <button
             onClick={onDone}
-            className="btn btn-ghost btn-sm text-[#6d5dfb]"
+            className="btn btn-sm bg-black text-white shadow-sm hover:bg-neutral-800"
             title="Back to the full timeline"
           >
             ✓ Done trimming
@@ -3395,9 +4026,8 @@ function TrimBlock({
       }}
       style={{ left: `${left}%`, width: `${width}%` }}
       title={skipped ? `Skipped — ${text}` : text}
-      className={`absolute top-0 h-full overflow-hidden rounded-md bg-[#0e1116] ring-1 ring-inset ${
-        active ? "ring-2 ring-[#6d5dfb]" : "ring-black/20"
-      }`}
+      className={`absolute top-0 h-full overflow-hidden rounded-md bg-[#0e1116] ring-1 ring-inset ${active ? "ring-2 ring-[#6d5dfb]" : "ring-black/20"
+        }`}
     >
       {/* real frames */}
       <span className="absolute inset-0 flex">
@@ -3430,7 +4060,7 @@ function TrimBlock({
             const barSrc =
               it.s.source_start_ms +
               ((i + 0.5) / blkPeaks.length) *
-                (it.s.source_end_ms - it.s.source_start_ms);
+              (it.s.source_end_ms - it.s.source_start_ms);
             return (
               <span
                 key={i}
@@ -3592,11 +4222,10 @@ function CropTrack({
           return (
             <span
               key={i}
-              className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs ${
-                i === sel
-                  ? "border-[#6d5dfb] bg-[#6d5dfb]/10 text-[var(--text)]"
-                  : "border-[var(--border)] text-[var(--text-2)]"
-              }`}
+              className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs ${i === sel
+                ? "border-[#6d5dfb] bg-[#6d5dfb]/10 text-[var(--text)]"
+                : "border-[var(--border)] text-[var(--text-2)]"
+                }`}
             >
               <button
                 onClick={() => {
@@ -3636,7 +4265,7 @@ function CropTrack({
         )}
         <button
           onClick={onDone}
-          className="btn btn-ghost btn-sm ml-auto text-[#6d5dfb]"
+          className="btn btn-sm ml-auto bg-black text-white shadow-sm hover:bg-neutral-800"
           title="Back to the full timeline"
         >
           ✓ Done cropping
@@ -3663,9 +4292,9 @@ function CropTrack({
                   sel,
                   e.target.checked
                     ? {
-                        start_ms: Math.round(cur * 1000),
-                        end_ms: Math.round(Math.min(dur, cur + 10) * 1000),
-                      }
+                      start_ms: Math.round(cur * 1000),
+                      end_ms: Math.round(Math.min(dur, cur + 10) * 1000),
+                    }
                     : { start_ms: 0, end_ms: 0 },
                 )
               }
@@ -3694,11 +4323,10 @@ function CropTrack({
                   onPointerDown={(e) => blockDown(e, i, "move")}
                   style={{ left: `${left}%`, width: `${width}%` }}
                   title={`Crop ${i + 1} · ${mmss(s0 / 1000)}–${mmss(en / 1000)} — drag to move`}
-                  className={`absolute inset-y-0 cursor-grab rounded-md border bg-[#6d5dfb]/30 backdrop-brightness-110 ${
-                    active
-                      ? "border-[#6d5dfb] ring-2 ring-inset ring-[#6d5dfb]"
-                      : "border-white/40"
-                  }`}
+                  className={`absolute inset-y-0 cursor-grab rounded-md border bg-[#6d5dfb]/30 backdrop-brightness-110 ${active
+                    ? "border-[#6d5dfb] ring-2 ring-inset ring-[#6d5dfb]"
+                    : "border-white/40"
+                    }`}
                 >
                   {width > 7 && (
                     <span className="pointer-events-none absolute left-1.5 top-1 rounded bg-black/60 px-1 py-px font-mono text-[9px] text-white">
@@ -3750,6 +4378,72 @@ function CropTrack({
   );
 }
 
+/** A standalone timeline zoom on the Zoom track: fixed width (its duration is
+ * edited in the Zoom tab), dragged horizontally to reposition; a plain click
+ * seeks to its start. */
+function TlZoomBlock({
+  z,
+  totalMs,
+  active,
+  onMove,
+  onSeek,
+}: {
+  z: ZoomRegion;
+  totalMs: number;
+  active: boolean;
+  onMove: (startMs: number) => void;
+  onSeek: () => void;
+}) {
+  const drag = useRef<{
+    startX: number;
+    orig: number;
+    trackW: number;
+    moved: boolean;
+  } | null>(null);
+  const len = z.end_ms - z.start_ms;
+
+  return (
+    <div
+      onPointerDown={(e) => {
+        e.stopPropagation();
+        const track = e.currentTarget.closest(
+          "[data-track]",
+        ) as HTMLElement | null;
+        drag.current = {
+          startX: e.clientX,
+          orig: z.start_ms,
+          trackW: track?.clientWidth || 1,
+          moved: false,
+        };
+        (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+      }}
+      onPointerMove={(e) => {
+        const d = drag.current;
+        if (!d) return;
+        const deltaMs = ((e.clientX - d.startX) / d.trackW) * totalMs;
+        if (Math.abs(e.clientX - d.startX) > 3) d.moved = true;
+        onMove(Math.max(0, Math.min(d.orig + deltaMs, totalMs - len)));
+      }}
+      onPointerUp={() => {
+        const d = drag.current;
+        drag.current = null;
+        if (d && !d.moved) onSeek();
+      }}
+      style={{
+        left: `${(z.start_ms / totalMs) * 100}%`,
+        width: `${Math.max(0.75, (len / totalMs) * 100)}%`,
+      }}
+      className={`absolute top-1/2 z-[1] flex h-6 -translate-y-1/2 cursor-grab items-center justify-center gap-1 rounded-full text-[10px] font-medium text-black/80 shadow active:cursor-grabbing ${active
+        ? "bg-amber-500 ring-2 ring-amber-600 shadow-[0_0_8px_rgba(245,158,11,0.8)]"
+        : "bg-amber-400/80 ring-1 ring-amber-500/60"
+        }`}
+      title={`zoom ${Math.round(z.scale * 100)}% · ${mmss(z.start_ms / 1000)}–${mmss(z.end_ms / 1000)} — drag to move`}
+    >
+      ⛶
+    </div>
+  );
+}
+
 function DraggableBlock({
   b,
   totalMs,
@@ -3779,24 +4473,24 @@ function DraggableBlock({
 
   const begin =
     (mode: "move" | "resize" | "resize-start") =>
-    (e: React.PointerEvent<HTMLElement>) => {
-      e.stopPropagation();
-      const track = e.currentTarget.closest(
-        "[data-track]",
-      ) as HTMLElement | null;
-      const trackW = track?.clientWidth || 1;
-      drag.current = {
-        mode,
-        startX: e.clientX,
-        orig:
-          mode === "move" || mode === "resize-start"
-            ? b.s.source_start_ms
-            : b.s.source_end_ms,
-        trackW,
-        moved: false,
+      (e: React.PointerEvent<HTMLElement>) => {
+        e.stopPropagation();
+        const track = e.currentTarget.closest(
+          "[data-track]",
+        ) as HTMLElement | null;
+        const trackW = track?.clientWidth || 1;
+        drag.current = {
+          mode,
+          startX: e.clientX,
+          orig:
+            mode === "move" || mode === "resize-start"
+              ? b.s.source_start_ms
+              : b.s.source_end_ms,
+          trackW,
+          moved: false,
+        };
+        (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
       };
-      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-    };
 
   const move = (e: React.PointerEvent<HTMLElement>) => {
     const d = drag.current;
@@ -3832,11 +4526,10 @@ function DraggableBlock({
       onPointerMove={move}
       onPointerUp={end}
       style={{ left: `${b.left}%`, width: `${b.width}%` }}
-      className={`group/blk absolute inset-y-0 flex cursor-grab items-end overflow-hidden rounded-md px-1 pb-0.5 text-[10px] font-medium text-white ring-1 ring-inset active:cursor-grabbing ${
-        skipped
-          ? "bg-[repeating-linear-gradient(45deg,rgba(17,24,39,.55),rgba(17,24,39,.55)_6px,rgba(154,161,178,.55)_6px,rgba(154,161,178,.55)_12px)] ring-[var(--border-strong)]"
-          : "bg-[#6d5dfb]/10 ring-[#6d5dfb]/30 hover:bg-[#6d5dfb]/20"
-      } ${active ? "ring-2 ring-[#6d5dfb]" : ""}`}
+      className={`group/blk absolute inset-y-0 flex cursor-grab items-end overflow-hidden rounded-md px-1 pb-0.5 text-[10px] font-medium text-white ring-1 ring-inset active:cursor-grabbing ${skipped
+        ? "bg-[repeating-linear-gradient(45deg,rgba(17,24,39,.55),rgba(17,24,39,.55)_6px,rgba(154,161,178,.55)_6px,rgba(154,161,178,.55)_12px)] ring-[var(--border-strong)]"
+        : "bg-[#6d5dfb]/10 ring-[#6d5dfb]/30 hover:bg-[#6d5dfb]/20"
+        } ${active ? "ring-2 ring-[#6d5dfb]" : ""}`}
       title={skipped ? `Skipped — ${b.text}` : b.text}
     >
       <span className="pointer-events-none truncate rounded bg-black/45 px-1 leading-tight backdrop-blur-[1px]">
@@ -3882,9 +4575,8 @@ function TlBlock({
     <button
       onClick={onClick}
       style={{ left: `${b.left}%`, width: `${b.width}%` }}
-      className={`absolute top-1/2 flex h-8 -translate-y-1/2 items-center overflow-hidden rounded-md px-1.5 text-[10px] ring-1 ${tones} ${
-        active ? "ring-2 ring-[#6d5dfb]" : ""
-      }`}
+      className={`absolute top-1/2 flex h-8 -translate-y-1/2 items-center overflow-hidden rounded-md px-1.5 text-[10px] ring-1 ${tones} ${active ? "ring-2 ring-[#6d5dfb]" : ""
+        }`}
       title={label ?? b.text}
     >
       <span className="truncate">{label ?? b.text}</span>

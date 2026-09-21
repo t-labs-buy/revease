@@ -34,6 +34,9 @@ def run_understanding(self, session_id: str):  # noqa: ANN001
 @app.task(name="refract.render.run", bind=True, max_retries=2, default_retry_delay=5)
 def run_render_task(self, render_job_id: str):  # noqa: ANN001
     """Render (or re-render) a video project's MP4 on export."""
+    import importlib
+    import worker.pipeline.render
+    importlib.reload(worker.pipeline.render)
     from worker.pipeline.render import run_render
 
     try:

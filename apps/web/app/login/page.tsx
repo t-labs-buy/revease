@@ -46,6 +46,7 @@ function LoginForm() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [showForgot, setShowForgot] = useState(false);
 
   // Arriving straight from /register: prefill the email that was just used, so
   // only the password has to be typed again. Read once, then clear.
@@ -119,6 +120,26 @@ function LoginForm() {
           onChange={(e) => setPassword(e.target.value)}
           placeholder="••••••••"
         />
+        {/* No email transport means no reset link — a workspace admin sets a
+            new password instead, so tell the user that rather than nothing. */}
+        <div className="-mt-1 text-right">
+          <button
+            type="button"
+            onClick={() => setShowForgot((v) => !v)}
+            aria-expanded={showForgot}
+            className="text-sm font-medium text-[var(--brand)] hover:underline"
+          >
+            Forgot password?
+          </button>
+        </div>
+        {showForgot && (
+          <p
+            role="note"
+            className="rounded-xl border border-[var(--border)] bg-[var(--hover)] px-3 py-2.5 text-sm leading-relaxed text-[var(--text-2)]"
+          >
+            Ask a workspace admin to reset it for you.
+          </p>
+        )}
         <SubmitButton busy={busy}>Sign in</SubmitButton>
       </form>
     </AuthShell>

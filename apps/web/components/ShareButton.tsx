@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { createShare, shareLink } from "@/lib/api";
+import { createShare, setShareDownload, shareLink } from "@/lib/api";
 import { IconShare } from "@/components/icons";
 
 export function ShareButton({
@@ -15,7 +15,10 @@ export function ShareButton({
 }) {
   const [open, setOpen] = useState(false);
   const [link, setLink] = useState("");
+  const [token, setToken] = useState("");
+  const [allowDownload, setAllowDownload] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
@@ -24,7 +27,9 @@ export function ShareButton({
     setError(null);
     try {
       const s = await createShare(projectId, kind);
+      setToken(s.token);
       setLink(shareLink(s.token));
+      setAllowDownload(s.allow_download);
       setOpen(true);
     } catch (e) {
       setError(String(e));
@@ -38,6 +43,20 @@ export function ShareButton({
     await navigator.clipboard.writeText(link);
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
+  }
+
+  async function toggleDownload(next: boolean) {
+    setAllowDownload(next); // optimistic
+    setSaving(true);
+    try {
+      const s = await setShareDownload(token, next);
+      setAllowDownload(s.allow_download);
+    } catch (e) {
+      setAllowDownload(!next);
+      setError(String(e));
+    } finally {
+      setSaving(false);
+    }
   }
 
   return (
@@ -63,9 +82,22 @@ export function ShareButton({
                   {copied ? "Copied" : "Copy"}
                 </button>
               </div>
+              {kind === "video" && (
+                <label className="mt-3 flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={allowDownload}
+                    disabled={saving}
+                    onChange={(e) => void toggleDownload(e.target.checked)}
+                    className="accent-violet-500"
+                  />
+                  Show a Download button on the shared page
+                </label>
+              )}
               <p className="mt-2 text-xs text-[var(--text-2)]">
                 Anyone with this link can view {kind === "doc" ? "the document" : "the video"} — no
                 login needed.
+                {kind === "video" && !allowDownload && " Viewers can watch but won’t see a download option."}
               </p>
             </>
           )}

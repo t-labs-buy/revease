@@ -85,6 +85,32 @@ def _get_or_build(db: Session, user, project_id: str) -> VideoProject:
     return vp
 
 
+def _render_out(job: RenderJob) -> RenderJobOut:
+    return RenderJobOut(
+        id=job.id,
+        status=job.status,
+        output_key=job.output_key,
+        output_url=store.download_url(job.output_key) if job.output_key else None,
+        stats_json=job.stats_json,
+        error_json=job.error_json,
+    )
+
+
+def _latest_render(db: Session, vp: VideoProject) -> RenderJobOut | None:
+    """The newest finished render with a file — so reopening the editor can
+    still play/download the last generated video."""
+    job = db.scalar(
+        select(RenderJob)
+        .where(
+            RenderJob.video_project_id == vp.id,
+            RenderJob.status == "done",
+            RenderJob.output_key.is_not(None),
+        )
+        .order_by(RenderJob.updated_at.desc())
+    )
+    return _render_out(job) if job else None
+
+
 @router.get("/projects/{project_id}/video", response_model=VideoSpecOut)
 def get_video(
     project_id: str, user: CurrentUser, db: Session = Depends(get_session)
@@ -96,6 +122,7 @@ def get_video(
         graph_version=vp.graph_version,
         edit_spec=vp.edit_spec_json,
         source_video=_source_video(db, project_id),
+        latest_render=_latest_render(db, vp),
     )
 
 
@@ -178,12 +205,4 @@ def voice_track_status(
 def get_render(
     job_id: str, user: CurrentUser, db: Session = Depends(get_session)
 ) -> RenderJobOut:
-    job = owned_render_job(db, user, job_id)
-    return RenderJobOut(
-        id=job.id,
-        status=job.status,
-        output_key=job.output_key,
-        output_url=store.download_url(job.output_key) if job.output_key else None,
-        stats_json=job.stats_json,
-        error_json=job.error_json,
-    )
+    return _render_out(owned_render_job(db, user, job_id))

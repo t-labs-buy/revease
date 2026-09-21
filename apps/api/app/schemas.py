@@ -25,6 +25,12 @@ class LoginIn(BaseModel):
     password: str = Field(min_length=1, max_length=200)
 
 
+class PasswordResetIn(BaseModel):
+    """Admin-set password for another account (no current password needed)."""
+
+    new_password: str = Field(min_length=8, max_length=200)
+
+
 class UserOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -57,10 +63,23 @@ class ProjectOut(BaseModel):
     # the UI can label it truthfully instead of guessing from capture counts.
     has_document: bool = False
     capture_count: int = 0
-    # Populated only for admins browsing across spaces, so the UI can label
-    # whose project each card is.
+    # Populated when the project is someone else's: for admins browsing across
+    # spaces, and for collaborators on a project shared with them.
     owner_email: str | None = None
     owner_name: str | None = None
+    # True when the caller was invited to edit this project rather than owning it.
+    shared_with_me: bool = False
+
+
+class CollaboratorCreate(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+
+
+class CollaboratorOut(BaseModel):
+    user_id: str
+    email: str
+    name: str
+    created_at: datetime
 
 
 class HealthOut(BaseModel):
@@ -183,12 +202,22 @@ class GraphOut(BaseModel):
 
 
 # ---- video editor / render ----
+class RenderJobOut(BaseModel):
+    id: str
+    status: str
+    output_key: str | None = None
+    output_url: str | None = None
+    stats_json: dict | None = None
+    error_json: dict | None = None
+
+
 class VideoSpecOut(BaseModel):
     video_project_id: str
     project_id: str
     graph_version: int
     edit_spec: dict
     source_video: str | None = None  # storage key of the project's raw recording
+    latest_render: RenderJobOut | None = None  # newest finished render, shown on open
 
 
 class EditSpecPatch(BaseModel):
@@ -202,15 +231,6 @@ class DocumentOut(BaseModel):
     doc: dict
 
 
-class RenderJobOut(BaseModel):
-    id: str
-    status: str
-    output_key: str | None = None
-    output_url: str | None = None
-    stats_json: dict | None = None
-    error_json: dict | None = None
-
-
 class AutoEditStart(BaseModel):
     aggressiveness: Literal["gentle", "balanced", "aggressive"] = "balanced"
     captions: bool = True
@@ -219,12 +239,19 @@ class AutoEditStart(BaseModel):
 
 class ShareCreate(BaseModel):
     kind: Literal["video", "doc"] = "video"
+    # None = leave as-is when reusing an existing link (a new link defaults to off).
+    allow_download: bool | None = None
+
+
+class ShareUpdate(BaseModel):
+    allow_download: bool
 
 
 class ShareOut(BaseModel):
     token: str
     kind: str
     revoked: bool
+    allow_download: bool
     created_at: datetime
     project_id: str
 
@@ -233,6 +260,7 @@ class SharePublic(BaseModel):
     kind: str
     title: str
     project_id: str
+    allow_download: bool = False
     video_url: str | None = None
     doc: dict | None = None
 

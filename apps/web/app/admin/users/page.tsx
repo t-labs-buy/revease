@@ -1,6 +1,6 @@
 "use client";
 
-/** Admin → Users: every account, with promote/demote controls.
+/** Admin → Users: every account, with promote/demote and password-reset controls.
  *  The API 403s non-admins; this page also redirects them home. */
 
 import { useEffect, useState } from "react";
@@ -8,6 +8,7 @@ import { useRouter } from "next/navigation";
 import { listUsers, setUserRole, type AdminUser } from "@/lib/api";
 import { useAuth } from "@/contexts/AuthContext";
 import { fmtDateIST } from "@/lib/time";
+import { ResetPasswordDialog } from "@/components/ResetPasswordDialog";
 
 const fmtDate = fmtDateIST;
 
@@ -17,6 +18,7 @@ export default function AdminUsersPage() {
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [resetting, setResetting] = useState<AdminUser | null>(null);
 
   useEffect(() => {
     if (!loading && !isAdmin) router.replace("/");
@@ -51,7 +53,8 @@ export default function AdminUsersPage() {
     <main className="mx-auto max-w-[1600px] px-8 py-10">
       <h1 className="text-3xl font-semibold tracking-tight text-[var(--text)]">Users</h1>
       <p className="mt-1.5 text-[15px] text-[var(--text-2)]">
-        Everyone with an account. Admins can see every user&apos;s projects and manage users here.
+        Everyone with an account. Admins can see every user&apos;s projects, manage roles, and
+        reset passwords for people who are locked out.
       </p>
 
       {error && (
@@ -97,15 +100,17 @@ export default function AdminUsersPage() {
                   </td>
                   <td className="px-5 py-3 text-[var(--text-2)]">{u.project_count}</td>
                   <td className="px-5 py-3 text-[var(--text-2)]">{fmtDate(u.created_at)}</td>
-                  <td className="px-5 py-3 text-right">
+                  <td className="px-5 py-3 text-right whitespace-nowrap">
                     {!self && (
-                      <button
-                        onClick={() => void changeRole(u, admin ? "user" : "admin")}
-                        disabled={busyId === u.id}
-                        className="btn btn-secondary btn-sm disabled:opacity-40"
-                      >
-                        {busyId === u.id ? "…" : admin ? "Demote to user" : "Make admin"}
-                      </button>
+                      <div className="inline-flex gap-2">
+                        <button
+                          onClick={() => setResetting(u)}
+                          disabled={busyId === u.id}
+                          className="btn btn-secondary btn-sm disabled:opacity-40"
+                        >
+                          Reset password
+                        </button>
+                      </div>
                     )}
                   </td>
                 </tr>
@@ -114,6 +119,10 @@ export default function AdminUsersPage() {
           </tbody>
         </table>
       </div>
+
+      {resetting && (
+        <ResetPasswordDialog user={resetting} onClose={() => setResetting(null)} />
+      )}
     </main>
   );
 }

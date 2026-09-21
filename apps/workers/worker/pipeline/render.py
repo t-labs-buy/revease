@@ -225,24 +225,59 @@ def _el_active(el: dict, seg_start_ms: int, seg_end_ms: int) -> bool:
     s, e = int(el.get("start_ms", 0) or 0), int(el.get("end_ms", 0) or 0)
     if e <= s:
         return True
-    return s <= seg_end_ms and e >= seg_start_ms
+    return s < seg_end_ms and e > seg_start_ms
 
 
 def _element_filters(elements, dims: tuple[int, int], font: str | None, work: Path, tag: str,
-                     seg_start_ms: int = 0, seg_end_ms: int = 0) -> list[str]:
-    """Overlay text / highlight boxes on top of the frame (screen-space, normalized)."""
+                     image_inputs: list[Path], image_input_start: int,
+                     seg_start_ms: int = 0, seg_end_ms: int = 0,
+                     src_to_clip=None, dur_s: float = 0.0) -> tuple[list[str], list[tuple[int, int, int, int, int, str | None]]]:
+    """Build video filters and separate image-overlay specs for screen-space elements."""
     w, h = dims
     out: list[str] = []
+    image_overlays: list[tuple[int, int, int, int, int, str | None]] = []
     for i, el in enumerate(elements or []):
-        if not _el_active(el, seg_start_ms, seg_end_ms):
-            continue
+        s, e = int(el.get("start_ms", 0) or 0), int(el.get("end_ms", 0) or 0)
+        has_window = e > s
+        if has_window:
+            if s >= seg_end_ms or e <= seg_start_ms:
+                continue
+            if src_to_clip is not None:
+                t0 = max(0.0, float(src_to_clip(s)))
+                t1 = min(dur_s, float(src_to_clip(e)))
+            else:
+                t0 = max(0.0, (s - seg_start_ms) / 1000.0)
+                t1 = max(0.0, (e - seg_start_ms) / 1000.0)
+            if t1 <= t0 + 0.005:
+                continue
+            if t0 <= 0.005 and t1 >= dur_s - 0.005:
+                enable_str = ""
+                enable_expr = None
+            else:
+                enable_str = f":enable='between(t,{t0:.3f},{t1:.3f})'"
+                enable_expr = f"between(t,{t0:.3f},{t1:.3f})"
+        else:
+            enable_str = ""
+            enable_expr = None
+
         et = el.get("type")
-        x, y = int(float(el.get("x", 0.1)) * w), int(float(el.get("y", 0.1)) * h)
-        ew, eh = int(float(el.get("w", 0.2)) * w), int(float(el.get("h", 0.1)) * h)
+        x = max(0, min(w, int(float(el.get("x", 0.1)) * w)))
+        y = max(0, min(h, int(float(el.get("y", 0.1)) * h)))
+        ew = max(2, min(w - x, int(float(el.get("w", 0.2)) * w)))
+        eh = max(2, min(h - y, int(float(el.get("h", 0.1)) * h)))
+        ew -= ew % 2
+        eh -= eh % 2
+
         if et == "box":
             c = _hex(el.get("color"), "facc15")
-            out.append(f"drawbox=x={x}:y={y}:w={ew}:h={eh}:color=0x{c}@0.30:t=fill")
-            out.append(f"drawbox=x={x}:y={y}:w={ew}:h={eh}:color=0x{c}@0.95:t=3")
+            out.append(f"drawbox=x={x}:y={y}:w={ew}:h={eh}:color=0x{c}@0.30:t=fill{enable_str}")
+            out.append(f"drawbox=x={x}:y={y}:w={ew}:h={eh}:color=0x{c}@0.95:t=3{enable_str}")
+        elif et == "image":
+            key = str(el.get("media_key") or "")
+            path = store.local_path(key) if key else None
+            if path and path.exists():
+                image_overlays.append((image_input_start + len(image_inputs), x, y, ew, eh, enable_expr))
+                image_inputs.append(path)
         elif et == "text" and font:
             text = str(el.get("text") or "").strip()
             if not text:
@@ -251,11 +286,12 @@ def _element_filters(elements, dims: tuple[int, int], font: str | None, work: Pa
             tf.write_text(text)
             c = _hex(el.get("color"), "ffffff")
             size = max(12, int(float(el.get("size", 0.06)) * h))
+            text_y = y + max(0, (eh - size) // 2)
             out.append(
                 f"drawtext=fontfile={font}:textfile={tf}:fontcolor=0x{c}:fontsize={size}"
-                f":x={x}:y={y}:box=1:boxcolor=black@0.40:boxborderw=8"
+                f":x={x}:y={text_y}:shadowcolor=black@0.85:shadowx=2:shadowy=2{enable_str}"
             )
-    return out
+    return out, image_overlays
 
 
 def _zoom_ease_s(zoom: dict) -> float:
@@ -265,7 +301,8 @@ def _zoom_ease_s(zoom: dict) -> float:
 
 def _render_segment(seg, seg_tl, src_video, dims, captions, font, work: Path,
                     crops=None, elements=None, logo: Path | None = None,
-                    logo_pos: str = "Top Right", background: dict | None = None) -> tuple[Path, bool]:
+                    logo_pos: str = "Top Right", background: dict | None = None,
+                    zooms=None) -> tuple[Path, bool]:
     """Return (clip_path, rendered_now). Reuses a cached clip when the content hash
     matches — this is what makes regenerate touch only changed segments.
 
@@ -286,10 +323,48 @@ def _render_segment(seg, seg_tl, src_video, dims, captions, font, work: Path,
     crop_eff = _crop_for_segment(crops, seg)
     zoom_eff = _remap_zoom_into_crop(seg.get("zoom"), crop_eff)
 
-    clip_hash = _sha("v12", seg.get("step_id"), script, tts_path.name, zoom_eff,
+    def _src_to_clip(ms: float) -> float:
+        """Source ms -> clip seconds. The clip is retimed: sped up when the
+        source window outruns the narration slot; natural pace (+ freeze tail)
+        otherwise. Stills map proportionally over the slot."""
+        rel = (ms - seg_tl.source_start_ms) / 1000.0
+        if src_len_s > 0 and (not use_footage or src_len_s / dur_s >= 1.02):
+            rel *= dur_s / src_len_s
+        return max(0.0, min(rel, dur_s))
+
+    # every zoom that touches this scene, as clip-time windows for smoothzoom.
+    # Standalone timeline zooms (spec.zooms) come FIRST so they win ties over
+    # the scene's own zoom where they overlap.
+    zoom_windows: list[dict] = []
+    for tz in zooms or []:
+        t0, t1 = float(tz.get("start_ms") or 0), float(tz.get("end_ms") or 0)
+        if t1 <= t0 or t1 <= seg_tl.source_start_ms or t0 >= seg_tl.source_end_ms:
+            continue
+        tz_eff = _remap_zoom_into_crop({**tz, "enabled": True}, crop_eff) or {}
+        zoom_windows.append({
+            "start_s": round(_src_to_clip(t0), 3),
+            "end_s": round(_src_to_clip(t1), 3),
+            "scale": float(tz_eff.get("scale", 1.6)),
+            "cx": float(tz_eff.get("cx", 0.5)),
+            "cy": float(tz_eff.get("cy", 0.5)),
+            "ease_s": _zoom_ease_s(tz_eff),
+        })
+    if zoom_eff and zoom_eff.get("enabled"):
+        # the scene zoom, over its optional window (else the whole clip)
+        zs, ze = float(zoom_eff.get("start_ms") or 0), float(zoom_eff.get("end_ms") or 0)
+        zoom_windows.append({
+            "start_s": round(_src_to_clip(zs), 3) if ze > zs else None,
+            "end_s": round(_src_to_clip(ze), 3) if ze > zs else None,
+            "scale": float(zoom_eff.get("scale", 1.6)),
+            "cx": float(zoom_eff.get("cx", 0.5)),
+            "cy": float(zoom_eff.get("cy", 0.5)),
+            "ease_s": _zoom_ease_s(zoom_eff),
+        })
+
+    clip_hash = _sha("v14", seg.get("step_id"), script, tts_path.name, zoom_eff,
                      dims, captions, font, seg.get("screenshot"), seg.get("source_start_ms"),
                      seg.get("source_end_ms"), round(dur_s, 3), use_footage,
-                     crop_eff, elements, str(logo), logo_pos, background)
+                     crop_eff, elements, str(logo), logo_pos, background, zoom_windows)
     clip = work / f"seg_{seg_tl.index:03d}_{clip_hash}.mp4"
     if clip.exists():
         return clip, False  # reused — unchanged since last render
@@ -315,7 +390,7 @@ def _render_segment(seg, seg_tl, src_video, dims, captions, font, work: Path,
         _make_still(seg, src_video, dims, still, crop=crop_eff)  # crop baked into the still
 
     # zoom -> captions -> overlay elements -> normalize
-    zoom_on = bool(zoom_eff and zoom_eff.get("enabled"))
+    zoom_on = bool(zoom_windows)
     zoomed = work / f"zoomclip_{clip_hash}.mp4"
     if zoom_on:
         # The zoom runs OUTSIDE ffmpeg: zoompan quantizes the camera path to
@@ -333,9 +408,11 @@ def _render_segment(seg, seg_tl, src_video, dims, captions, font, work: Path,
                   "-crf", CRF, "-pix_fmt", "yuv420p", "-t", f"{dur_s:.3f}", str(base)]
         if not _run(cmd_a):
             raise RuntimeError(f"segment {seg_tl.index} zoom base render failed")
-        apply_zoom(base, zoomed, scale=float(zoom_eff.get("scale", 1.6)),
-                   cx=float(zoom_eff.get("cx", 0.5)), cy=float(zoom_eff.get("cy", 0.5)),
-                   dur_s=dur_s, ease_s=_zoom_ease_s(zoom_eff), fps=FPS, crf=CRF)
+        # every window is already in clip time (see zoom_windows above); the
+        # scalar args are only fallbacks for keys a window might omit
+        apply_zoom(base, zoomed, scale=1.6, cx=0.5, cy=0.5,
+                   dur_s=dur_s, ease_s=1.1, fps=FPS, crf=CRF,
+                   windows=zoom_windows)
         parts = []  # geometry + timing are already baked into the zoomed clip
     else:
         parts.append(f"scale={w}:{h}")  # normalize the still path; no-op for footage
@@ -356,8 +433,13 @@ def _render_segment(seg, seg_tl, src_video, dims, captions, font, work: Path,
             if dt:
                 parts.append(f"{dt}:enable='between(t,{t0:.3f},{t1:.3f})'")
             t0 = t1
-    parts.extend(_element_filters(elements, dims, font, work, clip_hash,
-                                  seg.get("source_start_ms", 0), seg.get("source_end_ms", 0)))
+    image_inputs: list[Path] = []
+    element_filters, image_overlays = _element_filters(
+        elements, dims, font, work, clip_hash, image_inputs, 2,
+        seg_tl.source_start_ms, seg_tl.source_end_ms,
+        src_to_clip=_src_to_clip, dur_s=dur_s,
+    )
+    parts.extend(element_filters)
     parts += ["format=yuv420p", f"fps={FPS}", "setsar=1"]
     vf = ",".join(parts)
 
@@ -373,6 +455,9 @@ def _render_segment(seg, seg_tl, src_video, dims, captions, font, work: Path,
     # Compose: main video -> (inset on backdrop) -> (logo watermark).
     bg_on = bool(background and background.get("enabled"))
     idx = 2  # next ffmpeg input index (0 = video/still, 1 = narration audio)
+    for image_path in image_inputs:
+        cmd += ["-loop", "1", "-framerate", str(FPS), "-i", str(image_path)]
+        idx += 1
     logo_idx = bg_idx = None
     if logo is not None:
         logo_idx = idx
@@ -394,6 +479,19 @@ def _render_segment(seg, seg_tl, src_video, dims, captions, font, work: Path,
         steps.append(f"[{logo_idx}:v]scale=-1:{lh}[lg]")
         steps.append(f"[{last}][lg]overlay={_overlay_xy(logo_pos)}[branded]")
         last = "branded"
+    for item in image_overlays:
+        image_idx, image_x, image_y, image_w, image_h = item[:5]
+        enable_expr = item[5] if len(item) > 5 else None
+        image_label = f"elimg{image_idx}"
+        steps.append(
+            f"[{image_idx}:v]format=rgba,scale={image_w}:{image_h}:force_original_aspect_ratio=decrease,"
+            f"pad={image_w}:{image_h}:(ow-iw)/2:(oh-ih)/2:color=0x00000000[{image_label}]"
+        )
+        overlay_opt = f"overlay={image_x}:{image_y}:eof_action=repeat:shortest=0"
+        if enable_expr:
+            overlay_opt += f":enable='{enable_expr}'"
+        steps.append(f"[{last}][{image_label}]{overlay_opt}[{image_label}out]")
+        last = f"{image_label}out"
     fc = ";".join(steps)
     cmd += ["-filter_complex", fc, "-map", f"[{last}]", "-map", "1:a",
             "-c:v", "libx264", "-preset", "veryfast", "-crf", CRF, "-pix_fmt", "yuv420p",
@@ -472,6 +570,31 @@ def _render_titlecard(text, dur_ms, dims, font, work, tag, brand: dict | None = 
         "-c:a", "aac", "-ar", "24000", "-t", f"{dur_s:.3f}", str(clip),
     ])
     return clip
+
+
+def _render_media_card(media_key: str, media_type: str, duration_ms: int, dims: tuple[int, int], work: Path, tag: str) -> tuple[Path, int]:
+    """Normalize an uploaded intro/outro image or video to a concat-ready clip."""
+    source = store.local_path(media_key)
+    if not source.exists():
+        raise RuntimeError(f"intro/outro media missing: {media_key}")
+    actual_ms = _probe_duration_ms(source) if media_type == "video" else None
+    dur_ms = max(500, actual_ms or duration_ms)
+    w, h = dims
+    chash = _sha(tag, media_key, media_type, dur_ms, dims)
+    clip = work / f"{tag}_{chash}.mp4"
+    if clip.exists():
+        return clip, dur_ms
+    cover = f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},fps={FPS},setsar=1"
+    inputs = (["-loop", "1", "-i", str(source)] if media_type == "image" else ["-i", str(source)])
+    inputs += ["-f", "lavfi", "-i", "anullsrc=r=24000:cl=stereo"]
+    ok = _run([
+        "ffmpeg", "-y", *inputs, "-vf", cover, "-map", "0:v:0", "-map", "1:a:0",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", CRF, "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-ar", "24000", "-t", f"{dur_ms / 1000:.3f}", str(clip),
+    ])
+    if not ok:
+        raise RuntimeError(f"media card render failed: {media_key}")
+    return clip, dur_ms
 
 
 def _music_source(music: dict | None, work: Path) -> Path | None:
@@ -603,6 +726,8 @@ def run_render(render_job_id: str) -> dict:
         if crops is None:
             crops = [spec["crop"]] if spec.get("crop") else []
         elements = spec.get("elements")
+        # standalone timeline zooms (independent of scenes; win over scene zooms)
+        tl_zooms = spec.get("zooms") or []
         # trim: keep only scenes whose source start falls inside [start, end].
         trim = spec.get("trim") or {}
         if trim.get("enabled") and trim.get("end_ms", 0) > trim.get("start_ms", 0):
@@ -720,19 +845,33 @@ def run_render(render_job_id: str) -> dict:
         rendered = reused = 0
         intro = spec.get("intro", {})
         if intro.get("enabled"):
-            clips.append(_render_titlecard(intro.get("title", ""), intro.get("duration_ms", 2000),
-                                           dims, font, work, "intro", brand=brand, logo=logo))
+            if intro.get("media_key"):
+                intro_clip, _ = _render_media_card(
+                    intro["media_key"], intro.get("media_type") or "image",
+                    intro.get("duration_ms", 2000), dims, work, "intro",
+                )
+                clips.append(intro_clip)
+            else:
+                clips.append(_render_titlecard(intro.get("title", ""), intro.get("duration_ms", 2000),
+                                               dims, font, work, "intro", brand=brand, logo=logo))
         for s, seg_tl in zip(segs, timeline.segments):
             clip, did = _render_segment(s, seg_tl, src_video, dims, captions, font, work,
                                         crops=crops, elements=elements, logo=logo, logo_pos=logo_pos,
-                                        background=spec.get("background"))
+                                        background=spec.get("background"), zooms=tl_zooms)
             clips.append(clip)
             rendered += int(did)
             reused += int(not did)
         outro = spec.get("outro", {})
         if outro.get("enabled"):
-            clips.append(_render_titlecard(outro.get("title", ""), outro.get("duration_ms", 1500),
-                                           dims, font, work, "outro", brand=brand, logo=logo))
+            if outro.get("media_key"):
+                outro_clip, _ = _render_media_card(
+                    outro["media_key"], outro.get("media_type") or "image",
+                    outro.get("duration_ms", 1500), dims, work, "outro",
+                )
+                clips.append(outro_clip)
+            else:
+                clips.append(_render_titlecard(outro.get("title", ""), outro.get("duration_ms", 1500),
+                                               dims, font, work, "outro", brand=brand, logo=logo))
 
         # concat (re-encode for safe, uniform output)
         list_file = work / "concat.txt"

@@ -8,17 +8,24 @@ from sqlalchemy.orm import Session
 
 from app.auth import CurrentUser
 from app.db import get_session
-from app.models import CaptureSession, Document, Project, User
+from app.models import CaptureSession, Document, Project, ProjectCollaborator, User
 from app.ownership import delete_project_cascade, owned_project, purge_media
 from app.schemas import ProjectCreate, ProjectOut
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
 
-def _out(db: Session, project: Project) -> ProjectOut:
-    """Project plus the two facts the UI needs but can't infer: whether a doc has
-    really been generated, and how many captures the project holds."""
+def _out(db: Session, project: Project, user: User | None = None) -> ProjectOut:
+    """Project plus the facts the UI needs but can't infer: whether a doc has
+    really been generated, how many captures the project holds, and — when it
+    isn't the caller's own — whose it is."""
     out = ProjectOut.model_validate(project)
+    if user is not None and project.user_id != user.id:
+        out.shared_with_me = not user.is_admin or _is_collaborator(db, user.id, project.id)
+        owner = db.get(User, project.user_id) if project.user_id else None
+        if owner is not None:
+            out.owner_email = owner.email
+            out.owner_name = owner.name
     out.has_document = (
         db.scalar(select(Document.id).where(Document.project_id == project.id)) is not None
     )
@@ -31,6 +38,18 @@ def _out(db: Session, project: Project) -> ProjectOut:
         or 0
     )
     return out
+
+
+def _is_collaborator(db: Session, user_id: str, project_id: str) -> bool:
+    return (
+        db.scalar(
+            select(ProjectCollaborator.id).where(
+                ProjectCollaborator.project_id == project_id,
+                ProjectCollaborator.user_id == user_id,
+            )
+        )
+        is not None
+    )
 
 
 @router.post("", response_model=ProjectOut, status_code=status.HTTP_201_CREATED)
@@ -50,19 +69,28 @@ def list_projects(
     scope: str = Query(default="mine", pattern="^(mine|all)$"),
     db: Session = Depends(get_session),
 ) -> list[ProjectOut]:
-    """The caller's projects; `scope=all` widens to every user's projects for
-    admins (silently ignored for regular users), with owner labels attached."""
+    """The caller's own projects plus any shared with them (marked
+    `shared_with_me`); `scope=all` widens to every user's projects for admins
+    (silently ignored for regular users). Other people's projects carry owner
+    labels."""
     all_spaces = scope == "all" and user.is_admin
     q = select(Project).order_by(Project.favorite.desc(), Project.created_at.desc())
     if not all_spaces:
-        q = q.where(Project.user_id == user.id)
+        shared_ids = select(ProjectCollaborator.project_id).where(
+            ProjectCollaborator.user_id == user.id
+        )
+        q = q.where((Project.user_id == user.id) | Project.id.in_(shared_ids))
     projects = list(db.scalars(q))
 
+    owner_ids = {p.user_id for p in projects if p.user_id and p.user_id != user.id}
     owners: dict[str, User] = {}
-    if all_spaces:
-        owner_ids = {p.user_id for p in projects if p.user_id and p.user_id != user.id}
-        if owner_ids:
-            owners = {u.id: u for u in db.scalars(select(User).where(User.id.in_(owner_ids)))}
+    if owner_ids:
+        owners = {u.id: u for u in db.scalars(select(User).where(User.id.in_(owner_ids)))}
+    shared_with_me = set(
+        db.scalars(
+            select(ProjectCollaborator.project_id).where(ProjectCollaborator.user_id == user.id)
+        )
+    )
 
     results = []
     for p in projects:
@@ -71,6 +99,7 @@ def list_projects(
         if owner is not None:  # label only other people's projects
             out.owner_email = owner.email
             out.owner_name = owner.name
+        out.shared_with_me = p.id in shared_with_me
         results.append(out)
     return results
 
@@ -79,7 +108,7 @@ def list_projects(
 def get_project(
     project_id: str, user: CurrentUser, db: Session = Depends(get_session)
 ) -> ProjectOut:
-    return _out(db, owned_project(db, user, project_id))
+    return _out(db, owned_project(db, user, project_id), user)
 
 
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -88,8 +117,9 @@ def delete_project(
 ) -> None:
     """Remove a project and everything under it: sessions (events/assets/jobs/
     transcripts), workflow graphs, video project + render jobs, documents, shares,
-    auto-edit / auto-record runs — plus best-effort cleanup of media on disk."""
-    project = owned_project(db, user, project_id)
+    auto-edit / auto-record runs — plus best-effort cleanup of media on disk.
+    Owner (or admin) only — collaborators can edit but not remove a project."""
+    project = owned_project(db, user, project_id, owner_only=True)
     sess_ids, vp_ids = delete_project_cascade(db, project)
     db.commit()
     purge_media(sess_ids, vp_ids)  # the DB delete already succeeded

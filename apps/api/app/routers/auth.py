@@ -2,8 +2,10 @@
 
 Only /login issues a token — registering creates the account and nothing more.
 Logging out is client-side (discard the token), so there is no /logout route.
-Password reset is deliberately not implemented yet — it needs an email transport
-this deployment doesn't have. See PROGRESS.md.
+
+There is no "forgot password" email flow (this deployment has no email
+transport). A user who is locked out asks an admin, who sets a new password from
+the Admin → Users page (`POST /admin/users/{id}/password` in routers/admin.py).
 """
 
 from __future__ import annotations

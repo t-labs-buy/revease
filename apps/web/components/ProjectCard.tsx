@@ -105,10 +105,14 @@ export function ProjectCard({
         </div>
         <span className={`badge mt-2.5 px-2.5 py-0.5 ring-1 ring-inset ${st.cls}`}>{st.label}</span>
         <div className="mt-3.5 flex items-center justify-between border-t border-[var(--border)] pt-3 text-sm text-[var(--text-3)]">
-          {/* owner label — present only for admins browsing all spaces */}
+          {/* owner label — other people's projects (shared with me, or admin browsing all) */}
           {project.owner_email ? (
-            <span className="inline-flex min-w-0 items-center gap-1.5" title={project.owner_email}>
-              👤 <span className="truncate">{project.owner_name || project.owner_email}</span>
+            <span
+              className="inline-flex min-w-0 items-center gap-1.5"
+              title={`${project.shared_with_me ? "Shared by" : "Owner"}: ${project.owner_email}`}
+            >
+              {project.shared_with_me ? "👥" : "👤"}{" "}
+              <span className="truncate">{project.owner_name || project.owner_email}</span>
             </span>
           ) : (
             <span className="inline-flex items-center gap-1.5">🗂 Project</span>
@@ -132,7 +136,7 @@ export function ProjectCard({
             >
               {fav ? "★" : "☆"}
             </button>
-            {onDelete && !selectable && (
+            {onDelete && !selectable && !project.shared_with_me && (
               <button
                 title="Remove project"
                 onClick={(e) => {

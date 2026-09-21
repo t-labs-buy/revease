@@ -1,19 +1,38 @@
 "use client";
 
 import { use, useEffect, useState } from "react";
-import { getSharePublic, type SharePublic } from "@/lib/api";
-import { mediaUrl } from "@/lib/api";
+import { downloadUrl, getSharePublic, mediaUrl, type SharePublic } from "@/lib/api";
+
+function safeFilename(title: string): string {
+  const base = title.replace(/[^\w\- ]+/g, "").trim().replace(/\s+/g, "-");
+  return `${base || "video"}.mp4`;
+}
 
 export default function SharePage({ params }: { params: Promise<{ token: string }> }) {
   const { token } = use(params);
   const [data, setData] = useState<SharePublic | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [downloading, setDownloading] = useState(false);
 
   useEffect(() => {
     getSharePublic(token)
       .then(setData)
       .catch(() => setError("This link isn’t available — it may have been revoked."));
   }, [token]);
+
+  async function download() {
+    if (!data?.video_url) return;
+    setDownloading(true);
+    try {
+      // Cross-origin <a download> is ignored by browsers (it just plays the file),
+      // so fetch the bytes and save them through a same-origin blob URL instead.
+      await downloadUrl(data.video_url, safeFilename(data.title));
+    } catch {
+      setError("Download failed — please try again.");
+    } finally {
+      setDownloading(false);
+    }
+  }
 
   return (
     <main className="min-h-screen">
@@ -38,11 +57,20 @@ export default function SharePage({ params }: { params: Promise<{ token: string 
             {data.kind === "video" && data.video_url && (
               <div className="mt-5">
                 <div className="rounded-2xl bg-gradient-to-br from-violet-500/25 via-blue-500/20 to-emerald-500/20 p-4 sm:p-6">
-                  <video src={data.video_url} controls className="w-full rounded-xl bg-black" />
+                  <video
+                    src={data.video_url}
+                    controls
+                    // Hide the browser's own download control when the owner turned downloads off.
+                    controlsList={data.allow_download ? undefined : "nodownload"}
+                    onContextMenu={data.allow_download ? undefined : (e) => e.preventDefault()}
+                    className="w-full rounded-xl bg-black"
+                  />
                 </div>
-                <a href={data.video_url} download className="btn btn-primary mt-4">
-                  ↓ Download video
-                </a>
+                {data.allow_download && (
+                  <button onClick={download} disabled={downloading} className="btn btn-primary mt-4">
+                    {downloading ? "Downloading…" : "↓ Download video"}
+                  </button>
+                )}
               </div>
             )}
 

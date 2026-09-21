@@ -191,11 +191,10 @@ export default function PackageEditor({ params }: { params: Promise<{ id: string
           <button
             key={t}
             onClick={() => setTab(t)}
-            className={`rounded-t-lg px-4 py-2.5 text-sm font-medium transition-colors ${
-              tab === t
+            className={`rounded-t-lg px-4 py-2.5 text-sm font-medium transition-colors ${tab === t
                 ? "border-b-2 border-[#6d5dfb] text-[var(--text)]"
                 : "text-[var(--text-2)] hover:text-[var(--text)]"
-            }`}
+              }`}
           >
             {t}
           </button>
@@ -211,13 +210,17 @@ export default function PackageEditor({ params }: { params: Promise<{ id: string
               return (
                 <div key={which} className="card p-4">
                   <div className="mb-2 text-sm font-semibold capitalize text-[var(--text)]">{which}</div>
-                  <div className="label mb-1">Text</div>
-                  <input
-                    value={which === "intro" ? f.intro : f.outro}
-                    onChange={(e) => set(which === "intro" ? "intro" : "outro", e.target.value)}
-                    placeholder={which === "intro" ? "Welcome to Acme" : "Thanks for watching!"}
-                    className="input"
-                  />
+                  {!videoKey && (
+                    <>
+                      <div className="label mb-1">Text</div>
+                      <input
+                        value={which === "intro" ? f.intro : f.outro}
+                        onChange={(e) => set(which === "intro" ? "intro" : "outro", e.target.value)}
+                        placeholder={which === "intro" ? "Welcome to Acme" : "Thanks for watching!"}
+                        className="input"
+                      />
+                    </>
+                  )}
                   <div className="mt-3 flex items-center gap-2">
                     <UploadBtn
                       label={videoKey ? "Replace clip" : "+ Add short video"}

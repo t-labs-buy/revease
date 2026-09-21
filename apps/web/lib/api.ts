@@ -10,9 +10,44 @@ export interface Project {
   created_at: string;
   has_document?: boolean; // a step-by-step doc has actually been generated
   capture_count?: number; // how many recordings/uploads this project holds
-  // Set only for admins browsing all spaces, and only on other users' projects.
+  // Set on other users' projects: for admins browsing all spaces, and for
+  // projects shared with the caller.
   owner_email?: string | null;
   owner_name?: string | null;
+  // True when the caller was invited to edit this project rather than owning it.
+  shared_with_me?: boolean;
+}
+
+// ---- share-to-edit (collaborators) ----
+export interface Collaborator {
+  user_id: string;
+  email: string;
+  name: string;
+  created_at: string;
+}
+
+export async function listCollaborators(projectId: string): Promise<Collaborator[]> {
+  const r = await apiFetch(`/projects/${projectId}/collaborators`, { cache: "no-store" });
+  if (!r.ok) throw new Error(`listCollaborators failed: ${r.status}`);
+  return r.json();
+}
+
+/** Owner/admin: invite a registered RevEase user by email. Returns the new list. */
+export async function addCollaborator(projectId: string, email: string): Promise<Collaborator[]> {
+  const r = await apiFetch(`/projects/${projectId}/collaborators`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email }),
+  });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail ?? `invite failed: ${r.status}`);
+  return r.json();
+}
+
+/** Owner/admin removes anyone; a collaborator may remove themselves. Returns the new list. */
+export async function removeCollaborator(projectId: string, userId: string): Promise<Collaborator[]> {
+  const r = await apiFetch(`/projects/${projectId}/collaborators/${userId}`, { method: "DELETE" });
+  if (!r.ok) throw new Error(`removeCollaborator failed: ${r.status}`);
+  return r.json();
 }
 
 /** "mine" (default) = the caller's own space; "all" = every user's space.
@@ -317,7 +352,12 @@ async function saveBlob(response: Response, filename: string): Promise<void> {
 
 // Media reads are public (so <video src> and share links work), hence a plain fetch.
 export async function downloadMedia(storageKey: string, filename: string): Promise<void> {
-  const r = await fetch(mediaUrl(storageKey));
+  await downloadUrl(mediaUrl(storageKey), filename);
+}
+
+/** Download any public URL (e.g. a share page's video_url) via the blob route. */
+export async function downloadUrl(url: string, filename: string): Promise<void> {
+  const r = await fetch(url);
   if (!r.ok) throw new Error(`download failed: ${r.status}`);
   await saveBlob(r, filename);
 }
@@ -381,6 +421,8 @@ export interface Share {
   token: string;
   kind: "video" | "doc";
   revoked: boolean;
+  /** Whether the public page offers a Download button (off by default). */
+  allow_download: boolean;
   created_at: string;
   project_id: string;
 }
@@ -389,6 +431,7 @@ export interface SharePublic {
   kind: "video" | "doc";
   title: string;
   project_id: string;
+  allow_download: boolean;
   video_url: string | null;
   doc: SopDoc | null;
 }
@@ -416,9 +459,20 @@ export async function getSharePublic(token: string): Promise<SharePublic> {
   return j;
 }
 
-export async function listAllShares(): Promise<Share[]> {
-  const r = await apiFetch(`/shares`, { cache: "no-store" });
+export async function listAllShares(scope: ListScope = "mine"): Promise<Share[]> {
+  const r = await apiFetch(`/shares?scope=${scope}`, { cache: "no-store" });
   if (!r.ok) throw new Error(`listShares failed: ${r.status}`);
+  return r.json();
+}
+
+/** Owner/admin: show or hide the Download button on the public share page. */
+export async function setShareDownload(token: string, allowDownload: boolean): Promise<Share> {
+  const r = await apiFetch(`/shares/${token}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ allow_download: allowDownload }),
+  });
+  if (!r.ok) throw new Error(`updateShare failed: ${r.status}`);
   return r.json();
 }
 
@@ -704,7 +758,16 @@ export interface EditSegment {
   target?: string;
   words: string[];
   removed: number[];
-  zoom: { enabled: boolean; scale: number; cx: number; cy: number; speed?: number; auto?: boolean };
+  zoom: {
+    enabled: boolean;
+    scale: number;
+    cx: number;
+    cy: number;
+    speed?: number;
+    auto?: boolean;
+    start_ms?: number; // optional time window (source ms); when end_ms>start_ms the
+    end_ms?: number; //   zoom only runs during [start_ms, end_ms], else whole scene
+  };
   source_start_ms: number;
   source_end_ms: number;
   screenshot?: string | null;
@@ -714,12 +777,13 @@ export interface EditSegment {
 
 export interface EditElement {
   id: string;
-  type: "text" | "box";
+  type: "text" | "box" | "image";
   x: number;
   y: number;
   w: number;
   h: number;
   text?: string;
+  media_key?: string;
   color?: string;
   size?: number; // text height as a fraction of the frame (e.g. 0.06)
   start_ms?: number; // optional time window (source ms); when end_ms>start_ms the
@@ -735,6 +799,28 @@ export interface CropRegion {
   start_ms?: number; // optional time window: crop applies only within
   end_ms?: number; //   [start_ms, end_ms] when end>start, else whole video
 }
+
+/** A standalone zoom dropped on the timeline (independent of scenes): a
+ * source-time window (1s by default, duration editable) with its own center
+ * and level. Several can sit on one clip; where one overlaps a scene's own
+ * zoom, the timeline zoom wins. */
+export interface ZoomRegion {
+  id: string;
+  start_ms: number; // source-time window; moved by dragging on the Zoom track
+  end_ms: number;
+  scale: number;
+  cx: number;
+  cy: number;
+  speed?: number;
+}
+
+/** The timeline zoom in effect at a source-time (ms), if any. */
+export const activeTimelineZoom = (
+  spec: { zooms?: ZoomRegion[] },
+  atMs: number,
+): ZoomRegion | undefined =>
+  // half-open [start, end): back-to-back zooms never both match at the seam
+  (spec.zooms ?? []).find((z) => atMs >= z.start_ms && atMs < z.end_ms);
 
 /** All crops on a spec, with the legacy single `crop` folded in. */
 export const cropList = (spec: { crop?: CropRegion; crops?: CropRegion[] }): CropRegion[] =>
@@ -754,8 +840,8 @@ export interface EditSpec {
   title: string;
   voice: { voice_id: string; speed: number; use_original?: boolean };
   aspect: "16:9" | "9:16" | "1:1";
-  intro: { enabled: boolean; title: string; duration_ms: number };
-  outro: { enabled: boolean; title: string; duration_ms: number };
+  intro: IntroOutroCard;
+  outro: IntroOutroCard;
   captions: { enabled: boolean };
   music: { enabled: boolean; storage_key: string | null; gain_db: number };
   crop?: CropRegion; // legacy single crop — superseded by `crops`
@@ -773,7 +859,16 @@ export interface EditSpec {
     logo_position?: string;
   };
   elements?: EditElement[];
+  zooms?: ZoomRegion[]; // standalone timeline zooms; win over scene zooms where they overlap
   segments: EditSegment[];
+}
+
+export interface IntroOutroCard {
+  enabled: boolean;
+  title: string;
+  duration_ms: number;
+  media_key?: string | null;
+  media_type?: "image" | "video" | null;
 }
 
 export interface VideoSpec {
@@ -782,6 +877,7 @@ export interface VideoSpec {
   graph_version: number;
   edit_spec: EditSpec;
   source_video?: string | null;
+  latest_render?: RenderJob | null; // newest finished render, shown on open
 }
 
 export interface RenderJob {
@@ -966,4 +1062,20 @@ export async function setUserRole(userId: string, role: "user" | "admin"): Promi
     throw new Error(typeof detail === "string" ? detail : `setUserRole failed: ${r.status}`);
   }
   return r.json();
+}
+
+/** Set a new password for another user (admin only). Signs all their sessions
+ *  out; the admin hands the password to them out of band. */
+export async function resetUserPassword(userId: string, newPassword: string): Promise<void> {
+  const r = await apiFetch(`/admin/users/${userId}/password`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ new_password: newPassword }),
+  });
+  if (!r.ok) {
+    const detail = await r.json().then((d) => d?.detail).catch(() => null);
+    throw new Error(
+      typeof detail === "string" ? detail : `resetUserPassword failed: ${r.status}`,
+    );
+  }
 }
