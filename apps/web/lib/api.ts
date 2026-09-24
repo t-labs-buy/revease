@@ -826,14 +826,15 @@ export const activeTimelineZoom = (
 export const cropList = (spec: { crop?: CropRegion; crops?: CropRegion[] }): CropRegion[] =>
   spec.crops ?? (spec.crop?.enabled ? [spec.crop] : []);
 
-/** The crop in effect at a source-time (ms): first enabled region whose window
- * covers it; a region without a window applies everywhere. */
+/** Whether one crop region is in effect at a source-time (ms): enabled, and its
+ * window covers the time — a region without a window applies everywhere. */
+export const cropActive = (c: CropRegion, atMs: number): boolean =>
+  c.enabled &&
+  ((c.end_ms ?? 0) <= (c.start_ms ?? 0) || (atMs >= (c.start_ms ?? 0) && atMs <= (c.end_ms ?? 0)));
+
+/** The crop in effect at a source-time (ms): the first region active there. */
 export const activeCrop = (crops: CropRegion[], atMs: number): CropRegion | undefined =>
-  crops.find(
-    (c) =>
-      c.enabled &&
-      ((c.end_ms ?? 0) <= (c.start_ms ?? 0) || (atMs >= (c.start_ms ?? 0) && atMs <= (c.end_ms ?? 0))),
-  );
+  crops.find((c) => cropActive(c, atMs));
 
 export interface EditSpec {
   graph_version: number;
@@ -1020,6 +1021,27 @@ export async function getUsageSummary(from?: string, to?: string): Promise<Usage
   const qs = params.toString();
   const r = await apiFetch(`/admin/usage${qs ? `?${qs}` : ""}`, { cache: "no-store" });
   if (!r.ok) throw new Error(`getUsageSummary failed: ${r.status}`);
+  return r.json();
+}
+
+export interface UsageCost {
+  cost_usd: number; // total OpenRouter spend in the range
+  request_count: number;
+  tokens_total: number;
+  from_date: string | null;
+  to_date: string | null;
+}
+
+/** Total AI spend for the range, read live from OpenRouter. Resolves to null
+ *  when cost reporting isn't configured on the server (404). */
+export async function getUsageCost(from?: string, to?: string): Promise<UsageCost | null> {
+  const params = new URLSearchParams();
+  if (from) params.set("from", from);
+  if (to) params.set("to", to);
+  const qs = params.toString();
+  const r = await apiFetch(`/admin/usage/cost${qs ? `?${qs}` : ""}`, { cache: "no-store" });
+  if (r.status === 404) return null;
+  if (!r.ok) throw new Error(`getUsageCost failed: ${r.status}`);
   return r.json();
 }
 

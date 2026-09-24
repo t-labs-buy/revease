@@ -54,6 +54,9 @@ def _setup(db) -> VideoProject:
     )
     db.add(MediaAsset(session_id=sess.id, kind="raw_video", storage_key=key))
     spec = build_edit_spec(_graph(3), {"w": 1280, "h": 720})
+    # cards are opt-in for new projects; this test exercises them on purpose
+    spec["intro"]["enabled"] = True
+    spec["outro"]["enabled"] = True
     vp = VideoProject(project_id=p.id, graph_version=1, edit_spec_json=spec)
     db.add(vp)
     db.commit()

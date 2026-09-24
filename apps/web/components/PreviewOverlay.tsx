@@ -1,7 +1,7 @@
 "use client";
 
 import { Rnd } from "react-rnd";
-import { mediaUrl, type EditSpec, type EditElement, type CropRegion } from "@/lib/api";
+import { cropActive, mediaUrl, type EditSpec, type EditElement, type CropRegion } from "@/lib/api";
 
 type Frame = { w: number; h: number };
 
@@ -46,11 +46,13 @@ export function PreviewOverlay({
   const sel = Math.min(cropSel, crops.length - 1);
   const crop = crops[sel];
   const allElements = spec.elements ?? [];
-  const cropEdit = cropEditing && !!crop;
+  // The crop box only shows while the playhead is inside the selected region's
+  // window — like elements, the preview mirrors what the render would show.
+  const cropEdit = cropEditing && !!crop && cropActive(crop, curMs);
   const elEdit = tab === "Elements";
-  // While editing show every element (so any can be positioned); otherwise show
-  // only those active at the current time.
-  const elements = elEdit ? allElements : allElements.filter((e) => elActive(e, curMs));
+  // Always show only the elements active at the playhead — the preview mirrors
+  // the render, even while editing. Seek into an element's range to position it.
+  const elements = allElements.filter((e) => elActive(e, curMs));
 
   const setCrop = (patch: Partial<CropRegion>) => onPatchCrop?.(sel, patch);
   const setEl = (id: string, patch: Partial<EditElement>) =>

@@ -37,9 +37,11 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
       <div className="mx-auto max-w-[1600px] px-8 py-10">
         <Link
           href="/"
-          className="inline-flex items-center gap-1.5 text-sm font-medium text-[var(--text-2)] transition-colors hover:text-[var(--text)]"
+          className="btn btn-ghost -ml-3 flex h-12 w-12 items-center justify-center text-2xl leading-none"
+          title="Back to projects"
+          aria-label="Back to projects"
         >
-          ← Projects
+          ←
         </Link>
 
         <section className="animate-fade-in mt-4 flex flex-wrap items-end justify-between gap-4">

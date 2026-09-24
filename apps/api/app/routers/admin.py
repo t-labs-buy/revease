@@ -205,6 +205,97 @@ def usage_events(
     return UsageEventsPageOut(total=total, events=_usage_events(db, from_, to, limit, offset))
 
 
+# --------------------------------------------------------------------------- #
+# AI cost (OpenRouter)
+# --------------------------------------------------------------------------- #
+OPENROUTER_ANALYTICS_URL = "https://openrouter.ai/api/v1/analytics/query"
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+class UsageCostOut(BaseModel):
+    cost_usd: float  # total OpenRouter spend in the range
+    request_count: int
+    tokens_total: int
+    from_date: date | None = None
+    to_date: date | None = None
+
+
+def _utc_iso(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _cost_query(from_: date | None, to: date | None) -> dict:
+    """Analytics request body for the range. Dates are IST calendar days like the
+    other usage filters; OpenRouter wants UTC instants, so convert the IST
+    midnights. No `to` = up to now; no `from` = the 6 months before the end
+    (OpenRouter rejects ranges over 367 days, so there is no "all time")."""
+    end = (
+        _ist_start(to + timedelta(days=1)).replace(tzinfo=IST)  # inclusive end date
+        if to
+        else datetime.now(timezone.utc)
+    )
+    start = _ist_start(from_).replace(tzinfo=IST) if from_ else end - timedelta(days=183)
+    # One row per API key: OpenRouter's own `filters` on api_key_id 500s, so we
+    # group by key here and pick the configured one in _totals_for_key.
+    return {
+        "metrics": ["total_usage", "request_count", "tokens_total"],
+        "dimensions": ["api_key_id"],
+        "time_range": {"start": _utc_iso(start), "end": _utc_iso(end)},
+        "limit": 1000,
+    }
+
+
+def _totals_for_key(rows: list[dict], key_name: str) -> dict:
+    """Sum the per-key analytics rows down to one total — only the named key's
+    row (its `api_key_id` is the key's display name), or every row when no key
+    name is configured. A key with no spend in the range has no row: zeros."""
+    picked = [r for r in rows if not key_name or r.get("api_key_id") == key_name]
+    return {
+        "cost_usd": sum(float(r.get("total_usage") or 0) for r in picked),
+        "request_count": sum(int(r.get("request_count") or 0) for r in picked),
+        "tokens_total": sum(int(r.get("tokens_total") or 0) for r in picked),
+    }
+
+
+def fetch_openrouter_cost(
+    key: str, from_: date | None, to: date | None, key_name: str = ""
+) -> dict:
+    """Spend for the range on the named OpenRouter API key (or the whole workspace)."""
+    import httpx
+
+    resp = httpx.post(
+        OPENROUTER_ANALYTICS_URL,
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        json=_cost_query(from_, to),
+        timeout=30,
+    )
+    resp.raise_for_status()
+    rows = (resp.json().get("data") or {}).get("data") or []
+    return _totals_for_key(rows, key_name)
+
+
+@router.get("/usage/cost", response_model=UsageCostOut)
+def usage_cost(
+    admin: AdminUser,
+    from_: date | None = Query(default=None, alias="from"),
+    to: date | None = Query(default=None),
+) -> UsageCostOut:
+    """Total AI spend (USD) for the range, read live from OpenRouter's analytics
+    API. Needs REFRACT_OPENROUTER_MANAGEMENT_KEY; 404 while unset. Admin only."""
+    settings = get_settings()
+    key = settings.openrouter_management_key
+    if not key:
+        raise HTTPException(
+            status_code=404,
+            detail="AI cost reporting is not enabled (set REFRACT_OPENROUTER_MANAGEMENT_KEY)",
+        )
+    try:
+        totals = fetch_openrouter_cost(key, from_, to, key_name=settings.openrouter_cost_key)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"OpenRouter analytics failed: {e}")
+    return UsageCostOut(**totals, from_date=from_, to_date=to)
+
+
 class UsageReportOut(UsageSummaryOut):
     events_total: int  # events matching the range, across all pages
     events: list[UsageEventOut]
