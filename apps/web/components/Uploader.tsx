@@ -29,6 +29,7 @@ export function readDurationMs(file: File): Promise<number | undefined> {
 export function Uploader({ projectId, onDone }: { projectId: string; onDone: () => void }) {
   const [drag, setDrag] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [pct, setPct] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -43,7 +44,9 @@ export function Uploader({ projectId, onDone }: { projectId: string; onDone: () 
       const ext = /\.webm$/i.test(file.name) ? "webm" : "mp4";
       const durationMs = await readDurationMs(file);
       const session = await createSession(projectId, "upload");
-      await registerAndUpload(session.id, "raw_video", ext, file);
+      await registerAndUpload(session.id, "raw_video", ext, file, (pr) =>
+        setPct(pr.total ? Math.floor((pr.loaded / pr.total) * 100) : null),
+      );
       // No telemetry on a plain upload -> complete() flags telemetry=absent (P2 CV territory).
       await completeSession(session.id, durationMs);
       onDone();
@@ -69,12 +72,12 @@ export function Uploader({ projectId, onDone }: { projectId: string; onDone: () 
       }}
       className={`rounded-2xl border border-dashed px-6 py-8 text-center transition-colors ${
         drag
-          ? "border-[#7C3AED] bg-[#7C3AED]/5"
+          ? "border-[#1E8F8E] bg-[#1E8F8E]/5"
           : "border-[var(--border-strong)] bg-[var(--hover)]"
       }`}
     >
       <p className="text-sm text-[var(--text-2)]">
-        {busy ? "Uploading…" : "Drag & drop an mp4 / webm"}
+        {busy ? `Uploading${pct != null ? ` ${pct}%` : "…"}` : "Drag & drop an mp4 / webm"}
       </p>
       {!busy && (
         <button

@@ -45,7 +45,7 @@ export function UserMenu() {
         aria-haspopup="menu"
         aria-expanded={open}
         title={user.email}
-        className="flex h-10 w-10 items-center justify-center rounded-full bg-gradient-to-br from-[#7C3AED] to-[#A78BFA] text-sm font-semibold text-white transition-transform hover:scale-105"
+        className="flex h-10 w-10 items-center justify-center rounded-full bg-gradient-to-br from-[#1E8F8E] to-[#16283C] text-sm font-semibold text-white transition-transform hover:scale-105"
       >
         {initials(user.name, user.email)}
       </button>
@@ -56,7 +56,7 @@ export function UserMenu() {
           className="absolute right-0 top-full z-50 mt-2 w-60 overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--card)] shadow-2xl shadow-black/20"
         >
           <div className="flex items-center gap-2.5 border-b border-[var(--border)] px-3.5 py-3">
-            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-[#7C3AED] to-[#A78BFA] text-xs font-semibold text-white">
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-[#1E8F8E] to-[#16283C] text-xs font-semibold text-white">
               {initials(user.name, user.email)}
             </span>
             <span className="min-w-0">
@@ -67,7 +67,7 @@ export function UserMenu() {
                 {user.email}
               </span>
               {isAdmin && (
-                <span className="mt-0.5 inline-block rounded-md bg-[#6d5dfb]/15 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide text-[var(--brand-2)]">
+                <span className="mt-0.5 inline-block rounded-md bg-[#1E8F8E]/15 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide text-[var(--brand-2)]">
                   Admin
                 </span>
               )}

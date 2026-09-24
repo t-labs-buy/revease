@@ -1,7 +1,9 @@
 # RevEase on ivolve cloud
 
 The live deployment. Host `13.204.129.141` (`ssh ivolve_cloud`), deploy root
-`~/apps/revease`. **URL: http://13.204.129.141:8020**
+`~/apps/revease`. **URL: http://13.204.129.141:8020** (see "Why one port" for who
+can reach it). Running **v3** since 2026-09-24: object storage (MinIO), Postgres,
+separate media/light workers, live progress, AI documentation.
 
 This directory is the source of truth for everything except `.env` (secrets) and
 `src/` (the rsynced source). The deploy root mirrors it:
@@ -12,51 +14,86 @@ This directory is the source of truth for everything except `.env` (secrets) and
   edge/nginx.conf      ← infra/ivolve/edge/nginx.conf
   build.sh             ← infra/ivolve/build.sh
   backup.sh            ← infra/ivolve/backup.sh   (cron: 02:30 daily)
-  .env                 ← infra/ivolve/.env.example, filled in + chmod 600
+  README.md            ← infra/ivolve/README.md   (this file)
+  .env                 secrets + settings, chmod 600 (.env.bak-v2 = pre-v3 copy)
+  .pre-v3/             the v2 compose / nginx / backup files, kept for rollback
   src/                 rsynced from this repo; build context only
 ```
+
+## Services
+
+| container | image | role |
+|---|---|---|
+| `revease-edge` | nginx:1.27-alpine | the single entry point (8090 in the container, 8020 on the host) |
+| `revease-web` | `reg.ivolve.cloud/ivolve/revease:web-v3` | Next.js UI |
+| `revease-api` | `…:api-v3` | FastAPI (also `127.0.0.1:8021` for curl on the host) |
+| `revease-worker` | `…:worker-v3` | queue `media`, 1 at a time: convert, transcribe, render, auto-edit |
+| `revease-worker-light` | `…:worker-v3` | queue `default`, 3 at a time: documents, snapshots, voice previews; runs Celery beat (hourly retention) |
+| `revease-minio` | quay.io/minio/minio | media bucket `revease-media` (console on `127.0.0.1:8023`) |
+| `revease-postgres` | postgres:16-alpine | the database |
+| `revease-redis` | redis:7-alpine | Celery broker |
+
+Volumes: `revease_minio-data` (all media), `revease_postgres-data` (the database),
+`revease_revease-data` (Kokoro TTS model, the ffmpeg media cache under `cache/`,
+and the pre-v3 SQLite file + media, kept as the rollback), `revease_redis-data`.
 
 ## Why one port
 
 Of this host's ports only **80 and 443 reach the internet** — both owned by
 nginx-proxy-manager. `8020` is published by docker and answers on the host, but the
-security group drops it from outside (measured 2026-08-27; the earlier note here
-claiming 8020 was open was wrong). 3000 and 8000 are taken locally by gitea and
-flowwatcher. So an nginx `edge` container listens on 8090, is published to the host
-as 8020 for local curl, and serves both halves from one origin:
+security group drops it from outside (measured 2026-08-27). 3000 and 8000 are
+taken locally by gitea and flowwatcher. So the `edge` container serves everything
+from one origin:
 
 | path | upstream |
 |---|---|
 | `/` | web (Next.js :3000) |
 | `/api/…` | api (FastAPI :8000, prefix stripped) |
+| `/s3/…` | MinIO :9000 (prefix stripped, `Host: revease-minio:9000`) |
 
 **The only public path in is nginx-proxy-manager → `revease-edge:8090`.**
 
-The API is also on `127.0.0.1:8021` for curl on the host. Same origin means CORS
-is not involved in normal use.
+Because everything shares an origin, `WEB_API_BASE` is origin-relative (`/api`)
+and `REFRACT_S3_PUBLIC_URL` is `/s3`, so one web image serves any hostname with no
+rebuild and CORS is never involved.
 
-Because both halves share an origin, `WEB_API_BASE` is **origin-relative** (`/api`),
-not an absolute URL. One web image therefore serves every hostname the stack is
-reached by — the IP:8020 URL today, a domain in front of it tomorrow — with no
-rebuild. Put an absolute URL there only if web and API are ever split apart.
+**Why `/s3/` forces that Host header.** Media URLs are S3 presigned URLs, signed
+by the API against `http://revease-minio:9000`. SigV4 signs the host and path, so
+the edge must forward exactly `Host: revease-minio:9000` and `/<bucket>/<key>` or
+MinIO rejects the signature. The upstream is resolved per request, so the edge
+still starts if MinIO is down. The edge proxies to **container names**
+(`revease-api`, `revease-web`, `revease-minio`): on `ivolve-network` other stacks
+already own the names `api` and `web`.
+
+## How media flows
+
+- **Uploads**: the browser splits large files into 16 MB parts and PUTs them in
+  parallel straight to `/s3/` (presigned), resuming after a dropped connection.
+  The API only signs parts and completes the upload. No request-size limit
+  applies; nothing is buffered.
+- **Playback/downloads**: the UI requests `/api/media/<key>`; the API answers
+  `307` to a presigned `/s3/…` URL. Range requests (video seeking) work.
+- **Workers** download what ffmpeg needs into `/data/cache` (shared by the
+  containers on this host, LRU-capped at 20 GB) and upload results.
+- **Downloads of the original recording**: Download menu on the prepare page and
+  capture cards (`GET /api/sessions/<id>/download`).
 
 ## HTTPS via nginx-proxy-manager
 
 **Screen capture does not work over plain HTTP.** `getDisplayMedia` /
-`getUserMedia` are secure-context only, so `Recorder.tsx` and `CaptureModal.tsx`
-are dead on `http://…:8020` — upload, editing and render are fine. Everything on
+`getUserMedia` are secure-context only, so the in-app recorder is dead on
+`http://…:8020` — upload, editing, documents and render are fine. Everything on
 this host's side is ready:
 
 - `edge` is on `ivolve-network` alongside `nginx-proxy-manager-app-1`, and
   `docker exec nginx-proxy-manager-app-1 curl -s http://revease-edge:8090/api/healthz`
-  already answers `{"status":"ok"}`.
-- The web bundle uses a relative `/api`, so it works on the new hostname with no
-  rebuild.
+  answers `{"status":"ok"}`.
+- The web bundle and media URLs are origin-relative, so they work on the new
+  hostname with no rebuild.
 
 **The only missing piece is DNS:** `revease.ivolve.cloud` has no A record. Add
-`revease A 13.204.129.141` in the ivolve.cloud zone (same as every other app
-there), then add one proxy host in NPM — admin UI is on `127.0.0.1:81`, not
-reachable from outside, so tunnel with `ssh -N -L 8181:127.0.0.1:81 ivolve_cloud`:
+`revease A 13.204.129.141` in the ivolve.cloud zone, then add one proxy host in NPM
+(admin UI on `127.0.0.1:81`; tunnel with `ssh -N -L 8181:127.0.0.1:81 ivolve_cloud`):
 
 | field | value |
 |---|---|
@@ -67,9 +104,8 @@ reachable from outside, so tunnel with `ssh -N -L 8181:127.0.0.1:81 ivolve_cloud
 | Websockets Support | on |
 | Block Common Exploits / Cache Assets | off |
 
-SSL tab → request a new Let's Encrypt cert, Force SSL, HTTP/2. Advanced tab needs
-this, because NPM's global `client_max_body_size` is 2000m and it buffers by
-default — which would break streamed recording uploads and Range video playback:
+SSL tab: request a Let's Encrypt cert, Force SSL, HTTP/2. Advanced tab (NPM
+buffers and caps bodies by default, which breaks uploads and video seeking):
 
 ```nginx
 client_max_body_size 0;
@@ -79,28 +115,25 @@ proxy_read_timeout 3600s;
 proxy_send_timeout 3600s;
 ```
 
-Only **one** proxy host — `edge` already splits `/` and `/api/` internally. Note
-the pattern other apps here follow: `usagetrackerapp.ivolve.cloud` forwards to
-`usage-tracker-frontend:80`, the *container* port, not the 3011 it is published on.
-
-Note the edge config proxies to **container names** (`revease-api`, `revease-web`),
-not the compose service names: joining `ivolve-network` puts it in a namespace
-where other stacks already own the names `api` and `web`, and their DNS wins.
+Only **one** proxy host: `edge` already splits `/`, `/api/` and `/s3/`. Then add
+the https origin to `CORS_ORIGINS` in `.env` (only the extension needs it).
 
 ## Images
 
-Built on the host and pushed to the host's own **private** registry — `registry:2`
-on `localhost:5000`, htpasswd-protected (creds in `~/apps/docker-registry/.env`):
+Built **on this host** (x86, native — far faster than emulating from an
+Apple-silicon Mac, and Next.js segfaults under qemu) and pushed to Gitea's
+container registry `reg.ivolve.cloud` under the `ivolve` org:
 
 ```
-localhost:5000/revease:api-v1     464MB
-localhost:5000/revease:worker-v1  2.24GB   (ffmpeg + faster-whisper)
-localhost:5000/revease:web-v1     851MB
+reg.ivolve.cloud/ivolve/revease:api-v3      582MB
+reg.ivolve.cloud/ivolve/revease:worker-v3   2.36GB   (ffmpeg + faster-whisper)
+reg.ivolve.cloud/ivolve/revease:web-v3      864MB
 ```
 
-`reg.ivolve.cloud` is **not** this registry — that hostname is Gitea's container
-registry (bearer-token auth, `<owner>/<image>` paths) and rejects the `admindoc`
-htpasswd credentials.
+The host is `docker login`ed to `reg.ivolve.cloud` as `karthik`. `.env` sets
+`REGISTRY` and `IMAGE_NS` to `reg.ivolve.cloud/ivolve/revease` and `TAG=v3`.
+(Earlier versions used a private `registry:2` on `localhost:5000`; `v1`/`v2` images
+are still in the local Docker cache.)
 
 ## Deploying a new version
 
@@ -109,7 +142,7 @@ From the repo root on your machine:
 ```bash
 rsync -az --delete \
   --exclude .git --exclude node_modules --exclude .next --exclude .venv \
-  --exclude __pycache__ --exclude data --exclude "*.sqlite*" --exclude .env \
+  --exclude __pycache__ --exclude data --exclude "*.sqlite*" --exclude .env --exclude .claude \
   ./ ivolve_cloud:/home/ubuntu/apps/revease/src/
 ```
 
@@ -117,43 +150,85 @@ Then on the host:
 
 ```bash
 cd ~/apps/revease
-./build.sh            # all three; or ./build.sh web / api / worker
+cp src/infra/ivolve/{docker-compose.yml,backup.sh,build.sh,README.md} .   # if they changed
+cp src/infra/ivolve/edge/nginx.conf edge/nginx.conf                        # if it changed
+./build.sh            # all three (tag from .env); or ./build.sh web|api|worker
 docker compose up -d
+docker exec revease-edge nginx -s reload   # only if nginx.conf changed
 ```
 
-`WEB_API_BASE` is compiled into the web bundle, so changing it in `.env` requires
-`./build.sh web` — a restart alone does nothing.
+**Before restarting the media worker, check nothing long is converting**
+(header activity menu, or
+`docker exec revease-postgres psql -U revease -tAc "select stage,message from jobs where status='running'"`).
+A restart interrupts it; the task message then sits unacknowledged in Redis for
+the 12 h visibility timeout. To resume immediately:
+
+```bash
+for t in $(docker exec revease-redis redis-cli HKEYS unacked); do
+  docker exec revease-redis redis-cli HDEL unacked "$t"; docker exec revease-redis redis-cli ZREM unacked_index "$t"; done
+docker compose exec -T api python -c "from app.queue import enqueue_understanding; enqueue_understanding('<session id>')"
+```
+
+The new request waits until the interrupted run's heartbeat is 3 minutes stale,
+then takes over.
+
+`WEB_API_BASE` is compiled into the web bundle, so changing it needs
+`./build.sh web`, not a restart.
 
 ## Operations
 
 ```bash
 docker compose ps
-docker compose logs -f api worker
+docker compose logs -f api worker worker-light
 curl -s localhost:8020/api/healthz
+docker compose exec -T api python -m app.retention --dry-run    # what the hourly sweep would delete
 ```
 
-**Backups** — `backup.sh` runs nightly at 02:30 and writes
-`~/apps-data/revease-backups/revease-<date>.tar.gz`, keeping 7. The SQLite DB goes
-through sqlite3's online backup API (WAL mode + two writers means a plain file copy
-can tear); `kokoro/` and `tts/` are excluded as regenerable. Restore by extracting
-into the volume and renaming `_backup.sqlite3` to `refract.sqlite3`.
+- **Progress**: every long job reports progress; `GET /api/activity` is what the
+  header indicator shows.
+- **Retention** (hourly, `worker-light`): originals 7 days after a processed MP4
+  exists, transcription audio 2 days, superseded renders 7 days, TTS cache 30
+  days, abandoned uploads 24 h. Tune with `REFRACT_RETENTION_*` in `.env`.
+- **MinIO console**: `ssh -N -L 8023:127.0.0.1:8023 ivolve_cloud`, then
+  http://localhost:8023 (user `revease`, password `S3_SECRET_KEY` in `.env`).
 
-## Verified end to end (2026-08-25)
+**Backups** — `backup.sh` runs nightly at 02:30 into `~/apps-data/revease-backups/`,
+keeping 7 of each: `revease-<date>-db.pgdump` (pg_dump custom format) and
+`revease-<date>-media.tar.gz` (the MinIO volume). It follows `.env`, so it backs up
+SQLite and local media instead if those are configured. Restore commands are in
+the script header. The final pre-v3 archive is `revease-2026-09-24.tar.gz`.
 
-Upload → understanding → graph → render, driven through the edge proxy exactly as
-the browser drives it: 4-step graph from a 15s narrated recording, whisper
-transcript verbatim, render 4/4 segments in ~25s, 300KB mp4 out. Re-rendering with
-nothing changed settles at `segments_reused: 4, tts_cached: 4` — but note the
-*first* re-render reports `rendered 3 / reused 1` because motion-zoom thinning
-changes the clip hashes once before it stabilises.
+## The v3 switch-over (2026-09-24) and rollback
+
+Done with writers stopped: `app.storage_migrate` copied `/data/media` into the
+bucket (1,440 files, 911 MB) and `app.dbcopy` copied SQLite into Postgres (1,633
+rows; counts verified table by table). Keys and ids are unchanged.
+
+Rollback to v2 (loses anything created after the switch):
+
+```bash
+cd ~/apps/revease
+cp .pre-v3/docker-compose.yml .pre-v3/backup.sh . && cp .pre-v3/nginx.conf edge/nginx.conf
+cp .env.bak-v2 .env
+docker compose up -d --remove-orphans && docker exec revease-edge nginx -s reload
+```
+
+## Verified
+
+- **2026-09-24 (v3)**: health and web through the edge; presigned media through
+  `/s3/` (307 → 200) and video Range (206); both workers on their queues, beat
+  running; the in-flight 29-minute recording resumed on the new media worker,
+  fetching its source from MinIO. The full browser flow (162 MB resumable upload →
+  processing → 20-step document → DOCX → render) was verified against the same
+  MinIO/Postgres setup locally, since the public URL is not reachable from outside.
+- **2026-08-25 (v1)**: upload → understanding → graph → render through the edge;
+  re-rendering unchanged scenes reuses all clips.
 
 ## Not configured
 
-- `REFRACT_ANTHROPIC_API_KEY` is empty, so step labels and narration come from the
-  deterministic offline labeler (`intent` reads "Interact with <transcript line>").
-- No HTTPS yet — blocked on the `revease.ivolve.cloud` DNS record (see above).
-- `DEFAULT_API_BASE` in `apps/extension/src/api.js` still points at
-  `http://13.204.129.141:8020/api`. The extension is a separate origin and cannot
-  use a relative base, so it stays absolute; switch it to the https URL once the
-  domain resolves. The account page shows the right value to paste — it resolves
-  the relative base against whatever origin the UI was loaded from.
+- `REFRACT_ANTHROPIC_API_KEY` is empty, so labels, narration and documentation
+  come from the deterministic offline writer.
+- No HTTPS yet: blocked on the `revease.ivolve.cloud` DNS record (see above).
+- `DEFAULT_API_BASE` in `apps/extension/src/api.js` points at
+  `http://13.204.129.141:8020/api`; switch it to the https URL once the domain
+  resolves.

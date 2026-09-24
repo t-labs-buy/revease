@@ -241,3 +241,85 @@ export function Waveform({
     </div>
   );
 }
+
+/* ------------------------- window frames (doc picker) ------------------------- */
+
+const windowCache = new Map<string, Frame[]>();
+const windowInflight = new Map<string, Promise<Frame[]>>();
+
+/** `count` thumbnails evenly spread over [loSec, hiSec] of the source — the
+ *  documentation snapshot picker scrubs a step's window, not the whole video. */
+export function buildWindowFrames(
+  source: string,
+  loSec: number,
+  hiSec: number,
+  count = 12,
+  thumbW = 160,
+): Promise<Frame[]> {
+  const key = `${source}@${loSec.toFixed(2)}-${hiSec.toFixed(2)}@${count}`;
+  const cached = windowCache.get(key);
+  if (cached) return Promise.resolve(cached);
+  const running = windowInflight.get(key);
+  if (running) return running;
+
+  const job = (async (): Promise<Frame[]> => {
+    const v = document.createElement("video");
+    v.crossOrigin = "anonymous";
+    v.muted = true;
+    v.preload = "auto";
+    v.src = mediaUrl(source);
+    await new Promise<void>((res, rej) => {
+      v.onloadedmetadata = () => res();
+      v.onerror = () => rej(new Error("window frames: video load failed"));
+    });
+    const dur = await realDuration(v);
+    const lo = Math.max(0, Math.min(loSec, dur));
+    const hi = Math.max(lo, Math.min(hiSec, dur));
+    const ar = v.videoWidth && v.videoHeight ? v.videoHeight / v.videoWidth : 9 / 16;
+    const cw = thumbW;
+    const ch = Math.max(1, Math.round(thumbW * ar));
+    const canvas = document.createElement("canvas");
+    canvas.width = cw;
+    canvas.height = ch;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return [];
+    const out: Frame[] = [];
+    for (let i = 0; i < count; i++) {
+      const tSec = count === 1 ? lo : lo + ((hi - lo) * i) / (count - 1);
+      await seekTo(v, tSec);
+      try {
+        ctx.drawImage(v, 0, 0, cw, ch);
+        out.push({ t: tSec * 1000, url: canvas.toDataURL("image/jpeg", 0.5) });
+      } catch {
+        /* frame not ready; skip */
+      }
+    }
+    v.src = "";
+    v.load();
+    return out;
+  })();
+
+  windowInflight.set(key, job);
+  return job
+    .then((frames) => {
+      windowCache.set(key, frames);
+      return frames;
+    })
+    .finally(() => windowInflight.delete(key));
+}
+
+export function useWindowFrames(source: string | null, loSec: number, hiSec: number, count = 12): Frame[] {
+  const [frames, setFrames] = useState<Frame[]>([]);
+  useEffect(() => {
+    let alive = true;
+    setFrames([]);
+    if (!source || !(hiSec > loSec)) return;
+    buildWindowFrames(source, loSec, hiSec, count)
+      .then((f) => alive && setFrames(f))
+      .catch(() => alive && setFrames([]));
+    return () => {
+      alive = false;
+    };
+  }, [source, loSec, hiSec, count]);
+  return frames;
+}

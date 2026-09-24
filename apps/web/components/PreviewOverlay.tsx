@@ -75,7 +75,7 @@ export function PreviewOverlay({
           <div className="absolute bg-black/50" style={{ left: 0, top: `${T}%`, width: `${L}%`, height: `${B - T}%` }} />
           <div className="absolute bg-black/50" style={{ left: `${R}%`, top: `${T}%`, right: 0, height: `${B - T}%` }} />
           <Rnd
-            className="pointer-events-auto border-2 border-violet-400"
+            className="pointer-events-auto border-2 border-[#1E8F8E]"
             bounds="parent"
             size={{ width: crop.w * w, height: crop.h * h }}
             position={{ x: crop.x * w, y: crop.y * h }}
@@ -98,7 +98,7 @@ export function PreviewOverlay({
         return (
           <Rnd
             key={el.id}
-            className={`${elEdit ? "pointer-events-auto cursor-move" : "pointer-events-none"} ${sel && elEdit ? "outline outline-2 outline-violet-400" : ""
+            className={`${elEdit ? "pointer-events-auto cursor-move" : "pointer-events-none"} ${sel && elEdit ? "outline outline-2 outline-[#1E8F8E]" : ""
               }`}
             bounds="parent"
             disableDragging={!elEdit}

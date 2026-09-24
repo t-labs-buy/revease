@@ -12,14 +12,16 @@ from __future__ import annotations
 import mimetypes
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import FileResponse, Response
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import FileResponse, RedirectResponse, Response
 from sqlalchemy.orm import Session
 
 from app.auth import CurrentUser
+from app.config import get_settings
 from app.db import get_session
 from app.models import BrandPackage, User
 from app.ownership import owned_project, owned_row, owned_session
-from app.storage import store
+from app.storage import _attachment, store
 
 router = APIRouter(prefix="/media", tags=["media"])
 
@@ -64,17 +66,32 @@ async def put_media(
     if total == 0:
         path.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail="empty body")
+    await run_in_threadpool(store.commit, storage_key)  # S3: upload; local: no-op
     return Response(status_code=204)
 
 
 @router.get("/{storage_key:path}")
-def get_media(storage_key: str) -> FileResponse:
+def get_media(storage_key: str, download: str | None = None) -> Response:
+    """Serve (or, with `?download=<filename>`, download) a stored file."""
+    if not storage_key.strip("/"):
+        raise HTTPException(status_code=404, detail="not found")
     try:
-        path = store.local_path(storage_key)
+        store.local_path(storage_key)  # validates against traversal
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
-    if not path.exists():
+    if store.backend == "s3" and get_settings().s3_serve_mode == "redirect":
+        # Browsers follow the redirect for <video>/<img> (Range requests
+        # included), so the bytes go store -> browser without touching the API.
+        if not store.exists(storage_key):
+            raise HTTPException(status_code=404, detail="not found")
+        return RedirectResponse(store.presigned_get(storage_key, download_name=download), status_code=307,
+                                headers={"Cache-Control": "private, max-age=300"})
+    path = store.fetch(storage_key)
+    if path is None:
         raise HTTPException(status_code=404, detail="not found")
     media_type = mimetypes.guess_type(storage_key)[0] or "application/octet-stream"
     # FileResponse streams from disk and honours HTTP Range (video seeking).
+    if download:
+        return FileResponse(path, media_type=media_type,
+                            headers={"Content-Disposition": _attachment(download)})
     return FileResponse(path, media_type=media_type)

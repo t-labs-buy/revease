@@ -1,11 +1,22 @@
-"""Tiny SQLite data layer (SQLAlchemy 2.0, sync). No migration ceremony for V1 —
-`create_all` builds the schema; V2 can swap in Alembic without touching callers."""
+"""Data layer (SQLAlchemy 2.0, sync) for SQLite (default, single host) or
+Postgres (`REFRACT_DATABASE_URL=postgresql+psycopg://…`).
+
+Why Postgres at all: SQLite allows one writer at a time. With several workers
+heartbeating job progress, a render and an upload all writing, writers queue
+behind `busy_timeout`. Postgres removes that ceiling and lets workers live on
+other machines (they no longer need the SQLite file on a shared disk).
+
+Schema changes stay additive and tool-free: `create_all` builds new tables and
+`_ensure_columns` adds new nullable/defaulted columns to existing ones. It reads
+columns through SQLAlchemy's inspector, so it works on both dialects.
+Copy an existing SQLite database into Postgres with `python -m app.dbcopy`.
+"""
 
 from __future__ import annotations
 
 from collections.abc import Iterator
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.config import get_settings
@@ -16,27 +27,31 @@ class Base(DeclarativeBase):
 
 
 _settings = get_settings()
-engine = create_engine(
-    _settings.resolved_database_url(),
-    connect_args={"check_same_thread": False},
-    future=True,
-)
+DATABASE_URL = _settings.resolved_database_url()
+IS_SQLITE = DATABASE_URL.startswith("sqlite")
 
+if IS_SQLITE:
+    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False}, future=True)
 
-@event.listens_for(engine, "connect")
-def _sqlite_pragmas(dbapi_conn, _rec):  # noqa: ANN001
-    """WAL + busy_timeout so the API and Celery worker can share the SQLite file."""
-    cur = dbapi_conn.cursor()
-    cur.execute("PRAGMA journal_mode=WAL")
-    cur.execute("PRAGMA busy_timeout=5000")
-    cur.close()
+    @event.listens_for(engine, "connect")
+    def _sqlite_pragmas(dbapi_conn, _rec):  # noqa: ANN001
+        """WAL + busy_timeout so the API and Celery worker can share the SQLite file."""
+        cur = dbapi_conn.cursor()
+        cur.execute("PRAGMA journal_mode=WAL")
+        cur.execute("PRAGMA busy_timeout=5000")
+        cur.close()
+else:
+    # pre_ping: survive Postgres restarts / idle connection drops between jobs.
+    engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_size=5, max_overflow=10,
+                           pool_recycle=1800, future=True)
+
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False, future=True)
 
 
 def init_db() -> None:
     """Create all tables, then additively add any new columns to existing tables
-    (V1 has no migration tool; all schema changes so far are additive, and SQLite
-    supports ADD COLUMN — this preserves local data without a `make clean`)."""
+    (all schema changes so far are additive — this preserves data without a
+    migration tool on either dialect)."""
     from app import models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
@@ -44,13 +59,10 @@ def init_db() -> None:
 
 
 def _ensure_columns() -> None:
-    from sqlalchemy import text
-
+    insp = inspect(engine)
     with engine.begin() as conn:
         for table in Base.metadata.tables.values():
-            existing = {
-                row[1] for row in conn.execute(text(f'PRAGMA table_info("{table.name}")'))
-            }
+            existing = {c["name"] for c in insp.get_columns(table.name)}
             for col in table.columns:
                 if col.name in existing:
                     continue
@@ -58,7 +70,12 @@ def _ensure_columns() -> None:
                 ddl = f'ALTER TABLE "{table.name}" ADD COLUMN "{col.name}" {coltype}'
                 default = getattr(col.default, "arg", None)
                 if default is not None and not callable(default):
-                    ddl += f" DEFAULT {default!r}" if isinstance(default, str) else f" DEFAULT {default}"
+                    if isinstance(default, bool):
+                        ddl += f" DEFAULT {'TRUE' if default else 'FALSE'}" if not IS_SQLITE else f" DEFAULT {int(default)}"
+                    elif isinstance(default, str):
+                        ddl += " DEFAULT '" + default.replace("'", "''") + "'"
+                    else:
+                        ddl += f" DEFAULT {default}"
                 conn.execute(text(ddl))
 
 

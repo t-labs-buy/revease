@@ -15,7 +15,6 @@ Two rules hold everywhere:
 
 from __future__ import annotations
 
-import shutil
 from typing import TypeVar
 
 from fastapi import HTTPException
@@ -23,6 +22,7 @@ from sqlalchemy import delete as sa_delete, select
 from sqlalchemy.orm import Session
 
 from app.models import (
+    Upload,
     AutoEditJob,
     AutoRecordRun,
     BrandPackage,
@@ -164,6 +164,7 @@ def delete_project_cascade(db: Session, project: Project) -> tuple[list[str], li
 
     # children keyed by session / video-project (no ORM relationship to cascade)
     if sess_ids:
+        db.execute(sa_delete(Upload).where(Upload.session_id.in_(sess_ids)))
         db.execute(sa_delete(Job).where(Job.session_id.in_(sess_ids)))
         db.execute(sa_delete(Transcript).where(Transcript.session_id.in_(sess_ids)))
     if vp_ids:
@@ -182,10 +183,10 @@ def delete_project_cascade(db: Session, project: Project) -> tuple[list[str], li
 
 def purge_media(sess_ids: list[str], vp_ids: list[str]) -> None:
     """Best-effort media cleanup — never fail a delete over leftover files."""
-    for key in [*(f"sessions/{sid}" for sid in sess_ids), *(f"renders/{vid}" for vid in vp_ids)]:
+    for key in [*(f"sessions/{sid}/" for sid in sess_ids), *(f"renders/{vid}/" for vid in vp_ids)]:
         try:
-            path = store.local_path(key)
-        except ValueError:
-            continue
-        if path.is_dir():
-            shutil.rmtree(path, ignore_errors=True)
+            store.delete_prefix(key)
+        except Exception as e:  # noqa: BLE001 - a leftover file must not fail a delete
+            import logging
+
+            logging.getLogger("refract.ownership").warning("purge %s failed: %s", key, e)

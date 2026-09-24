@@ -157,14 +157,14 @@ export default function KnowledgeBasePage() {
               key={a.id}
               onClick={() => setSel(a.id)}
               className={`card card-hover w-full p-4 text-left ${
-                sel === a.id ? "border-[#6d5dfb]/50 ring-1 ring-[#6d5dfb]/30" : ""
+                sel === a.id ? "border-[#1E8F8E]/50 ring-1 ring-[#1E8F8E]/30" : ""
               }`}
             >
               <div className="font-medium text-[var(--text)]">{a.title}</div>
               <div className="mt-1 line-clamp-2 text-sm text-[var(--text-2)]">{a.summary}</div>
               <div className="mt-2 flex flex-wrap gap-1.5">
                 {a.tags.map((t) => (
-                  <span key={t} className="rounded-md bg-[#6d5dfb]/10 px-2 py-0.5 text-[11px] text-[var(--brand-2)]">
+                  <span key={t} className="rounded-md bg-[#1E8F8E]/10 px-2 py-0.5 text-[11px] text-[var(--brand-2)]">
                     {t}
                   </span>
                 ))}

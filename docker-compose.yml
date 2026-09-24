@@ -11,15 +11,29 @@ services:
       timeout: 3s
       retries: 5
 
-  # Optional for V2 object storage (presigned-style interface already matches S3):
-  # minio:
-  #   image: minio/minio
-  #   command: server /data --console-address ":9001"
-  #   ports: ["9000:9000", "9001:9001"]
-  #   environment:
-  #     MINIO_ROOT_USER: refract
-  #     MINIO_ROOT_PASSWORD: refract-dev
-  #   volumes: ["minio-data:/data"]
+  # Optional, for running locally the way production scales: object storage
+  # (REFRACT_STORAGE_BACKEND=s3) and Postgres. `make infra-up` starts them.
+  minio:
+    # Docker Hub no longer serves MinIO community images; quay.io does. Any
+    # S3-compatible server works (SeaweedFS, RustFS, AWS S3): only the
+    # REFRACT_S3_* settings change.
+    image: quay.io/minio/minio:latest
+    command: server /data --console-address ":9001"
+    ports: ["${MINIO_PORT:-9000}:9000", "${MINIO_CONSOLE_PORT:-9001}:9001"]
+    environment:
+      MINIO_ROOT_USER: revease
+      MINIO_ROOT_PASSWORD: revease-dev-secret
+    volumes: ["minio-data:/data"]
 
-# volumes:
-#   minio-data:
+  postgres:
+    image: postgres:16-alpine
+    ports: ["${POSTGRES_PORT:-5432}:5432"]  # POSTGRES_PORT=5442 make infra-up if 5432 is taken
+    environment:
+      POSTGRES_USER: revease
+      POSTGRES_PASSWORD: revease
+      POSTGRES_DB: revease
+    volumes: ["postgres-data:/var/lib/postgresql/data"]
+
+volumes:
+  minio-data:
+  postgres-data:

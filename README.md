@@ -1,138 +1,148 @@
-# Refract V1
+# RevEase
 
-> Record once. Refract into everything. Capture a workflow → AI generates a polished video → edit → AI regenerates. Multi-user: each account gets its own private space.
+> Record once. Refract into everything. Capture a software workflow → AI turns it into a polished, narrated video **and** a step-by-step guide with annotated screenshots → edit either → only what changed regenerates. Multi-user: every account gets its own private space.
 
-See [V1-CORE-PLAN.md](V1-CORE-PLAN.md) for scope and [PROGRESS.md](PROGRESS.md) for status.
+The product is **RevEase**; the code, packages and `REFRACT_` settings say **Refract** — same thing. See [CLAUDE.md](CLAUDE.md) for architecture and conventions, [PROGRESS.md](PROGRESS.md) for what's built, [DOCKER.md](DOCKER.md) for container deployment and [infra/ivolve/README.md](infra/ivolve/README.md) for the live deployment.
+
+## What it does
+
+| | |
+|---|---|
+| **Capture** | Screen recorder, file upload (MP4/MOV/WebM, up to 50 GB, resumable), MV3 extension, or AI-driven "Auto Record" |
+| **Understand** | Converts the recording, transcribes speech (Whisper), detects steps, labels them with Claude → a **Workflow Graph** |
+| **Video** | Studio editor: script, voiceover (Kokoro TTS), click-zooms, captions, crops, brand kit; renders only changed scenes |
+| **Documentation** | AI-written guide (overview, prerequisites, steps with tips) + a snapshot per step grabbed at the click and highlighted; inline editing; export **Word / PDF / Markdown**; share links |
+| **Visibility** | Live progress with ETA for every long job (processing, document writing, rendering) and a header activity indicator |
+| **Downloads** | Original recording or processed MP4, straight from storage |
 
 ## Layout
 ```
-apps/web         Next.js (App Router, TS, Tailwind) — dashboard + editor
-apps/api         FastAPI (3.12) — SQLite, local media store, per-user auth (JWT bearer)
-apps/workers     Celery + Redis — AI pipeline (media/ml/llm/render)
-apps/extension   MV3 capture extension (P1)
-packages/workflow-graph  IR JSON Schema + Python & TS validators (single source of truth)
-infra/docker     Dockerfiles (api / worker / web); shift.py + docker-compose.prod.yml deploy the stack
+apps/web         Next.js 15 (App Router, TS, Tailwind) — dashboard, editor, document editor
+apps/api         FastAPI (Python 3.12) — SQLite or Postgres, local disk or S3 media, JWT auth
+apps/workers     Celery + Redis — media / whisper / LLM / snapshots / render
+apps/extension   MV3 capture extension
+packages/workflow-graph  Workflow Graph JSON Schema + Python & TS validators
+infra/docker     Dockerfiles (api / worker / web)
+infra/ivolve     The live deployment (compose, edge nginx, build + backup scripts)
 ```
 
-## Running on a new machine
+## Architecture at a glance
 
-### 1. System prerequisites
-Install these once. All are keyless/free.
+```
+browser ──/────────▶ web (Next.js)
+        ──/api/────▶ api (FastAPI) ──▶ Postgres | SQLite
+        ──/s3/─────▶ object storage (MinIO / S3) ◀── presigned uploads & downloads
+                         ▲
+Redis ──▶ worker (queue "media": convert, transcribe, render; 1 at a time)
+      └─▶ worker-light (queue "default": documents, snapshots, voice previews; + hourly retention)
+```
+
+- **Two queues** so a long encode never blocks quick jobs. Long tasks heartbeat; a redelivered duplicate is dropped, never run twice.
+- **Storage is pluggable** (`REFRACT_STORAGE_BACKEND=local|s3`). With S3 the API and workers share nothing but the bucket and the database, so workers can run on other machines. Browsers upload and download directly against storage.
+- **Database is pluggable** (`REFRACT_DATABASE_URL`): SQLite by default, Postgres when several workers write at once.
+- Everything external degrades gracefully: no API key → deterministic labelling and writing; no GPU → CPU Whisper; no ffmpeg → no media stages.
+
+## Running locally
+
+### 1. Prerequisites
 
 | Tool | Version | Notes |
 |------|---------|-------|
 | Node.js | 20+ | web app + workspace scripts |
-| Python | 3.12 | managed per-app by `uv` |
-| uv | latest | Python env/dependency manager |
-| Docker | any | runs Redis for background jobs |
-| ffmpeg | 4+ | media probing, trim, render |
-| git | any | clone |
+| uv | latest | Python env manager (installs Python 3.12; `make install` bootstraps it) |
+| Podman or Docker | any | runs Redis (and optionally MinIO + Postgres) |
+| ffmpeg | 5.1+ | conversion, snapshots, render (`-fps_mode`; Homebrew's `ffmpeg-full` adds captions) |
+| git | any | |
 
+**macOS**
+```bash
+brew install node@20 uv ffmpeg podman docker-compose
+podman machine init && podman machine start      # or Docker Desktop
+```
 **Ubuntu/Debian**
 ```bash
-# Node 20 (via nvm)
 curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash && . ~/.nvm/nvm.sh && nvm install 20
-# uv (installs its own Python 3.12)
 curl -LsSf https://astral.sh/uv/install.sh | sh
-# ffmpeg + docker
-sudo apt-get update && sudo apt-get install -y ffmpeg docker.io
+sudo apt-get update && sudo apt-get install -y ffmpeg podman podman-compose   # or docker.io
 ```
+`make doctor` reports anything missing. The Makefile uses Podman when installed, else Docker (`CONTAINER_ENGINE=docker` to force).
 
-**macOS (Homebrew)**
+### 2. Configure and install
 ```bash
-brew install node@20 uv ffmpeg
-brew install --cask docker    # then launch Docker Desktop once
+git clone https://github.com/t-labs-buy/revease.git && cd revease
+make install      # creates .env from .env.example, npm + uv envs (+Whisper), Kokoro TTS model (~350 MB)
 ```
+Defaults work with no keys. Add `REFRACT_ANTHROPIC_API_KEY` for Claude-written labels, narration and documentation.
 
-### 2. Clone & configure
+### 3. Run
 ```bash
-git clone https://github.com/t-labs-buy/revease.git
-cd revease
-cp .env.example .env          # defaults work out of the box; add AI keys only if you want LLM/cloud TTS
+make dev          # Redis + api :8000 + media worker + light worker (with beat) + web :3000
 ```
+Open **http://localhost:3000**. Individual pieces: `make redis`, `make api`, `make worker` (both queues), `make web`.
 
-### 3. Install dependencies
+### Optional: run the way production scales (MinIO + Postgres)
 ```bash
-make install                  # npm workspaces + per-app uv envs (+ Whisper) + downloads the Kokoro TTS model (~350MB)
+make infra-up                                   # MinIO :9000 (console :9001) + Postgres :5432
+# POSTGRES_PORT=5442 MINIO_PORT=9100 make infra-up   if those ports are taken
 ```
-This runs `npm install`, `uv sync` for `apps/api` and `apps/workers`, and `make kokoro-model`. First run pulls the neural TTS model, so give it a few minutes.
-
-### 4. Run everything
+Then in `.env`:
 ```bash
-make dev                      # starts Redis (Docker) + api :8000 + Celery worker + web :3000
+REFRACT_STORAGE_BACKEND=s3
+REFRACT_S3_ENDPOINT_URL=http://localhost:9000
+REFRACT_S3_PUBLIC_URL=http://localhost:9000
+REFRACT_S3_ACCESS_KEY=revease
+REFRACT_S3_SECRET_KEY=revease-dev-secret
+REFRACT_DATABASE_URL=postgresql+psycopg://revease:revease@localhost:5432/revease
 ```
-Open **http://localhost:3000**. Health check: `curl -f http://localhost:8000/healthz`.
+Existing local data moves over with `make db-copy TARGET=<postgres url>` and `make storage-migrate`.
 
-Prefer separate terminals? `make redis`, `make api`, `make worker`, `make web` run each piece individually.
+## Configuration
 
-### 5. (Optional) Capture extension
-Load `apps/extension` as an unpacked MV3 extension: Chrome → `chrome://extensions` → enable Developer mode → **Load unpacked** → select the folder.
+All settings are `REFRACT_`-prefixed and documented in [.env.example](.env.example). The ones that matter most:
 
-### AI / TTS keys (optional)
-The app runs fully local with keyless defaults (Kokoro TTS, local Whisper). To enable Claude step-labeling/narration set `REFRACT_ANTHROPIC_API_KEY` in `.env`. TTS provider is selectable via `REFRACT_TTS_PROVIDER` (`kokoro` | `piper` | `openai`). See `.env.example` for all `REFRACT_`-prefixed options.
+| Area | Setting | Default | Notes |
+|---|---|---|---|
+| AI | `REFRACT_ANTHROPIC_API_KEY` | empty | Claude for labels, narration, documentation; OpenRouter fallback via `REFRACT_OPENROUTER_API_KEY` |
+| Storage | `REFRACT_STORAGE_BACKEND` | `local` | `s3` + `REFRACT_S3_*` for MinIO / AWS S3 |
+| Storage | `REFRACT_S3_PUBLIC_URL` | empty | what browsers use in presigned URLs (e.g. `/s3` behind the edge proxy) |
+| Database | `REFRACT_DATABASE_URL` | SQLite in `data/` | `postgresql+psycopg://…` for Postgres |
+| Uploads | `REFRACT_UPLOAD_PART_MB` | 16 | resumable upload part size |
+| Processing | `REFRACT_MEDIA_THREADS` / `_NORMALIZE_FPS` | 4 / 30 | caps per ffmpeg job |
+| Processing | `REFRACT_CELERY_VISIBILITY_TIMEOUT_S` | 43200 | must exceed the longest job |
+| Retention | `REFRACT_RETENTION_*` | 7 d originals, 2 d audio, 7 d old renders, 30 d TTS, 24 h uploads | `0` disables a rule |
+| Speech | `REFRACT_WHISPER_MODEL` / `_DEVICE` | `small` / `cpu` | `cuda` + `float16` on an NVIDIA GPU |
+| Voice | `REFRACT_TTS_PROVIDER` | `kokoro` | `piper` / `openai` / `silent` |
 
-### GPU (optional)
-For fast transcription on an NVIDIA GPU (CUDA 12.x), set `REFRACT_WHISPER_DEVICE=cuda` and `REFRACT_WHISPER_COMPUTE=float16` in `.env`.
+## Operations
 
-## Docker deployment
-
-Run the whole stack as containers — no Node/Python/uv toolchain needed on the target box, only Docker. See [DOCKER.md](DOCKER.md) for the full guide.
-
-### Registry & images
-All three services publish to one Docker Hub repo, distinguished by a tag prefix:
-
-| Service | Image | Port |
-|---------|-------|------|
-| Web (Next.js) | `tlabsdoc/revease:web-<tag>` | 3000 |
-| API (FastAPI) | `tlabsdoc/revease:api-<tag>` | 8000 |
-| Worker (Celery + FFmpeg) | `tlabsdoc/revease:worker-<tag>` | — |
-| Redis (broker) | `redis:7-alpine` | 6379 |
-
-API + worker share one named volume (`refract-data` — SQLite + media + TTS model), so they must run on the **same host**.
-
-### Build & push to Docker Hub
-From a machine with the source + Docker:
 ```bash
-docker login                      # as the tlabsdoc user (once)
-python shift.py --tag v1          # build + push api-/worker-/web-v1 (and *-latest)
-```
-`shift.py` wraps `docker build` + `docker push tlabsdoc/revease:<service>-<tag>`. Useful flags:
-```bash
-python shift.py --service web --tag v1                 # one service only
-python shift.py --tag v1 --api-base http://10.0.0.5:8000   # bake browser→API URL into web
-python shift.py --tag v1 --no-whisper                  # lighter worker image
-python shift.py --tag v1 --platform linux/amd64,linux/arm64   # multi-arch (buildx)
-python shift.py --tag v1 --no-push                     # build only
+make retention-dry        # what the hourly cleanup would delete
+make retention            # run it now
+make db-copy TARGET=…     # copy SQLite into Postgres (refuses a non-empty target)
+make storage-migrate      # copy data/media into the S3 bucket (re-runnable)
 ```
 
-### Run on another system
-Copy `docker-compose.prod.yml` + `.env.docker.example` to the target host (Docker only) — images are pulled from Docker Hub:
-```bash
-cp .env.docker.example .env       # add REFRACT_ANTHROPIC_API_KEY etc. (optional — degrades gracefully)
-TAG=v1 docker compose -f docker-compose.prod.yml up -d
-```
-Open **http://localhost:3000**.
+What retention deletes, and only after the grace period: the browser's original WebM once a processed MP4 exists, the transcription WAV, renders superseded by a newer one, cached voice clips, and abandoned uploads. Users can download the original from the Download menu until then; afterwards they get the processed MP4.
 
-To build from source on the host instead of pulling: `docker compose -f docker-compose.prod.yml build`.
+## Deployment
 
-**Accessing from another machine (LAN/remote):** the browser calls the API directly, and that URL is baked into the web image at build time. Rebuild web with the host's address, set CORS to match, and redeploy:
-```bash
-python shift.py --service web --tag v1 --api-base http://<host-ip>:8000
-# in .env on the host:  CORS_ORIGINS=http://<host-ip>:3000
-TAG=v1 docker compose -f docker-compose.prod.yml up -d
-```
-
-**Notes:** the worker downloads the ~350MB Kokoro TTS model into the volume on first start (`REFRACT_FETCH_KOKORO=0` to skip → Piper fallback). Data persists in the `refract-data` volume; `docker compose down -v` wipes it.
+- **Containers**: [DOCKER.md](DOCKER.md) — `python shift.py --repo <registry>/revease --tag vN` builds and pushes `api-`, `worker-` and `web-` images (Docker or Podman; `--platform linux/amd64` from an Apple-silicon Mac, though the web image must be built natively). `docker-compose.prod.yml` runs the stack with a worker per queue.
+- **Live (ivolve cloud)**: [infra/ivolve/README.md](infra/ivolve/README.md) — images at `reg.ivolve.cloud/ivolve/revease`, MinIO + Postgres, single-origin edge proxy.
 
 ## Tests
 ```bash
-make test                 # workflow-graph (TS + Py) + api + workers
-make typecheck            # mypy + per-workspace tsc
-make lint                 # ruff + eslint
+make test                 # workflow-graph (TS + Py) + api + workers — offline, deterministic
+make typecheck            # mypy + tsc per workspace
+make lint                 # ruff (+ eslint where configured)
+REFRACT_TEST_DATABASE_URL=postgresql+psycopg://… make test-py   # the same suites on Postgres
 ```
+The S3 backend is tested against moto's in-memory S3; worker tests that need ffmpeg skip without it.
 
 ## Troubleshooting
-- **`redis` connection refused** — ensure Docker is running; `make redis` starts it. On Linux you may need `sudo usermod -aG docker $USER` (re-login) or run Docker commands with `sudo`.
-- **`ffmpeg: command not found`** — install ffmpeg (see prereqs); render/trim need it.
-- **Port already in use** — something else is on `:3000`/`:8000`/`:6379`; stop it or change the port in the Makefile / `.env`.
-- **Kokoro model missing** — re-run `make kokoro-model` (idempotent, resumes partial downloads).
+- **Redis connection refused**: `make redis` (starts the Podman machine if needed).
+- **`Unrecognized option 'vsync'`**: an old worker build on ffmpeg 7+; current code uses `-fps_mode`.
+- **MinIO image pull denied**: Docker Hub no longer serves MinIO community images; compose uses `quay.io/minio/minio`.
+- **Port already in use**: change `POSTGRES_PORT` / `MINIO_PORT`, or run the web dev server with `npx next dev -p 3001` and add that origin to `REFRACT_CORS_ORIGINS`.
+- **Unstyled web page after `npm run build`**: the build overwrote the dev server's `.next`; stop dev, `rm -rf apps/web/.next`, start again.
+- **Kokoro model missing**: `make kokoro-model` (resumable, fails loudly on a bad download).
+- **A recording seems stuck**: the header activity menu shows its stage; "No update for a few minutes" means the media worker is busy with another long job.

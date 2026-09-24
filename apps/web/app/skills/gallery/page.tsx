@@ -82,7 +82,7 @@ export default function SkillGallery() {
               onClick={() => setCat(c)}
               className={`rounded-full border px-3.5 py-1.5 text-sm font-medium ${
                 cat === c
-                  ? "border-[#6d5dfb] bg-[#6d5dfb]/10 text-[var(--brand-2)]"
+                  ? "border-[#1E8F8E] bg-[#1E8F8E]/10 text-[var(--brand-2)]"
                   : "border-[var(--border)] bg-[var(--card)] text-[var(--text-2)] hover:text-[var(--text)]"
               }`}
             >
@@ -100,7 +100,7 @@ export default function SkillGallery() {
             <div className="flex flex-1 flex-col p-4">
               <div className="flex items-center gap-2">
                 <span className="font-semibold text-[var(--text)]">{it.name}</span>
-                <span className="badge bg-[#6d5dfb]/12 capitalize text-[var(--brand-2)]">{it.target}</span>
+                <span className="badge bg-[#1E8F8E]/12 capitalize text-[var(--brand-2)]">{it.target}</span>
               </div>
               <p className="mt-1 line-clamp-2 text-xs text-[var(--text-2)]">{it.description}</p>
               <div className="mt-2 flex flex-wrap gap-1">

@@ -17,7 +17,7 @@ export const SKILL_GALLERY: GalleryItem[] = [
     target: "video",
     category: "Video",
     icon: "🎬",
-    grad: "from-[#6d5dfb] to-[#a855f7]",
+    grad: "from-[#1E8F8E] to-[#16283C]",
     description: "Screen walkthrough with auto-zoom on clicks and a clear AI voiceover.",
     settings: {
       voice_id: "af_sarah", speed: 1, captions: true, motion_zoom: true,
@@ -32,7 +32,7 @@ export const SKILL_GALLERY: GalleryItem[] = [
     target: "video",
     category: "Video",
     icon: "✨",
-    grad: "from-[#f97316] to-[#ec4899]",
+    grad: "from-[#f97316] to-[#16283C]",
     description: "Punchy, benefit-led promo that hooks the viewer and ends with a call to action.",
     settings: {
       voice_id: "af_bella", speed: 1.05, captions: true, motion_zoom: true,
@@ -62,7 +62,7 @@ export const SKILL_GALLERY: GalleryItem[] = [
     target: "video",
     category: "Video",
     icon: "📱",
-    grad: "from-[#ec4899] to-[#f59e0b]",
+    grad: "from-[#16283C] to-[#f59e0b]",
     description: "Vertical, high-energy clip for social — bold captions, tight pacing.",
     settings: {
       voice_id: "af_bella", speed: 1.1, aspect: "9:16", captions: true, motion_zoom: true,
@@ -110,7 +110,7 @@ export const SKILL_GALLERY: GalleryItem[] = [
     target: "doc",
     category: "Docs",
     icon: "❓",
-    grad: "from-[#8b5cf6] to-[#ec4899]",
+    grad: "from-[#8b5cf6] to-[#16283C]",
     description: "Question-and-answer format generated from the transcript.",
     settings: {
       tags: ["faq", "support"],

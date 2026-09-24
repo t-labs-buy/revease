@@ -2,44 +2,64 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * Tarento enterprise palette. Three roles, deliberately kept apart so the UI
+ * doesn't turn uniformly teal:
+ *   navy  (--navy)  → navigation, strong text, primary structure
+ *   teal  (--brand) → CTAs, active state, highlights
+ *   white / light gray → cards on a light-gray page
+ * Hierarchy comes from type and whitespace, not shadows: --shadow-card is
+ * intentionally near-invisible, and --radius is a restrained 12px.
+ */
 @layer base {
   /* Light theme (default) */
   :root {
     color-scheme: light;
-    --bg: #f1f5f9;
+    --bg: #f7f7f7;
     --panel: #ffffff;
     --card: #ffffff;
-    --card-hover: #f4f5fa;
-    --border: #e5e7eb;
-    --border-strong: #d7dae6;
-    --text: #111827;
-    --text-2: #6b7280;
-    --text-3: #9aa1b2;
-    --hover: #f4f5fa;
+    --card-hover: #fbfbfb;
+    --border: #e6e6e6;
+    --border-strong: #d4d4d4;
+    --text: #16283c;
+    --text-2: #64748b;
+    --text-3: #94a3b8;
+    --hover: #f1f3f5;
     --input-bg: #ffffff;
-    --brand: #7c3aed;
-    --brand-2: #7c3aed;
-    --brand-soft: #a78bfa;
-    --success: #10b981;
-    --shadow-card: 0 1px 2px rgba(17, 24, 39, 0.04), 0 1px 1px rgba(17, 24, 39, 0.03);
-    --shadow-card-hover: 0 16px 32px -12px rgba(17, 24, 39, 0.16);
+    --ink: #191919;
+    --navy: #16283c;
+    --navy-2: #1f3650;
+    --brand: #1e8f8e;
+    --brand-2: #1e8f8e;
+    --brand-hover: #197b7a;
+    --brand-soft: #e6f3f3;
+    --success: #1e8f8e;
+    --warning: #d99a2b;
+    --error: #d9534f;
+    --shadow-card: 0 1px 1px rgba(22, 40, 60, 0.03);
+    --shadow-card-hover: 0 6px 16px -8px rgba(22, 40, 60, 0.18);
   }
-  /* Dark theme */
+  /* Dark theme — navy-tinted rather than pure black so it still reads as the same brand. */
   .dark {
     color-scheme: dark;
-    --bg: #0b0b12;
-    --panel: #0d0d15;
-    --card: #16161f;
-    --card-hover: #1b1b26;
-    --border: rgba(255, 255, 255, 0.07);
-    --border-strong: rgba(255, 255, 255, 0.13);
-    --text: #ededf2;
-    --text-2: #9a9aa7;
-    --text-3: #6b6b78;
+    --bg: #0f1720;
+    --panel: #121d29;
+    --card: #172433;
+    --card-hover: #1b2a3b;
+    --border: rgba(255, 255, 255, 0.08);
+    --border-strong: rgba(255, 255, 255, 0.14);
+    --text: #e8eef3;
+    --text-2: #9fb0c0;
+    --text-3: #6d7e8e;
     --hover: rgba(255, 255, 255, 0.05);
     --input-bg: rgba(255, 255, 255, 0.03);
-    --brand: #6d5dfb;
-    --brand-2: #8b7cff;
+    --ink: #0b1118;
+    --navy: #0f1b29;
+    --navy-2: #172a3d;
+    --brand: #2ba5a4;
+    --brand-2: #3fb8b7;
+    --brand-hover: #35b3b2;
+    --brand-soft: rgba(43, 165, 164, 0.14);
   }
   html {
     scroll-behavior: smooth;
@@ -47,10 +67,11 @@
   body {
     @apply bg-[var(--bg)] text-[var(--text)] antialiased;
     font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    font-size: 14px;
     transition: background-color 0.2s ease, color 0.2s ease;
   }
   ::selection {
-    background: rgba(109, 93, 251, 0.25);
+    background: rgba(30, 143, 142, 0.25);
   }
   * {
     scrollbar-width: thin;
@@ -68,42 +89,45 @@
 
 @layer components {
   .card {
-    @apply rounded-[18px] border border-[var(--border)] bg-[var(--card)] shadow-[var(--shadow-card)];
+    @apply rounded-xl border border-[var(--border)] bg-[var(--card)] shadow-[var(--shadow-card)];
   }
   .card-hover {
-    @apply transition-all duration-[250ms] ease-out hover:-translate-y-1 hover:bg-[var(--card-hover)] hover:shadow-[var(--shadow-card-hover)];
+    @apply transition-all duration-200 ease-out hover:border-[var(--border-strong)] hover:bg-[var(--card-hover)] hover:shadow-[var(--shadow-card-hover)];
   }
 
   .btn {
-    @apply inline-flex select-none items-center justify-center gap-2 rounded-xl px-3.5 py-2 text-sm font-medium transition-all duration-200 disabled:pointer-events-none disabled:opacity-50;
+    @apply inline-flex select-none items-center justify-center gap-2 rounded-lg px-3.5 py-2 text-sm font-medium transition-colors duration-150 disabled:pointer-events-none disabled:opacity-50;
   }
   .btn-primary {
-    @apply bg-[var(--brand)] text-white shadow-sm shadow-[#7c3aed]/25 hover:bg-[#6d28d9] hover:scale-[1.02];
+    @apply bg-[var(--brand)] text-white hover:bg-[var(--brand-hover)];
+  }
+  .btn-navy {
+    @apply bg-[var(--navy)] text-white hover:bg-[var(--navy-2)];
   }
   .btn-secondary {
-    @apply border border-[var(--border)] bg-[var(--card)] text-[var(--text)] hover:bg-[var(--hover)];
+    @apply border border-[var(--border)] bg-[var(--card)] text-[var(--text)] hover:border-[var(--border-strong)] hover:bg-[var(--hover)];
   }
   .btn-ghost {
     @apply text-[var(--text-2)] hover:bg-[var(--hover)] hover:text-[var(--text)];
   }
   .btn-danger {
-    @apply bg-red-500 text-white hover:bg-red-600;
+    @apply bg-[var(--error)] text-white hover:opacity-90;
   }
   .btn-sm {
-    @apply rounded-lg px-2.5 py-1.5 text-xs;
+    @apply rounded-md px-2.5 py-1.5 text-xs;
   }
 
   .input {
-    @apply w-full rounded-xl border border-[var(--border)] bg-[var(--input-bg)] px-3 py-2 text-sm text-[var(--text)] outline-none transition-colors placeholder:text-[var(--text-3)] focus:border-[#7c3aed]/60 focus:ring-2 focus:ring-[#7c3aed]/15;
+    @apply w-full rounded-lg border border-[var(--border)] bg-[var(--input-bg)] px-3 py-2 text-sm text-[var(--text)] outline-none transition-colors placeholder:text-[var(--text-3)] focus:border-[var(--brand)] focus:ring-2 focus:ring-[#1E8F8E]/15;
   }
   .input-pill {
-    @apply rounded-full shadow-[var(--shadow-card)];
+    @apply rounded-lg;
   }
 
   /* selects share .input but need the native arrow replaced with our chevron */
   select.input {
     @apply cursor-pointer appearance-none pr-9 hover:border-[var(--border-strong)];
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%239aa1b2' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
     background-repeat: no-repeat;
     background-position: right 0.7rem center;
     background-size: 1rem;
@@ -113,25 +137,45 @@
   }
 
   .badge {
-    @apply inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium;
+    @apply inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-xs font-medium;
   }
 
-  .label {
-    @apply text-[11px] font-semibold uppercase tracking-wider text-[var(--text-3)];
+  /* Small uppercase section label: "CONTENT OVERVIEW", "RECENT ACTIVITY". */
+  .label,
+  .eyebrow {
+    @apply text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-3)];
+  }
+
+  /* Tarento's diagonal geometry, at an opacity low enough to read as texture. */
+  .tarento-lines {
+    background-image: repeating-linear-gradient(
+      -55deg,
+      transparent 0 26px,
+      rgba(30, 143, 142, 0.08) 26px 27px
+    );
   }
 
   .animate-fade-in {
-    animation: fade-in-up 420ms ease-out both;
+    animation: fade-in-up 360ms ease-out both;
   }
 }
 
 @keyframes fade-in-up {
   from {
     opacity: 0;
-    transform: translateY(8px);
+    transform: translateY(6px);
   }
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+@keyframes indeterminate {
+  0% {
+    left: -35%;
+  }
+  100% {
+    left: 100%;
   }
 }

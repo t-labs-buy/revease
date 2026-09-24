@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   activeCrop,
+  generateDocument,
   getGraph,
   getSessionDetail,
   getSessionStatus,
@@ -18,7 +19,9 @@ import {
   type SessionDetail,
   type SessionStatus,
 } from "@/lib/api";
-import { Spinner, StatusDot } from "@/components/ui";
+import { Spinner } from "@/components/ui";
+import { ProcessingPanel } from "@/components/ProcessingPanel";
+import { DownloadVideoButton } from "@/components/DownloadVideoButton";
 import { CropModal, ModalShell, RawTrimModal, resolveDuration } from "@/components/EditModals";
 import { VoicePanel } from "@/components/VoicePanel";
 
@@ -26,12 +29,6 @@ const mmss = (t: number) =>
   Number.isFinite(t) && t >= 0
     ? `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`
     : "0:00";
-const STAGES = [
-  { key: "media", label: "Analyzing footage" },
-  { key: "whisper", label: "Transcribing narration" },
-  { key: "merge", label: "Detecting scenes" },
-  { key: "extract", label: "Building your script" },
-];
 
 export default function PreparePage({ params }: { params: Promise<{ id: string }> }) {
   return (
@@ -75,10 +72,9 @@ function PrepareInner({ params }: { params: Promise<{ id: string }> }) {
     return () => clearInterval(iv);
   }, [id, sid]);
 
-  const videoAsset = detail?.assets.find((a) => a.kind === "raw_video");
-  const jobFor = (stage: string) => status?.jobs.find((j) => j.stage === stage);
-  const doneStages = STAGES.filter((s) => jobFor(s.key)?.status === "done").length;
-  const pct = graph ? 100 : Math.round((doneStages / STAGES.length) * 100);
+  const videoAsset =
+    detail?.assets.find((a) => a.kind === "proxy") ?? detail?.assets.find((a) => a.kind === "raw_video");
+  const pct = graph ? 100 : Math.round((status?.progress ?? 0) * 100);
   const processed = !!graph;
 
   async function generate() {
@@ -96,6 +92,8 @@ function PrepareInner({ params }: { params: Promise<{ id: string }> }) {
       if (!g) throw new Error("processing did not finish — is the worker running?");
 
       if (wantDoc) {
+        // start writing the guide now; the document page shows the progress
+        await generateDocument(id).catch(() => {});
         router.push(`/projects/${id}/document`);
         return;
       }
@@ -169,7 +167,7 @@ function PrepareInner({ params }: { params: Promise<{ id: string }> }) {
             <span className={`h-2 w-2 rounded-full ${processed ? "bg-emerald-500" : "animate-pulse bg-amber-400"}`} />
             {processed ? "Video processed" : "Processing video…"}
           </span>
-          <span className="flex h-9 w-9 items-center justify-center rounded-full bg-[#6d5dfb] text-sm font-semibold text-white">
+          <span className="flex h-9 w-9 items-center justify-center rounded-full bg-[#1E8F8E] text-sm font-semibold text-white">
             R
           </span>
         </div>
@@ -219,16 +217,19 @@ function PrepareInner({ params }: { params: Promise<{ id: string }> }) {
             </div>
             <span className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-2xl border border-[var(--border)] bg-[var(--card)]/95 px-4 text-center text-sm font-semibold text-[var(--text)] shadow-[var(--shadow-card)] backdrop-blur-sm">
               <span>
-                Click <span className="text-[#7C3AED]">Generate AI content</span> to crop or trim
+                Click <span className="text-[#1E8F8E]">Generate AI content</span> to crop or trim
                 in the editor
               </span>
             </span>
           </div>
 
           {videoAsset && (
-            <p className="mt-3 flex items-center gap-1.5 text-sm text-[var(--text-3)]">
-              🎥 {videoAsset.storage_key.split("/").pop()}
-            </p>
+            <div className="mt-3 flex flex-wrap items-start justify-between gap-3">
+              <p className="flex items-center gap-1.5 text-sm text-[var(--text-3)]">
+                🎥 {videoAsset.kind === "proxy" ? "Preview (540p) — download for full quality" : videoAsset.storage_key.split("/").pop()}
+              </p>
+              <DownloadVideoButton sessionId={sid} />
+            </div>
           )}
         </div>
 
@@ -261,7 +262,7 @@ function PrepareInner({ params }: { params: Promise<{ id: string }> }) {
             <button
               onClick={generate}
               disabled={generating || !videoAsset}
-              className="btn btn-primary mt-4 w-full bg-gradient-to-r from-[#6d5dfb] to-[var(--brand-2)] py-3 text-[15px]"
+              className="btn btn-primary mt-4 w-full bg-gradient-to-r from-[#1E8F8E] to-[var(--brand-2)] py-3 text-[15px]"
             >
               {generating ? (
                 <>
@@ -272,19 +273,14 @@ function PrepareInner({ params }: { params: Promise<{ id: string }> }) {
               )}
             </button>
 
-            {generating && (
-              <ol className="mt-4 space-y-2 border-t border-[var(--border)] pt-3">
-                {STAGES.map(({ key, label }) => {
-                  const st = graph ? "done" : jobFor(key)?.status;
-                  return (
-                    <li key={key} className="flex items-center gap-2.5 text-sm text-[var(--text-2)]">
-                      <StatusDot status={st} /> {label}
-                    </li>
-                  );
-                })}
-              </ol>
+            {generating && !processed && (
+              <p className="mt-2 text-center text-[12px] text-[var(--text-3)]">
+                We&apos;ll open the {wantDoc ? "document" : "editor"} as soon as processing finishes.
+              </p>
             )}
           </section>
+
+          <ProcessingPanel status={status} ready={processed} />
 
           {/* tip */}
           <section className="flex items-start gap-3 rounded-2xl border border-[var(--border)] bg-[var(--card)] p-4 text-sm text-[var(--text-2)]">

@@ -28,6 +28,7 @@ import {
   type PreviewTimelineSegment,
   type RenderJob,
 } from "@/lib/api";
+import { ProgressBar } from "@/components/ProgressBar";
 import { Spinner } from "@/components/ui";
 import { VoicePanel } from "@/components/VoicePanel";
 import { ProjectAccess } from "@/components/ProjectAccess";
@@ -85,7 +86,7 @@ const BG_PRESETS: { id: string; label: string; css: string }[] = [
   {
     id: "indigo",
     label: "Indigo",
-    css: "linear-gradient(135deg,#6d5dfb,#a855f7)",
+    css: "linear-gradient(135deg,#1E8F8E,#16283C)",
   },
   {
     id: "ocean",
@@ -95,7 +96,7 @@ const BG_PRESETS: { id: string; label: string; css: string }[] = [
   {
     id: "sunset",
     label: "Sunset",
-    css: "linear-gradient(135deg,#f97316,#ec4899)",
+    css: "linear-gradient(135deg,#f97316,#16283C)",
   },
   {
     id: "forest",
@@ -538,7 +539,9 @@ export default function VideoEditor({
       .then((v) => {
         setSpec(v?.edit_spec ?? null);
         setSavedSpec(v?.edit_spec ?? null);
-        setSource(v?.source_video ?? null);
+        // Preview + filmstrip + waveform use the light 540p proxy when it exists;
+        // renders always read the full-quality source server-side.
+        setSource(v?.source_proxy ?? v?.source_video ?? null);
         baseline.current = v?.edit_spec ?? null;
         // open on the last generated video (play / download); "back to
         // preview" returns to the editor
@@ -852,7 +855,7 @@ export default function VideoEditor({
               y: 0.35,
               w: 0.3,
               h: 0.2,
-              color: "#6d5dfb",
+              color: "#1E8F8E",
             }
             : {
               id: `el_${Date.now()}`,
@@ -1403,7 +1406,7 @@ export default function VideoEditor({
                 key={t}
                 onClick={() => setTab(t)}
                 className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${tab === t
-                  ? "bg-[#6d5dfb]/10 text-[#6d5dfb]"
+                  ? "bg-[#1E8F8E]/10 text-[#1E8F8E]"
                   : "text-[var(--text-2)] hover:bg-[var(--hover)]"
                   }`}
               >
@@ -1531,14 +1534,14 @@ export default function VideoEditor({
                       key={seg.step_id}
                       ref={activeIdx === i ? activeRef : null}
                       className={`group rounded-xl border px-3 py-2.5 transition-colors ${activeIdx === i
-                        ? "border-[#6d5dfb]/30 bg-[#6d5dfb]/5"
+                        ? "border-[#1E8F8E]/30 bg-[#1E8F8E]/5"
                         : "border-transparent hover:bg-[var(--hover)]"
                         }`}
                     >
                       <div className="mb-1 flex items-center gap-2">
                         <button
                           onClick={() => playFrom(seg.source_start_ms / 1000)}
-                          className="font-mono text-xs font-medium text-[#6d5dfb]"
+                          className="font-mono text-xs font-medium text-[#1E8F8E]"
                           title="Play from here"
                         >
                           {mmss(seg.source_start_ms / 1000)}
@@ -1609,7 +1612,7 @@ export default function VideoEditor({
                                 title="click to play · shift-click to strike"
                                 className={`mr-1 rounded px-0.5 ${struck
                                   ? "text-[#c4c9d6] line-through"
-                                  : "hover:bg-[#6d5dfb]/10"
+                                  : "hover:bg-[#1E8F8E]/10"
                                   }`}
                               >
                                 {w}
@@ -1631,7 +1634,7 @@ export default function VideoEditor({
 
                 <button
                   onClick={addSegment}
-                  className="w-full rounded-xl border border-dashed border-[var(--border-strong)] py-2 text-sm font-medium text-[#6d5dfb] hover:bg-[#6d5dfb]/5"
+                  className="w-full rounded-xl border border-dashed border-[var(--border-strong)] py-2 text-sm font-medium text-[#1E8F8E] hover:bg-[#1E8F8E]/5"
                 >
                   + Add paragraph
                 </button>
@@ -1747,9 +1750,19 @@ export default function VideoEditor({
                       {JSON.stringify(render.error_json)}
                     </span>
                   ) : (
-                    <>
-                      <Spinner /> Rendering…
-                    </>
+                    <div className="w-full max-w-md px-6">
+                      <div className="flex items-center gap-2 text-[var(--text)]">
+                        <Spinner className="text-[var(--brand)]" />
+                        <span className="flex-1 truncate">{render.message || "Rendering…"}</span>
+                        {typeof render.progress === "number" && (
+                          <span className="font-mono text-[13px] font-semibold">{Math.round(render.progress * 100)}%</span>
+                        )}
+                      </div>
+                      <ProgressBar value={render.status === "pending" ? null : render.progress ?? null} className="mt-3" />
+                      <p className="mt-2 text-[12px] text-[var(--text-3)]">
+                        Only changed scenes are re-rendered. You can keep editing; the header shows progress.
+                      </p>
+                    </div>
                   )}
                 </div>
               )}
@@ -1926,7 +1939,7 @@ export default function VideoEditor({
               <div className="mt-3 flex items-center gap-3 rounded-xl border border-[var(--border)] bg-[var(--card)] px-4 py-2.5">
                 <button
                   onClick={togglePlay}
-                  className="flex h-9 w-9 items-center justify-center rounded-full bg-[#6d5dfb] text-white shadow-sm"
+                  className="flex h-9 w-9 items-center justify-center rounded-full bg-[#1E8F8E] text-white shadow-sm"
                 >
                   {playing ? "❚❚" : "▶"}
                 </button>
@@ -1953,7 +1966,7 @@ export default function VideoEditor({
                   step="any"
                   value={Math.min(dur, cur)}
                   onChange={(e) => seekTo(Number(e.target.value))}
-                  className="flex-1 accent-[#6d5dfb]"
+                  className="flex-1 accent-[#1E8F8E]"
                 />
                 <select
                   value={rate}
@@ -2080,7 +2093,7 @@ export default function VideoEditor({
                 } else setTab(c.key as Tab);
               }}
               className={`inline-flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-sm font-medium transition-all ${active || capOn
-                ? "border-[#6d5dfb] bg-[#6d5dfb]/10 text-[#6d5dfb]"
+                ? "border-[#1E8F8E] bg-[#1E8F8E]/10 text-[#1E8F8E]"
                 : "border-[var(--border)] bg-[var(--bg)] text-[var(--text-2)] hover:bg-[var(--hover)]"
                 } ${c.soon ? "opacity-40" : ""}`}
             >
@@ -2320,7 +2333,7 @@ function ZoomPanel({
           type="checkbox"
           checked={motionZoom}
           onChange={(e) => patchSpec({ motion_zoom: e.target.checked })}
-          className="mt-0.5 h-4 w-8 flex-none accent-[#6d5dfb]"
+          className="mt-0.5 h-4 w-8 flex-none accent-[#1E8F8E]"
         />
       </label>
       <button
@@ -2546,7 +2559,7 @@ function ZoomPanel({
           <span
             className={`badge flex-none ${s.zoom.auto
               ? "bg-amber-100 text-amber-700"
-              : "bg-[#6d5dfb]/10 text-[#6d5dfb]"
+              : "bg-[#1E8F8E]/10 text-[#1E8F8E]"
               }`}
           >
             {s.zoom.auto ? "auto" : "zoom"}{" "}
@@ -2573,7 +2586,7 @@ function ZoomPanel({
           >
             <div className="flex items-center gap-2">
               <span
-                className={`badge ${s.zoom.auto ? "bg-amber-100 text-amber-700" : "bg-[#6d5dfb]/10 text-[#6d5dfb]"}`}
+                className={`badge ${s.zoom.auto ? "bg-amber-100 text-amber-700" : "bg-[#1E8F8E]/10 text-[#1E8F8E]"}`}
               >
                 {s.zoom.auto ? "auto zoom" : "zoom"}
               </span>
@@ -2607,7 +2620,7 @@ function ZoomPanel({
                     left: `${s.zoom.cx * 100}%`,
                     top: `${s.zoom.cy * 100}%`,
                   }}
-                  className="pointer-events-none absolute h-4 w-4 -translate-x-1/2 -translate-y-1/2 rounded-full bg-[#6d5dfb] shadow ring-2 ring-white"
+                  className="pointer-events-none absolute h-4 w-4 -translate-x-1/2 -translate-y-1/2 rounded-full bg-[#1E8F8E] shadow ring-2 ring-white"
                 />
               </div>
             </div>
@@ -2648,7 +2661,7 @@ function ZoomPanel({
                   step={step}
                   value={val}
                   onChange={(e) => on(Number(e.target.value))}
-                  className="w-full accent-[#6d5dfb]"
+                  className="w-full accent-[#1E8F8E]"
                 />
               </div>
             ))}
@@ -2703,7 +2716,7 @@ function ZoomPanel({
                         step={100}
                         value={val}
                         onChange={(e) => on(Number(e.target.value))}
-                        className="w-full accent-[#6d5dfb]"
+                        className="w-full accent-[#1E8F8E]"
                       />
                     </div>
                   ))}
@@ -2766,7 +2779,7 @@ function BackgroundPanel({
             key={p.id}
             onClick={() => pick(p.id)}
             className={`rounded-xl border p-2 text-left transition-all ${cur === p.id
-              ? "border-[#6d5dfb] ring-2 ring-[#6d5dfb]/40"
+              ? "border-[#1E8F8E] ring-2 ring-[#1E8F8E]/40"
               : "border-[var(--border)] hover:bg-[var(--hover)]"
               }`}
           >
@@ -2801,7 +2814,7 @@ function BackgroundPanel({
             onChange={(e) =>
               patchSpec({ music: { ...music, enabled: e.target.checked } })
             }
-            className="h-4 w-8 accent-[#6d5dfb]"
+            className="h-4 w-8 accent-[#1E8F8E]"
           />
         </label>
         {music.enabled && (
@@ -2818,7 +2831,7 @@ function BackgroundPanel({
                   music: { ...music, gain_db: Number(e.target.value) },
                 })
               }
-              className="flex-1 accent-[#6d5dfb]"
+              className="flex-1 accent-[#1E8F8E]"
             />
             <span className="text-[var(--text-3)]">Loud</span>
             <span className="w-12 text-right font-mono text-[var(--text-2)]">
@@ -2950,7 +2963,7 @@ function IntroOutroPanel({
                 type="checkbox"
                 checked={card.enabled}
                 onChange={(e) => set({ enabled: e.target.checked })}
-                className="h-4 w-8 accent-[#6d5dfb]"
+                className="h-4 w-8 accent-[#1E8F8E]"
               />
             </label>
             {card.enabled && (
@@ -2975,7 +2988,7 @@ function IntroOutroPanel({
                       step={100}
                       value={card.duration_ms}
                       onChange={(e) => set({ duration_ms: Number(e.target.value) })}
-                      className="flex-1 accent-[#6d5dfb]"
+                      className="flex-1 accent-[#1E8F8E]"
                     />
                     <span className="text-[var(--text-3)]">Long</span>
                     <span className="w-14 text-right font-mono text-[var(--text-2)]">
@@ -3184,7 +3197,7 @@ function ElementsPanel({
             key={el.id}
             onClick={() => setSelEl(el.id)}
             className={`flex w-full items-center gap-2 rounded-xl border px-3 py-2 text-left text-sm ${selEl === el.id
-              ? "border-[#6d5dfb]/40 bg-[#6d5dfb]/5"
+              ? "border-[#1E8F8E]/40 bg-[#1E8F8E]/5"
               : "border-[var(--border)] hover:bg-[var(--hover)]"
               }`}
           >
@@ -3271,7 +3284,7 @@ function ElementsPanel({
               <span className="label">Color</span>
               <input
                 type="color"
-                value={sel.color ?? (sel.type === "box" ? "#6d5dfb" : "#111827")}
+                value={sel.color ?? (sel.type === "box" ? "#1E8F8E" : "#111827")}
                 onChange={(e) => updateElement(sel.id, { color: e.target.value })}
                 className="h-7 w-10 rounded border border-[var(--border)] bg-transparent"
               />
@@ -3309,7 +3322,7 @@ function ElementsPanel({
                       : { start_ms: 0, end_ms: 0 },
                   )
                 }
-                className="h-4 w-8 accent-[#6d5dfb]"
+                className="h-4 w-8 accent-[#1E8F8E]"
               />
             </label>
             {(sel.end_ms ?? 0) > (sel.start_ms ?? 0) && (
@@ -3351,7 +3364,7 @@ function ElementsPanel({
                               },
                           );
                         }}
-                        className="flex-1 accent-[#6d5dfb]"
+                        className="flex-1 accent-[#1E8F8E]"
                       />
                       <span className="w-14 text-right font-mono text-xs text-[var(--text-2)]">
                         {clock(val / 1000)}
@@ -3565,7 +3578,7 @@ function TimelineTracks({
                     style={{
                       left: `${Math.min(100, (cur / (totalMs / 1000)) * 100)}%`,
                     }}
-                    className="pointer-events-none absolute top-0 z-10 h-full w-0.5 bg-[#6d5dfb]"
+                    className="pointer-events-none absolute top-0 z-10 h-full w-0.5 bg-[#1E8F8E]"
                   />
                 )}
               </div>
@@ -3631,7 +3644,7 @@ function TimelineToolbar({
       </button>
       <button
         onClick={onSkip}
-        className={`btn btn-ghost btn-sm ${skipActive ? "text-[#6d5dfb]" : ""}`}
+        className={`btn btn-ghost btn-sm ${skipActive ? "text-[#1E8F8E]" : ""}`}
         title="Skip scene — kept on the timeline but jumped over on playback & render"
       >
         {skipActive ? "↩ Unskip" : "⤼ Skip"}
@@ -3663,7 +3676,7 @@ function TimelineToolbar({
           step={0.5}
           value={tlZoom}
           onChange={(e) => setTlZoom(Number(e.target.value))}
-          className="w-28 accent-[#6d5dfb]"
+          className="w-28 accent-[#1E8F8E]"
         />
         <button onClick={() => setTlZoom(1)} className="btn btn-ghost btn-sm">
           Fit
@@ -3925,7 +3938,7 @@ function TrimTrack({
               style={{ left: `${playheadPct}%` }}
               className="pointer-events-none absolute -top-1 bottom-0 w-0.5 -translate-x-1/2 bg-[#111827]"
             >
-              <span className="absolute -top-1.5 left-1/2 h-3.5 w-3.5 -translate-x-1/2 rounded-full border-2 border-white bg-[#6d5dfb] shadow" />
+              <span className="absolute -top-1.5 left-1/2 h-3.5 w-3.5 -translate-x-1/2 rounded-full border-2 border-white bg-[#1E8F8E] shadow" />
             </span>
           )}
         </div>
@@ -4026,7 +4039,7 @@ function TrimBlock({
       }}
       style={{ left: `${left}%`, width: `${width}%` }}
       title={skipped ? `Skipped — ${text}` : text}
-      className={`absolute top-0 h-full overflow-hidden rounded-md bg-[#0e1116] ring-1 ring-inset ${active ? "ring-2 ring-[#6d5dfb]" : "ring-black/20"
+      className={`absolute top-0 h-full overflow-hidden rounded-md bg-[#0e1116] ring-1 ring-inset ${active ? "ring-2 ring-[#1E8F8E]" : "ring-black/20"
         }`}
     >
       {/* real frames */}
@@ -4088,7 +4101,7 @@ function TrimBlock({
             onPointerMove={move}
             onPointerUp={end}
             title="Drag to adjust start"
-            className="absolute inset-y-0 -left-1.5 z-10 flex w-4 cursor-ew-resize touch-none items-center justify-center rounded-l-md bg-[#6d5dfb] hover:bg-[#5b4ce6]"
+            className="absolute inset-y-0 -left-1.5 z-10 flex w-4 cursor-ew-resize touch-none items-center justify-center rounded-l-md bg-[#1E8F8E] hover:bg-[#5b4ce6]"
           >
             <span className="h-6 w-0.5 rounded bg-white" />
           </span>
@@ -4097,7 +4110,7 @@ function TrimBlock({
             onPointerMove={move}
             onPointerUp={end}
             title="Drag to adjust end"
-            className="absolute inset-y-0 -right-1.5 z-10 flex w-4 cursor-ew-resize touch-none items-center justify-center rounded-r-md bg-[#6d5dfb] hover:bg-[#5b4ce6]"
+            className="absolute inset-y-0 -right-1.5 z-10 flex w-4 cursor-ew-resize touch-none items-center justify-center rounded-r-md bg-[#1E8F8E] hover:bg-[#5b4ce6]"
           >
             <span className="h-6 w-0.5 rounded bg-white" />
           </span>
@@ -4223,7 +4236,7 @@ function CropTrack({
             <span
               key={i}
               className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs ${i === sel
-                ? "border-[#6d5dfb] bg-[#6d5dfb]/10 text-[var(--text)]"
+                ? "border-[#1E8F8E] bg-[#1E8F8E]/10 text-[var(--text)]"
                 : "border-[var(--border)] text-[var(--text-2)]"
                 }`}
             >
@@ -4298,7 +4311,7 @@ function CropTrack({
                     : { start_ms: 0, end_ms: 0 },
                 )
               }
-              className="h-4 w-8 accent-[#6d5dfb]"
+              className="h-4 w-8 accent-[#1E8F8E]"
             />
           </label>
           {/* filmstrip timeline — drag a crop window like a trim block */}
@@ -4323,8 +4336,8 @@ function CropTrack({
                   onPointerDown={(e) => blockDown(e, i, "move")}
                   style={{ left: `${left}%`, width: `${width}%` }}
                   title={`Crop ${i + 1} · ${mmss(s0 / 1000)}–${mmss(en / 1000)} — drag to move`}
-                  className={`absolute inset-y-0 cursor-grab rounded-md border bg-[#6d5dfb]/30 backdrop-brightness-110 ${active
-                    ? "border-[#6d5dfb] ring-2 ring-inset ring-[#6d5dfb]"
+                  className={`absolute inset-y-0 cursor-grab rounded-md border bg-[#1E8F8E]/30 backdrop-brightness-110 ${active
+                    ? "border-[#1E8F8E] ring-2 ring-inset ring-[#1E8F8E]"
                     : "border-white/40"
                     }`}
                 >
@@ -4338,14 +4351,14 @@ function CropTrack({
                       <span
                         onPointerDown={(e) => blockDown(e, i, "l")}
                         title="Drag to adjust start"
-                        className="absolute inset-y-0 -left-0.5 flex w-2.5 cursor-ew-resize items-center justify-center rounded-l-md bg-[#6d5dfb]"
+                        className="absolute inset-y-0 -left-0.5 flex w-2.5 cursor-ew-resize items-center justify-center rounded-l-md bg-[#1E8F8E]"
                       >
                         <span className="h-6 w-0.5 rounded bg-white" />
                       </span>
                       <span
                         onPointerDown={(e) => blockDown(e, i, "r")}
                         title="Drag to adjust end"
-                        className="absolute inset-y-0 -right-0.5 flex w-2.5 cursor-ew-resize items-center justify-center rounded-r-md bg-[#6d5dfb]"
+                        className="absolute inset-y-0 -right-0.5 flex w-2.5 cursor-ew-resize items-center justify-center rounded-r-md bg-[#1E8F8E]"
                       >
                         <span className="h-6 w-0.5 rounded bg-white" />
                       </span>
@@ -4528,8 +4541,8 @@ function DraggableBlock({
       style={{ left: `${b.left}%`, width: `${b.width}%` }}
       className={`group/blk absolute inset-y-0 flex cursor-grab items-end overflow-hidden rounded-md px-1 pb-0.5 text-[10px] font-medium text-white ring-1 ring-inset active:cursor-grabbing ${skipped
         ? "bg-[repeating-linear-gradient(45deg,rgba(17,24,39,.55),rgba(17,24,39,.55)_6px,rgba(154,161,178,.55)_6px,rgba(154,161,178,.55)_12px)] ring-[var(--border-strong)]"
-        : "bg-[#6d5dfb]/10 ring-[#6d5dfb]/30 hover:bg-[#6d5dfb]/20"
-        } ${active ? "ring-2 ring-[#6d5dfb]" : ""}`}
+        : "bg-[#1E8F8E]/10 ring-[#1E8F8E]/30 hover:bg-[#1E8F8E]/20"
+        } ${active ? "ring-2 ring-[#1E8F8E]" : ""}`}
       title={skipped ? `Skipped — ${b.text}` : b.text}
     >
       <span className="pointer-events-none truncate rounded bg-black/45 px-1 leading-tight backdrop-blur-[1px]">
@@ -4539,14 +4552,14 @@ function DraggableBlock({
         onPointerDown={begin("resize-start")}
         onPointerMove={move}
         onPointerUp={end}
-        className="absolute left-0 top-0 h-full w-2 cursor-ew-resize rounded-l-md bg-[#6d5dfb]/50 opacity-0 transition-opacity group-hover/blk:opacity-100"
+        className="absolute left-0 top-0 h-full w-2 cursor-ew-resize rounded-l-md bg-[#1E8F8E]/50 opacity-0 transition-opacity group-hover/blk:opacity-100"
         title="Trim start"
       />
       <span
         onPointerDown={begin("resize")}
         onPointerMove={move}
         onPointerUp={end}
-        className="absolute right-0 top-0 h-full w-2 cursor-ew-resize rounded-r-md bg-[#6d5dfb]/50 opacity-0 transition-opacity group-hover/blk:opacity-100"
+        className="absolute right-0 top-0 h-full w-2 cursor-ew-resize rounded-r-md bg-[#1E8F8E]/50 opacity-0 transition-opacity group-hover/blk:opacity-100"
         title="Trim end"
       />
     </div>
@@ -4567,15 +4580,15 @@ function TlBlock({
   label?: string;
 }) {
   const tones = {
-    video: "bg-[#6d5dfb]/15 text-[#6d5dfb] ring-[#6d5dfb]/25",
-    voice: "bg-[var(--brand-2)]/15 text-[#6d5dfb] ring-[var(--brand-2)]/25",
+    video: "bg-[#1E8F8E]/15 text-[#1E8F8E] ring-[#1E8F8E]/25",
+    voice: "bg-[var(--brand-2)]/15 text-[#1E8F8E] ring-[var(--brand-2)]/25",
     cap: "bg-emerald-500/10 text-emerald-700 ring-emerald-500/20",
   }[tone];
   return (
     <button
       onClick={onClick}
       style={{ left: `${b.left}%`, width: `${b.width}%` }}
-      className={`absolute top-1/2 flex h-8 -translate-y-1/2 items-center overflow-hidden rounded-md px-1.5 text-[10px] ring-1 ${tones} ${active ? "ring-2 ring-[#6d5dfb]" : ""
+      className={`absolute top-1/2 flex h-8 -translate-y-1/2 items-center overflow-hidden rounded-md px-1.5 text-[10px] ring-1 ${tones} ${active ? "ring-2 ring-[#1E8F8E]" : ""
         }`}
       title={label ?? b.text}
     >

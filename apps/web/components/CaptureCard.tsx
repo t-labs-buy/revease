@@ -1,3 +1,4 @@
+import { DownloadVideoButton } from "@/components/DownloadVideoButton";
 import Link from "next/link";
 import { mediaUrl, type Session } from "@/lib/api";
 import { Badge } from "@/components/ui";
@@ -43,11 +44,14 @@ export function CaptureCard({
           </div>
         )}
         <span className="absolute inset-0 flex items-center justify-center">
-          <span className="flex h-11 w-11 items-center justify-center rounded-full bg-white/90 pl-0.5 text-[#7C3AED] shadow-lg">
+          <span className="flex h-11 w-11 items-center justify-center rounded-full bg-white/90 pl-0.5 text-[#1E8F8E] shadow-lg">
             <IconPlay width={16} height={16} />
           </span>
         </span>
         <span className="absolute left-2 top-2">{statusBadge(s.status)}</span>
+        <span className="absolute right-2 top-2 rounded-lg bg-[var(--card)]/90 opacity-0 shadow transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+          <DownloadVideoButton sessionId={s.id} compact />
+        </span>
         {s.duration_ms ? (
           <span className="absolute bottom-2 right-2 rounded-md bg-black/70 px-1.5 py-0.5 text-[11px] font-medium text-white">
             {mmss(s.duration_ms)}
@@ -68,7 +72,7 @@ export function CaptureCard({
           <span
             className={`badge px-2.5 py-1 ${
               s.telemetry === "present"
-                ? "bg-[#7C3AED]/10 text-[#7C3AED]"
+                ? "bg-[#1E8F8E]/10 text-[#1E8F8E]"
                 : "bg-[var(--text-3)]/10 text-[var(--text-2)]"
             }`}
           >

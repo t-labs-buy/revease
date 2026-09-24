@@ -89,7 +89,7 @@ export function ShareButton({
                     checked={allowDownload}
                     disabled={saving}
                     onChange={(e) => void toggleDownload(e.target.checked)}
-                    className="accent-violet-500"
+                    className="accent-[#1E8F8E]"
                   />
                   Show a Download button on the shared page
                 </label>

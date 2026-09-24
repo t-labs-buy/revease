@@ -87,11 +87,11 @@ Each track is independently valuable. Effort in **ed** = experienced engineer-da
 - **B4 GPU Whisper** production path (CUDA 12.x on the RTX 5070) + vision calls for ambiguous keyframes.
 
 ### Track C — Docs & exports (Phase 3, deferred V1-P4)  ·  ~8 ed
-- **C1 SOP/guide** generation from the graph (numbered steps + best keyframe per step).
+- ~~**C1 SOP/guide** generation from the graph~~ ✅ 2026-09-24: AI-written guide (overview, prerequisites, steps with tips, closing tips) grounded in transcript + graph, async in the worker (`refract.document.generate`), deterministic fallback without a key. See `apps/api/app/docwriter.py`.
 - **C2 FAQ + Assessment** generators.
-- **C3 Annotated screenshots** (highlight bbox, blur regions from B3).
-- **C4 Doc editor** (Tiptap) over the generated doc.
-- **C5 Exports**: Markdown + PDF (then DOCX/HTML); Confluence/Notion push.
+- ~~**C3 Annotated screenshots**~~ ✅ frame grabbed at the click moment (+150 ms) and highlighted from the bbox for extension/auto captures (`worker/pipeline/docshots.py`); blur regions still pending B3.
+- ~~**C4 Doc editor**~~ ✅ inline editor (title/overview/prerequisites/steps/tips, reorder, delete, add, swap a snapshot for any frame) with autosave — hand-rolled, not Tiptap.
+- **C5 Exports**: ~~Markdown + PDF~~ ✅ + ~~DOCX~~ ✅ (python-docx; PDF now Unicode via bundled DejaVu). HTML, Confluence/Notion push still open.
 
 ### Track D — Brand & Voice (Phase 5 full) + render fidelity  ·  ~10 ed
 - **D1 Multi-provider TTS**: ElevenLabs/Azure/XTTS + per-workspace fallback policy; cost ledger hook.

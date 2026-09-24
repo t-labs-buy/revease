@@ -36,9 +36,11 @@ class Transcript:
         return " ".join(w.w for w in self.words if t0 <= w.t_start < t1).strip()
 
 
-def transcribe(audio_path: str | None) -> Transcript:
+def transcribe(audio_path: str | None, on_progress=None) -> Transcript:  # noqa: ANN001
     """Word-level transcript via faster-whisper if available + audio present;
-    otherwise an empty transcript (segmentation then falls back to scene/time)."""
+    otherwise an empty transcript (segmentation then falls back to scene/time).
+    `on_progress(fraction, seconds_done)` is called as segments decode — the
+    segment generator is lazy, so progress tracks the real work."""
     import os.path
 
     settings = get_settings()
@@ -74,10 +76,13 @@ def transcribe(audio_path: str | None) -> Transcript:
             condition_on_previous_text=False,
             initial_prompt=initial_prompt,
         )
+        total = float(getattr(_info, "duration", 0) or 0)
         words: list[Word] = []
         for seg in segments:
             for w in seg.words or []:
                 words.append(Word(w=w.word.strip(), t_start=float(w.start), t_end=float(w.end)))
+            if on_progress and total > 0:
+                on_progress(min(1.0, float(seg.end) / total), float(seg.end))
         return Transcript(words=words, text=" ".join(x.w for x in words), provider=f"whisper:{model_size}")
     except Exception as e:  # pragma: no cover - env dependent
         log.warning("Whisper transcription failed (%s); using empty transcript.", e)

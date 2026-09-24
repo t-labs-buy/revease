@@ -15,7 +15,7 @@ const iso = (d: Date) => d.toISOString().slice(0, 10);
 const KINDS: Record<UsageEventRow["kind"], { label: string; badge: string }> = {
   video: {
     label: "Video generated",
-    badge: "bg-[#6d5dfb]/10 text-[var(--brand-2)] ring-[#6d5dfb]/25",
+    badge: "bg-[#1E8F8E]/10 text-[var(--brand-2)] ring-[#1E8F8E]/25",
   },
   recording: {
     label: "Screen recorded",
@@ -108,7 +108,7 @@ export default function AdminUsagePage() {
       label: "Videos generated",
       value: summary?.videos_generated,
       icon: "🎬",
-      grad: "from-[#6d5dfb] to-[#a855f7]",
+      grad: "from-[#1E8F8E] to-[#16283C]",
     },
     {
       label: "Screens recorded",
@@ -120,7 +120,7 @@ export default function AdminUsagePage() {
       label: "Videos uploaded",
       value: summary?.videos_uploaded,
       icon: "⬆️",
-      grad: "from-[#f97316] to-[#ec4899]",
+      grad: "from-[#f97316] to-[#16283C]",
     },
   ];
 
@@ -160,7 +160,7 @@ export default function AdminUsagePage() {
             title="Show totals across all time"
             className={`rounded-xl px-3 py-1.5 text-sm font-medium transition-colors ${
               allTime
-                ? "bg-[#6d5dfb] text-white"
+                ? "bg-[#1E8F8E] text-white"
                 : "text-[var(--text-2)] hover:bg-[var(--hover)] hover:text-[var(--text)]"
             }`}
           >
@@ -227,7 +227,7 @@ export default function AdminUsagePage() {
                   <td className="px-5 py-3.5">
                     {e.user_email ? (
                       <span className="flex items-center gap-2.5">
-                        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-[#7C3AED] to-[#A78BFA] text-[10px] font-semibold text-white">
+                        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-[#1E8F8E] to-[#16283C] text-[10px] font-semibold text-white">
                           {initials(e.user_name, e.user_email)}
                         </span>
                         <span className="text-[var(--text)]">

@@ -33,6 +33,65 @@ class Settings(BaseSettings):
     openrouter_api_key: str = ""
     openrouter_model: str = "anthropic/claude-opus-4.1"
 
+    # --- Media storage ---
+    # local = files under media_dir (single host). s3 = any S3-compatible object
+    # store (MinIO on the host, or AWS S3): API and workers no longer need to
+    # share a disk, so workers can run on other machines.
+    storage_backend: str = "local"  # local | s3
+    s3_endpoint_url: str = ""  # internal endpoint, e.g. http://minio:9000 (empty = AWS)
+    # What browsers use instead of s3_endpoint_url in presigned URLs. Origin-
+    # relative ("/s3") when an nginx edge proxies to MinIO with `Host: minio:9000`
+    # (SigV4 signs host + path, so the proxy must reproduce them exactly).
+    s3_public_url: str = ""
+    s3_bucket: str = "revease-media"
+    s3_region: str = "us-east-1"
+    s3_access_key: str = ""
+    s3_secret_key: str = ""
+    # redirect = /media/{key} answers 307 to a presigned URL (bytes never pass
+    # through the API). proxy = the API streams the object (when browsers
+    # cannot reach the store at all).
+    s3_serve_mode: str = "redirect"
+    s3_presign_ttl_s: int = 6 * 3600
+    # Worker/API local copies of objects (source videos, frames) for ffmpeg.
+    media_cache_dir: Path = REPO_ROOT / "data" / "cache"
+    media_cache_max_gb: float = 20.0
+    # Direct multipart uploads: part size (S3 minimum is 5 MB except the last).
+    upload_part_mb: int = 16
+
+    # --- Retention (hourly sweep; 0 disables a rule) ---
+    retention_enabled: bool = True
+    retention_original_days: int = 7  # the browser's WebM once source.mp4 exists
+    retention_audio_days: int = 2  # 16 kHz wav used only for transcription
+    retention_old_renders_days: int = 7  # renders superseded by a newer one
+    retention_tts_cache_days: int = 30  # regenerable voice clips
+    retention_stale_uploads_hours: int = 24  # abandoned multipart uploads
+    retention_interval_s: int = 3600
+
+    # --- Heavy media processing ---
+    # Redis redelivers an unacknowledged task after this many seconds. It MUST
+    # exceed the longest task (a long recording's normalize + whisper + render):
+    # at Celery's 1h default a 70-minute normalize was handed to a second worker
+    # slot while the first was still running, and both wrote the same file.
+    celery_visibility_timeout_s: int = 12 * 3600
+    # A running stage whose heartbeat is older than this is presumed dead, so a
+    # redelivered or re-requested run may take over.
+    pipeline_stale_after_s: int = 180
+    # ffmpeg threads per job — without a cap one encode takes every core and
+    # starves the API, the other worker slot and everything else on the host.
+    media_threads: int = 4
+    # Browser recordings carry no real frame rate (WebM reports 1000/1); force
+    # a constant rate so the encode is bounded. 30 fps is plenty for screen capture.
+    media_normalize_fps: int = 30
+    media_normalize_preset: str = "veryfast"
+    media_normalize_timeout_s: int = 6 * 3600
+
+    # --- Documentation (AI-written guide + per-step snapshots) ---
+    # Snapshots are grabbed this long after a click so the pressed/hover state is
+    # visible and the MediaRecorder start-up skew (~100-300ms) is absorbed.
+    doc_snapshot_click_offset_ms: int = 150
+    doc_snapshot_max_width: int = 1600
+    doc_llm_timeout_s: int = 180
+
     # --- TTS voice (keyless local). `kokoro` = high-quality neural (default),
     #     `piper` = lighter fallback, `openai` needs a key; else silent clips. ---
     tts_provider: str = "kokoro"

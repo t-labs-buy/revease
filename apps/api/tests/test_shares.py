@@ -75,3 +75,19 @@ def test_share_doc_public_view():
 
 def test_share_unknown_token_404():
     assert client.get("/shares/nope").status_code == 404
+
+
+def test_share_doc_prefers_stored_document():
+    from app.models import Document
+
+    pid = _project()
+    db = SessionLocal()
+    db.add(WorkflowGraphRow(project_id=pid, version=1, graph_json=GRAPH))
+    db.add(Document(project_id=pid, graph_version=1, status="ready", doc_version=1,
+                    doc_json={"version": 2, "title": "Edited by owner", "overview": "o",
+                              "steps": [{"id": "s1", "title": "T", "body": "B"}]}))
+    db.commit()
+    db.close()
+    token = client.post(f"/projects/{pid}/share", json={"kind": "doc"}).json()["token"]
+    pub = client.get(f"/shares/{token}").json()
+    assert pub["title"] == "Edited by owner" and pub["doc"]["steps"][0]["title"] == "T"

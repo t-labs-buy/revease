@@ -22,7 +22,11 @@ Examples
     # Multi-arch build+push (amd64 + arm64) via buildx
     python shift.py --tag v1 --platform linux/amd64,linux/arm64
 
-Run `docker login` once beforehand (or pass nothing and it will prompt to).
+Works with docker or podman: whichever is on PATH (docker preferred; override
+with --engine). Multi-platform builds need docker buildx; podman does single
+--platform builds (e.g. linux/amd64 from an arm64 Mac) and pushes them.
+
+Run `docker login` / `podman login <registry>` once beforehand.
 """
 
 from __future__ import annotations
@@ -49,9 +53,16 @@ def sh(cmd: list[str]) -> None:
     subprocess.run(cmd, cwd=ROOT, check=True)
 
 
-def ensure_docker() -> None:
-    if shutil.which("docker") is None:
-        sys.exit("error: docker CLI not found on PATH")
+ENGINE = "docker"
+
+
+def pick_engine(preferred: str | None) -> str:
+    """docker if present, else podman — or exactly what --engine asked for."""
+    candidates = [preferred] if preferred else ["docker", "podman"]
+    for c in candidates:
+        if c and shutil.which(c):
+            return c
+    sys.exit(f"error: no container engine found on PATH (tried {', '.join(filter(None, candidates))})")
 
 
 def image_ref(repo: str, service: str, tag: str) -> str:
@@ -83,7 +94,7 @@ def build_and_push(
     for r in refs:
         tag_flags += ["-t", r]
 
-    if platform:
+    if platform and ENGINE == "docker":
         # buildx builds (and pushes in the same step) for one or more platforms.
         cmd = ["docker", "buildx", "build", "--platform", platform,
                "-f", dockerfile, *tag_flags, *build_args]
@@ -92,10 +103,14 @@ def build_and_push(
         sh(cmd)
         return
 
-    sh(["docker", "build", "-f", dockerfile, *tag_flags, *build_args, "."])
+    # podman (or docker without buildx): one platform per build, push afterwards.
+    platform_flags = ["--platform", platform] if platform else []
+    if platform and "," in platform:
+        sys.exit("error: multi-platform builds need docker buildx; give podman one platform")
+    sh([ENGINE, "build", *platform_flags, "-f", dockerfile, *tag_flags, *build_args, "."])
     if push:
         for r in refs:
-            sh(["docker", "push", r])
+            sh([ENGINE, "push", r])
 
 
 def main() -> int:
@@ -107,7 +122,10 @@ def main() -> int:
     p.add_argument("--api-base", default="http://localhost:8000",
                    help="NEXT_PUBLIC_API_BASE baked into the web image")
     p.add_argument("--platform", default=None,
-                   help="buildx platforms, e.g. linux/amd64,linux/arm64 (enables buildx + --push)")
+                   help="target platform(s), e.g. linux/amd64 (docker: buildx, may be a list; "
+                        "podman: exactly one)")
+    p.add_argument("--engine", default=None, choices=["docker", "podman"],
+                   help="container CLI to use (default: docker if installed, else podman)")
     p.add_argument("--no-whisper", action="store_true",
                    help="build the worker without faster-whisper (lighter image)")
     p.add_argument("--no-latest", action="store_true",
@@ -119,9 +137,11 @@ def main() -> int:
                           help="build only, do not push")
     args = p.parse_args()
 
-    ensure_docker()
+    global ENGINE
+    ENGINE = pick_engine(args.engine)
     services = list(SERVICES) if args.service == "all" else [args.service]
 
+    print(f"Engine:    {ENGINE}")
     print(f"Repo:      {args.repo}")
     print(f"Tag:       {args.tag}" + ("" if args.no_latest else "  (+ latest)"))
     print(f"Services:  {', '.join(services)}")

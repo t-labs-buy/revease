@@ -10,7 +10,7 @@ export function MobileBar() {
   return (
     <div className="flex h-14 items-center border-b border-[var(--border)] px-6 md:hidden">
       <Link href="/" className="flex items-center gap-2">
-        <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-[#6d5dfb] to-[#a855f7] text-sm font-bold text-white">
+        <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-[#1E8F8E] to-[#16283C] text-sm font-bold text-white">
           R
         </span>
         <span className="font-semibold tracking-tight">RevEase</span>

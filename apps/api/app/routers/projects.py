@@ -26,9 +26,10 @@ def _out(db: Session, project: Project, user: User | None = None) -> ProjectOut:
         if owner is not None:
             out.owner_email = owner.email
             out.owner_name = owner.name
-    out.has_document = (
-        db.scalar(select(Document.id).where(Document.project_id == project.id)) is not None
-    )
+    # A doc counts only once it is ready: a queued one is not something to open yet.
+    doc_status = db.scalar(select(Document.status).where(Document.project_id == project.id))
+    out.document_status = doc_status
+    out.has_document = doc_status == "ready"
     out.capture_count = (
         db.scalar(
             select(func.count())

@@ -52,17 +52,40 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-3">
-            <Link
-              href={`/projects/${id}/document`}
-              className="inline-flex items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--card)] px-4 py-2.5 text-sm font-semibold text-[var(--text)] shadow-[var(--shadow-card)] transition-colors hover:bg-[var(--hover)]"
-            >
-              <IconDoc width={15} height={15} /> Document
-            </Link>
+            {project?.has_document ? (
+              <Link
+                href={`/projects/${id}/document`}
+                className="inline-flex items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--card)] px-4 py-2.5 text-sm font-semibold text-[var(--text)] shadow-[var(--shadow-card)] transition-colors hover:bg-[var(--hover)]"
+              >
+                <IconDoc width={15} height={15} /> Document
+              </Link>
+            ) : project?.document_status === "queued" || project?.document_status === "running" ? (
+              <Link
+                href={`/projects/${id}/document`}
+                className="inline-flex items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--card)] px-4 py-2.5 text-sm font-semibold text-[var(--text-2)] shadow-[var(--shadow-card)]"
+              >
+                <IconDoc width={15} height={15} /> Writing document…
+              </Link>
+            ) : hasGraph ? (
+              <Link
+                href={`/projects/${id}/document?autogen=1`}
+                className="inline-flex items-center gap-2 rounded-xl bg-[var(--brand)] px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-[var(--brand-hover)]"
+              >
+                <IconDoc width={15} height={15} /> Generate document
+              </Link>
+            ) : (
+              <span
+                title="Process a capture first"
+                className="inline-flex cursor-not-allowed items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--card)] px-4 py-2.5 text-sm font-semibold text-[var(--text-3)]"
+              >
+                <IconDoc width={15} height={15} /> Document
+              </span>
+            )}
             <Link
               href={`/projects/${id}/video`}
               className={`inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold shadow-sm transition-transform duration-200 hover:scale-[1.03] ${
                 hasGraph
-                  ? "bg-[#7C3AED] text-white"
+                  ? "bg-[#1E8F8E] text-white"
                   : "border border-[var(--border)] bg-[var(--card)] text-[var(--text)]"
               }`}
             >
@@ -85,7 +108,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
             <div className="pointer-events-none h-full opacity-40">
               <div className="card h-full p-6">
                 <div className="flex items-start gap-4">
-                  <span className="flex h-12 w-12 flex-none items-center justify-center rounded-2xl bg-[#7C3AED]/10 text-[#7C3AED]">
+                  <span className="flex h-12 w-12 flex-none items-center justify-center rounded-2xl bg-[#1E8F8E]/10 text-[#1E8F8E]">
                     <IconVideo width={20} height={20} />
                   </span>
                   <div className="min-w-0 flex-1">

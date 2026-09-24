@@ -1,4 +1,5 @@
 import { API_BASE, absoluteApiBase, apiFetch } from "@/lib/http";
+import { uploadLarge, type UploadProgress } from "@/lib/upload";
 
 // Re-exported so callers that build media/asset URLs keep importing it from here.
 export { API_BASE, absoluteApiBase };
@@ -8,7 +9,8 @@ export interface Project {
   name: string;
   favorite?: number; // 0/1 — starred projects sort first
   created_at: string;
-  has_document?: boolean; // a step-by-step doc has actually been generated
+  has_document?: boolean; // a step-by-step doc has actually been generated (status ready)
+  document_status?: "queued" | "running" | "ready" | "error" | null;
   capture_count?: number; // how many recordings/uploads this project holds
   // Set on other users' projects: for admins browsing all spaces, and for
   // projects shared with the caller.
@@ -153,7 +155,12 @@ export async function registerAndUpload(
   kind: "raw_video" | "audio" | "screenshot" | "frame",
   ext: string,
   blob: Blob,
+  onProgress?: (p: UploadProgress) => void,
 ): Promise<string> {
+  // Recordings and uploads: resumable multipart, straight to storage.
+  if (kind === "raw_video" || kind === "audio") {
+    return uploadLarge(sessionId, kind, ext, blob, { onProgress });
+  }
   const reg = await apiFetch(`/sessions/${sessionId}/assets`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -183,6 +190,7 @@ export async function completeSession(sessionId: string, durationMs?: number): P
     body: JSON.stringify({ duration_ms: durationMs ?? null }),
   });
   if (!r.ok) throw new Error(`completeSession failed: ${r.status}`);
+  pokeActivity();
   return r.json();
 }
 
@@ -200,6 +208,10 @@ export interface JobStatus {
   status: string;
   attempts: number;
   error_json: Record<string, unknown> | null;
+  progress?: number | null; // 0..1 within this stage
+  message?: string | null;
+  started_at?: string | null;
+  updated_at?: string | null;
 }
 
 export interface SessionStatus {
@@ -207,6 +219,38 @@ export interface SessionStatus {
   status: string;
   latest_version: number | null;
   jobs: JobStatus[];
+  progress?: number | null; // whole pipeline, 0..1
+  stage?: string | null;
+  message?: string | null;
+  elapsed_s?: number | null;
+  eta_s?: number | null;
+  stalled?: boolean;
+}
+
+// ---- activity (what is processing right now, across projects) ----
+export interface ActivityItem {
+  kind: "processing" | "document" | "render";
+  project_id: string;
+  project_name: string;
+  status: string; // running | queued | stalled | ready | done | error
+  progress: number | null;
+  message: string | null;
+  href: string;
+  started_at: string | null;
+  updated_at: string | null;
+}
+
+/** Ask the header's activity indicator to re-poll now (work just started),
+ *  instead of waiting for its idle interval. */
+export const ACTIVITY_EVENT = "revease:activity";
+export function pokeActivity(): void {
+  if (typeof window !== "undefined") window.dispatchEvent(new Event(ACTIVITY_EVENT));
+}
+
+export async function getActivity(): Promise<ActivityItem[]> {
+  const r = await apiFetch(`/activity`, { cache: "no-store" });
+  if (!r.ok) return [];
+  return r.json();
 }
 
 export interface GraphStep {
@@ -250,7 +294,37 @@ export async function getSessionStatus(sessionId: string): Promise<SessionStatus
 export async function reprocessSession(sessionId: string): Promise<Session> {
   const r = await apiFetch(`/sessions/${sessionId}/reprocess`, { method: "POST" });
   if (!r.ok) throw new Error(`reprocess failed: ${r.status}`);
+  pokeActivity();
   return r.json();
+}
+
+export interface VideoDownload {
+  url: string;
+  filename: string;
+  variant: "original" | "processed";
+  size: number | null;
+  fallback: boolean; // asked for the original, but only the processed file is left
+}
+
+/** Start a direct browser download of a capture's video. The server returns a
+ *  signed link with `Content-Disposition: attachment`, so a multi-GB file
+ *  streams to disk without passing through JS memory or the API. */
+export async function downloadSessionVideo(
+  sessionId: string,
+  variant: "original" | "processed" = "original",
+): Promise<VideoDownload> {
+  const r = await apiFetch(`/sessions/${sessionId}/download?variant=${variant}`, { cache: "no-store" });
+  if (!r.ok) throw new Error(await errorDetail(r, `download failed: ${r.status}`));
+  const d = (await r.json()) as VideoDownload;
+  const href = d.url.startsWith("/media/") ? `${API_BASE}${d.url}` : d.url;
+  const a = document.createElement("a");
+  a.href = href;
+  a.download = d.filename; // honoured same-origin; the attachment header covers cross-origin
+  a.rel = "noopener";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  return d;
 }
 
 export async function getSessionDetail(sessionId: string): Promise<SessionDetail> {
@@ -362,53 +436,183 @@ export async function downloadUrl(url: string, filename: string): Promise<void> 
   await saveBlob(r, filename);
 }
 
-// ---- documents (SOP) ----
-export interface DocStep {
-  n: number;
+/** The API's `detail` message when it sent one, else the fallback. */
+export async function errorDetail(r: Response, fallback: string): Promise<string> {
+  try {
+    const j = await r.json();
+    if (j && typeof j.detail === "string") return j.detail;
+  } catch {
+    /* not JSON */
+  }
+  return fallback;
+}
+
+// ---- documents (v2: AI-written guide with per-step snapshots) ----
+export type DocStatus = "none" | "queued" | "running" | "ready" | "error";
+
+export interface DocSnapshot {
+  key: string | null; // null only while a first re-grab is pending
+  raw_key?: string | null; // the un-annotated frame
+  t?: number | null; // seconds into the source video
+  bbox_norm?: number[] | null; // [x, y, w, h] normalised to the frame
+  pending?: boolean;
+}
+export interface DocSource {
+  graph_step_id?: string | null;
+  t_start?: number | null;
+  t_end?: number | null;
+}
+export interface DocStepV2 {
+  id: string;
   title: string;
   body: string;
-  screenshot?: string | null;
+  tip?: string | null;
+  snapshot?: DocSnapshot | null;
+  source: DocSource;
 }
-
-export interface SopDoc {
+export interface DocMeta {
+  generated_at?: string | null;
+  edited_at?: string | null;
+  writer?: "llm" | "fallback" | "legacy";
+  model?: string | null;
+  instruction?: string | null;
+  skill_id?: string | null;
+  graph_version?: number | null;
+  snapshots?: boolean;
+}
+export interface DocV2 {
+  version: 2;
   title: string;
-  summary: string;
-  graph_version: number;
-  steps: DocStep[];
+  overview: string;
+  prerequisites: string[];
+  steps: DocStepV2[];
+  tips: string[];
+  meta: DocMeta;
 }
-
-export interface DocumentResult {
-  document_id: string;
+export interface DocumentState {
+  document_id: string | null;
   project_id: string;
-  graph_version: number;
-  doc: SopDoc;
+  graph_version: number | null;
+  latest_graph_version?: number | null;
+  stale?: boolean;
+  status: DocStatus;
+  doc_version?: number;
+  error?: { error?: string } | null;
+  progress?: number | null;
+  message?: string | null;
+  doc: DocV2 | null;
 }
 
-export async function getDocument(projectId: string): Promise<DocumentResult | null> {
+/** Accept the v2 shape (filling defaults) or map the legacy
+ *  {title, summary, steps[{n,title,body,screenshot}]} shape, so the share page
+ *  and any not-yet-upgraded row still render. */
+export function normalizeDoc(raw: unknown): DocV2 | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const str = (v: unknown) => (typeof v === "string" ? v : "");
+  const strs = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
+  if (r.version === 2) {
+    const steps = Array.isArray(r.steps) ? (r.steps as Record<string, unknown>[]) : [];
+    return {
+      version: 2,
+      title: str(r.title) || "Untitled document",
+      overview: str(r.overview),
+      prerequisites: strs(r.prerequisites),
+      steps: steps.map((s, i) => ({
+        id: str(s.id) || `step-${i + 1}`,
+        title: str(s.title),
+        body: str(s.body),
+        tip: typeof s.tip === "string" && s.tip ? s.tip : null,
+        snapshot: (s.snapshot as DocSnapshot | null | undefined) ?? null,
+        source: (s.source as DocSource | undefined) ?? {},
+      })),
+      tips: strs(r.tips),
+      meta: (r.meta as DocMeta | undefined) ?? {},
+    };
+  }
+  if (!Array.isArray(r.steps)) return null;
+  const legacy = r.steps as Record<string, unknown>[];
+  return {
+    version: 2,
+    title: str(r.title) || "Untitled document",
+    overview: str(r.summary),
+    prerequisites: [],
+    steps: legacy.map((s, i) => ({
+      id: `legacy-${typeof s.n === "number" ? s.n : i + 1}`,
+      title: str(s.title),
+      body: str(s.body),
+      tip: null,
+      snapshot: typeof s.screenshot === "string" && s.screenshot ? { key: s.screenshot, t: null } : null,
+      source: {},
+    })),
+    tips: [],
+    meta: { writer: "legacy" },
+  };
+}
+
+export async function getDocument(projectId: string): Promise<DocumentState> {
   const r = await apiFetch(`/projects/${projectId}/document`, { cache: "no-store" });
-  if (r.status === 404) return null;
+  if (r.status === 404) {
+    return { document_id: null, project_id: projectId, graph_version: null, status: "none", doc: null };
+  }
   if (!r.ok) throw new Error(`getDocument failed: ${r.status}`);
-  return r.json();
+  const j = (await r.json()) as DocumentState;
+  return { ...j, status: j.status ?? (j.doc ? "ready" : "none"), doc: normalizeDoc(j.doc) };
 }
 
-export async function regenerateDocument(
+/** Ask the worker to (re)write the documentation. Poll `getDocument` until
+ *  status leaves queued/running. */
+export async function generateDocument(
   projectId: string,
-  instruction?: string,
-): Promise<DocumentResult> {
-  const r = await apiFetch(`/projects/${projectId}/document`, {
+  opts: { instruction?: string; skill_id?: string } = {},
+): Promise<DocumentState> {
+  const r = await apiFetch(`/projects/${projectId}/document/generate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ instruction: instruction ?? null }),
+    body: JSON.stringify({ instruction: opts.instruction ?? null, skill_id: opts.skill_id ?? null }),
   });
-  if (!r.ok) throw new Error(`regenerateDocument failed: ${r.status}`);
-  return r.json();
+  if (!r.ok) throw new Error(await errorDetail(r, `generateDocument failed: ${r.status}`));
+  pokeActivity();
+  const j = (await r.json()) as DocumentState;
+  return { ...j, doc: normalizeDoc(j.doc) };
 }
 
-/** Export the doc as MD/PDF. This is an authenticated route, so it can't be a
- *  plain `<a href>` — the browser wouldn't send the token. Fetch, then save. */
+/** Persist edits. `keepalive` lets the unload flush outlive the page. */
+export async function saveDocument(
+  projectId: string,
+  doc: DocV2,
+  init: { keepalive?: boolean } = {},
+): Promise<DocumentState> {
+  const r = await apiFetch(`/projects/${projectId}/document`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ doc }),
+    keepalive: init.keepalive,
+  });
+  if (!r.ok) throw new Error(await errorDetail(r, `saveDocument failed: ${r.status}`));
+  const j = (await r.json()) as DocumentState;
+  return { ...j, doc: normalizeDoc(j.doc) };
+}
+
+/** Re-grab one step's snapshot at `tSeconds`; the step's snapshot goes
+ *  `pending` until the worker replaces it (poll `getDocument`). */
+export async function setStepSnapshot(projectId: string, stepId: string, tSeconds: number): Promise<void> {
+  const r = await apiFetch(`/projects/${projectId}/document/steps/${stepId}/snapshot`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ t: tSeconds }),
+  });
+  if (!r.ok) throw new Error(await errorDetail(r, `setStepSnapshot failed: ${r.status}`));
+  pokeActivity();
+}
+
+export type DocExportFormat = "md" | "pdf" | "docx";
+
+/** Export the doc. This is an authenticated route, so it can't be a plain
+ *  `<a href>` — the browser wouldn't send the token. Fetch, then save. */
 export async function downloadDocument(
   projectId: string,
-  format: "md" | "pdf",
+  format: DocExportFormat,
   filename: string,
 ): Promise<void> {
   const r = await apiFetch(`/projects/${projectId}/document/export?format=${format}`);
@@ -433,7 +637,7 @@ export interface SharePublic {
   project_id: string;
   allow_download: boolean;
   video_url: string | null;
-  doc: SopDoc | null;
+  doc: DocV2 | null;
 }
 
 export function shareLink(token: string): string {
@@ -456,6 +660,7 @@ export async function getSharePublic(token: string): Promise<SharePublic> {
   if (!r.ok) throw new Error(`getShare failed: ${r.status}`);
   const j = (await r.json()) as SharePublic;
   if (j.video_url && j.video_url.startsWith("/")) j.video_url = `${API_BASE}${j.video_url}`;
+  j.doc = normalizeDoc(j.doc);
   return j;
 }
 
@@ -877,6 +1082,7 @@ export interface VideoSpec {
   graph_version: number;
   edit_spec: EditSpec;
   source_video?: string | null;
+  source_proxy?: string | null; // 540p preview copy; prefer it for playback/scrubbing
   latest_render?: RenderJob | null; // newest finished render, shown on open
 }
 
@@ -887,6 +1093,8 @@ export interface RenderJob {
   output_url: string | null;
   stats_json: Record<string, number | string> | null;
   error_json: Record<string, unknown> | null;
+  progress?: number | null;
+  message?: string | null;
 }
 
 export async function getVideo(projectId: string): Promise<VideoSpec | null> {
@@ -976,6 +1184,7 @@ export async function fetchPreviewTimeline(url: string): Promise<PreviewTimeline
 export async function renderVideo(projectId: string): Promise<RenderJob> {
   const r = await apiFetch(`/projects/${projectId}/video/render`, { method: "POST" });
   if (!r.ok) throw new Error(`renderVideo failed: ${r.status}`);
+  pokeActivity();
   return r.json();
 }
 

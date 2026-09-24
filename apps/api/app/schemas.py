@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 # ---- shared ----
 SourceType = Literal["extension", "recorder", "upload", "auto"]
@@ -62,6 +63,8 @@ class ProjectOut(BaseModel):
     # Whether a step-by-step doc has actually been generated for this project, so
     # the UI can label it truthfully instead of guessing from capture counts.
     has_document: bool = False
+    # queued | running | ready | error, or None when no document exists yet.
+    document_status: str | None = None
     capture_count: int = 0
     # Populated when the project is someone else's: for admins browsing across
     # spaces, and for collaborators on a project shared with them.
@@ -181,6 +184,10 @@ class JobOut(BaseModel):
     status: str
     attempts: int
     error_json: dict | None = None
+    progress: float | None = None  # 0..1 within this stage
+    message: str | None = None
+    started_at: datetime | None = None
+    updated_at: datetime | None = None
 
 
 class SessionStatus(BaseModel):
@@ -188,6 +195,26 @@ class SessionStatus(BaseModel):
     status: str
     latest_version: int | None = None
     jobs: list[JobOut] = []
+    # Whole-pipeline view for the UI (stages weighted by typical cost).
+    progress: float | None = None  # 0..1
+    stage: str | None = None  # the stage running now
+    message: str | None = None
+    elapsed_s: float | None = None
+    eta_s: float | None = None  # None until there is enough signal to estimate
+    # True when the running stage has not reported for a while (worker busy or gone).
+    stalled: bool = False
+
+
+class ActivityItem(BaseModel):
+    kind: Literal["processing", "document", "render"]
+    project_id: str
+    project_name: str
+    status: str
+    progress: float | None = None
+    message: str | None = None
+    href: str
+    started_at: datetime | None = None
+    updated_at: datetime | None = None
 
 
 # ---- workflow graph ----
@@ -209,6 +236,8 @@ class RenderJobOut(BaseModel):
     output_url: str | None = None
     stats_json: dict | None = None
     error_json: dict | None = None
+    progress: float | None = None
+    message: str | None = None
 
 
 class VideoSpecOut(BaseModel):
@@ -217,6 +246,9 @@ class VideoSpecOut(BaseModel):
     graph_version: int
     edit_spec: dict
     source_video: str | None = None  # storage key of the project's raw recording
+    # 540p preview copy for the editor/scrubbers (None until processed, or for
+    # older recordings — then preview falls back to source_video).
+    source_proxy: str | None = None
     latest_render: RenderJobOut | None = None  # newest finished render, shown on open
 
 
@@ -225,10 +257,19 @@ class EditSpecPatch(BaseModel):
 
 
 class DocumentOut(BaseModel):
-    document_id: str
+    document_id: str | None
     project_id: str
-    graph_version: int
-    doc: dict
+    graph_version: int | None
+    doc: dict | None
+    # none (no row yet) | queued | running | ready | error
+    status: str = "ready"
+    doc_version: int = 0
+    latest_graph_version: int | None = None
+    # True when the recording was reprocessed after this doc was generated.
+    stale: bool = False
+    error: dict | None = None
+    progress: float | None = None
+    message: str | None = None
 
 
 class AutoEditStart(BaseModel):
@@ -372,3 +413,169 @@ class AgentStepOut(BaseModel):
     progress_note: str | None = None
     plan: list[PlanItemOut] = []
     step_count: int
+
+
+# ---- documents v2 ----
+# The editable document model. Text carries only two inline markups — **bold**
+# for UI labels and `code` for typed values — and every renderer (web, MD, PDF,
+# DOCX) handles exactly those. Step ids equal the graph step id for generated
+# steps (so snapshots can be re-grabbed from the recording) and "u_…" for steps
+# the user adds. Order is positional: reordering is a list mutation, never a
+# renumbering.
+_CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+STORAGE_KEY_RE = r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,300}$"
+
+
+def clean_text(value: Any, limit: int) -> str:
+    """Strip control characters, collapse runs of spaces and blank lines, cap length.
+    Truncates rather than rejects — a too-long body is still the user's text."""
+    s = _CTRL.sub("", str(value if value is not None else ""))
+    s = re.sub(r"[ \t]+", " ", s)
+    s = re.sub(r"\n{3,}", "\n\n", s).strip()
+    return s[:limit]
+
+
+class DocSnapshot(BaseModel):
+    # None only while a re-grab is pending and no earlier snapshot existed.
+    key: str | None = Field(default=None, pattern=STORAGE_KEY_RE)
+    raw_key: str | None = Field(default=None, pattern=STORAGE_KEY_RE)
+    t: float | None = Field(default=None, ge=0)  # seconds into the source video
+    bbox_norm: list[float] | None = None  # [x, y, w, h] normalised to the frame
+    pending: bool = False
+
+    @field_validator("bbox_norm")
+    @classmethod
+    def _unit_box(cls, v: list[float] | None) -> list[float] | None:
+        if v is None:
+            return None
+        if len(v) != 4:
+            raise ValueError("bbox_norm must have 4 numbers")
+        return [min(1.0, max(0.0, float(x))) for x in v]
+
+
+class DocSource(BaseModel):
+    graph_step_id: str | None = None
+    t_start: float | None = None
+    t_end: float | None = None
+
+
+class DocStepV2(BaseModel):
+    id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    title: str = Field(default="", max_length=200)
+    body: str = Field(default="", max_length=4000)
+    tip: str | None = Field(default=None, max_length=600)
+    snapshot: DocSnapshot | None = None
+    source: DocSource = Field(default_factory=DocSource)
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def _clean_title(cls, v: Any) -> str:
+        return clean_text(v, 200)
+
+    @field_validator("body", mode="before")
+    @classmethod
+    def _clean_body(cls, v: Any) -> str:
+        return clean_text(v, 4000)
+
+    @field_validator("tip", mode="before")
+    @classmethod
+    def _clean_tip(cls, v: Any) -> str | None:
+        if v is None:
+            return None
+        t = clean_text(v, 600)
+        return t or None
+
+
+class DocMeta(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    generated_at: str | None = None
+    edited_at: str | None = None
+    writer: Literal["llm", "fallback", "legacy"] = "fallback"
+    model: str | None = None
+    instruction: str | None = Field(default=None, max_length=2000)
+    skill_id: str | None = None
+    graph_version: int | None = None
+    # Steps the model skipped that were filled with mechanical text (observability).
+    missing_steps: int | None = None
+    snapshots: bool = True
+
+
+class DocV2(BaseModel):
+    version: Literal[2] = 2
+    title: str = Field(default="Untitled document", max_length=200)
+    overview: str = Field(default="", max_length=4000)
+    prerequisites: list[str] = Field(default_factory=list, max_length=20)
+    steps: list[DocStepV2] = Field(default_factory=list, max_length=300)
+    tips: list[str] = Field(default_factory=list, max_length=20)
+    meta: DocMeta = Field(default_factory=DocMeta)
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def _clean_doc_title(cls, v: Any) -> str:
+        return clean_text(v, 200) or "Untitled document"
+
+    @field_validator("overview", mode="before")
+    @classmethod
+    def _clean_overview(cls, v: Any) -> str:
+        return clean_text(v, 4000)
+
+    @field_validator("prerequisites", "tips", mode="before")
+    @classmethod
+    def _clean_list(cls, v: Any) -> list[str]:
+        items = v if isinstance(v, list) else []
+        out = [clean_text(x, 300) for x in items if isinstance(x, str)]
+        return [x for x in out if x][:20]
+
+    @field_validator("steps")
+    @classmethod
+    def _unique_ids(cls, v: list[DocStepV2]) -> list[DocStepV2]:
+        seen: set[str] = set()
+        for s in v:
+            if s.id in seen:
+                raise ValueError(f"duplicate step id {s.id!r}")
+            seen.add(s.id)
+        return v
+
+
+class DocGenerateIn(BaseModel):
+    instruction: str | None = Field(default=None, max_length=2000)
+    skill_id: str | None = None
+
+
+class DocPatchIn(BaseModel):
+    doc: DocV2
+
+
+class DocSnapshotIn(BaseModel):
+    t: float = Field(ge=0)  # seconds into the source video
+
+
+# ---- multipart uploads ----
+class UploadCreate(BaseModel):
+    kind: Literal["raw_video", "audio"] = "raw_video"
+    ext: str = Field(pattern=r"^[a-z0-9]{1,5}$")
+    size: int = Field(gt=0, le=50 * 1024**3)  # 50 GB ceiling
+
+
+class UploadOut(BaseModel):
+    upload_id: str
+    storage_key: str
+    size: int
+    part_size: int
+    part_count: int
+    status: str
+    parts: list[dict] = []  # [{number, etag, size}] already received
+
+
+class PartSignIn(BaseModel):
+    numbers: list[int] = Field(min_length=1, max_length=100)
+
+
+class PartDoneIn(BaseModel):
+    number: int = Field(ge=1, le=10000)
+    etag: str = Field(min_length=1, max_length=200)
+
+
+class UploadCompleteIn(BaseModel):
+    parts: list[PartDoneIn] = Field(min_length=1, max_length=10000)

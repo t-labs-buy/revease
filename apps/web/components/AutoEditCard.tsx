@@ -94,7 +94,7 @@ export function AutoEditCard({ projectId }: { projectId: string }) {
                 type="checkbox"
                 checked={captions}
                 onChange={(e) => setCaptions(e.target.checked)}
-                className="accent-violet-500"
+                className="accent-[#1E8F8E]"
               />
               Captions
             </label>
@@ -103,7 +103,7 @@ export function AutoEditCard({ projectId }: { projectId: string }) {
                 type="checkbox"
                 checked={zoom}
                 onChange={(e) => setZoom(e.target.checked)}
-                className="accent-violet-500"
+                className="accent-[#1E8F8E]"
               />
               Auto-zoom
             </label>

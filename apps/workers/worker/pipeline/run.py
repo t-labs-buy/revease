@@ -9,10 +9,12 @@ and the pipeline degrades to whatever media it has (screenshots/events)."""
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import func, select
 
+from app.config import get_settings
 from app.db import SessionLocal, init_db
 from app.models import (
     AutoRecordRun,
@@ -27,6 +29,7 @@ from app.storage import store
 from worker.pipeline import media as media_stage
 from worker.pipeline.extract import build_graph, build_graph_auto
 from worker.pipeline.narrate import narrate_steps
+from worker.pipeline.progress import Heartbeat, Reporter, fmt_clock
 from worker.pipeline.providers import Transcript as TranscriptData
 from worker.pipeline.providers import Word, transcribe
 from worker.pipeline.segment import segment
@@ -35,6 +38,37 @@ from worker.pipeline.segment_auto import segment_auto
 log = logging.getLogger("refract.pipeline.run")
 
 STAGES = ("media", "whisper", "merge", "extract")
+
+
+def _live_duplicate(db, session_id: str) -> Job | None:
+    """A stage of this session that is running with a fresh heartbeat. A
+    redelivered (or double-clicked) pipeline task must not start a second copy
+    of a long encode that is still making progress; a stale one is taken over."""
+    stale_after = timedelta(seconds=get_settings().pipeline_stale_after_s)
+    now = datetime.now(timezone.utc)
+    for job in db.scalars(select(Job).where(Job.session_id == session_id, Job.status == "running")):
+        updated = job.updated_at if job.updated_at.tzinfo else job.updated_at.replace(tzinfo=timezone.utc)
+        if now - updated < stale_after:
+            return job
+    return None
+
+
+def _start(db, job: Job, message: str) -> Reporter:
+    job.status = "running"
+    job.attempts += 1
+    job.progress = 0.0
+    job.message = message
+    job.started_at = datetime.now(timezone.utc)
+    job.error_json = None
+    db.commit()
+    return Reporter(Job, job.id)
+
+
+def _finish(db, job: Job, message: str = "Done") -> None:
+    job.status = "done"
+    job.progress = 1.0
+    job.message = message
+    db.commit()
 
 
 def _job(db, session_id: str, stage: str, version: int) -> Job:
@@ -63,7 +97,7 @@ def _duration_s(sess: CaptureSession, events: list[dict], keyframes, transcript)
     return 0.0
 
 
-def run_pipeline(session_id: str) -> dict[str, Any]:
+def run_pipeline(session_id: str, token: str | None = None) -> dict[str, Any]:
     init_db()
     db = SessionLocal()
     try:
@@ -73,6 +107,17 @@ def run_pipeline(session_id: str) -> dict[str, Any]:
             # Return gracefully so the task acks instead of retrying forever.
             log.warning("session %s not found; skipping", session_id)
             return {"session_id": session_id, "skipped": "session not found"}
+
+        live = _live_duplicate(db, session_id)
+        if live is not None:
+            if token and token != sess.pipeline_token:
+                # A new request (re-trim / reprocess): wait for the live run to end.
+                log.info("session %s: new request waits for the running %s stage", session_id, live.stage)
+                return {"session_id": session_id, "deferred": True, "stage": live.stage}
+            log.warning("session %s: %s stage already running (heartbeat %s); dropping duplicate delivery",
+                        session_id, live.stage, live.updated_at)
+            return {"session_id": session_id, "skipped": "already running", "stage": live.stage}
+        sess.pipeline_token = token
 
         # One version per run = max existing graph version for the project + 1.
         max_v = db.scalar(
@@ -99,32 +144,29 @@ def run_pipeline(session_id: str) -> dict[str, Any]:
         # ---- media stage: ffmpeg keyframes + audio demux ---------------------
         job = _job(db, session_id, "media", version)
         if job.status != "done":
-            job.status = "running"
-            job.attempts += 1
-            db.commit()
+            report = _start(db, job, "Preparing video…")
             try:
-                _run_media(db, sess)
-                job.status = "done"
-                db.commit()
+                with Heartbeat(Job, job.id):
+                    _run_media(db, sess, report)
+                _finish(db, job, "Video ready")
             except Exception as e:  # never fatal — degrade to screenshots/events
                 log.exception("media stage error")
                 job.status = "error"
                 job.error_json = {"error": str(e)}
+                job.message = "Video conversion failed — continuing with what we have"
                 db.commit()
 
         # ---- whisper stage ---------------------------------------------------
         job = _job(db, session_id, "whisper", version)
         if job.status != "done":
-            job.status = "running"
-            job.attempts += 1
-            db.commit()
+            report = _start(db, job, "Transcribing speech…")
             try:
-                if is_auto:
-                    _write_user_transcript(db, sess, auto_run.transcript_text if auto_run else "")
-                else:
-                    _run_whisper(db, sess)
-                job.status = "done"
-                db.commit()
+                with Heartbeat(Job, job.id):
+                    if is_auto:
+                        _write_user_transcript(db, sess, auto_run.transcript_text if auto_run else "")
+                    else:
+                        _run_whisper(db, sess, report)
+                _finish(db, job, "Transcript ready")
             except Exception as e:
                 log.exception("whisper stage error")
                 job.status = "error"
@@ -133,6 +175,7 @@ def run_pipeline(session_id: str) -> dict[str, Any]:
 
         # ---- gather + merge/segment -----------------------------------------
         job = _job(db, session_id, "merge", version)
+        _start(db, job, "Finding the steps…")
         events = [
             {
                 "seq": e.seq,
@@ -189,15 +232,14 @@ def run_pipeline(session_id: str) -> dict[str, Any]:
             candidate_steps = segment(
                 events, transcript, keyframes, screenshots_by_seq, duration, sess.telemetry
             )
-        job.status = "done"
-        db.commit()
+        _finish(db, job, f"Found {len(candidate_steps)} steps")
 
         # ---- extract + persist (idempotent upsert by project+version) --------
         job = _job(db, session_id, "extract", version)
-        job.status = "running"
-        job.attempts += 1
-        db.commit()
+        _start(db, job, f"Labelling {len(candidate_steps)} steps with AI…")
         title = f"Workflow ({len(candidate_steps)} steps)"
+        # The LLM labelling reports no progress of its own and can take minutes.
+        extract_hb = Heartbeat(Job, job.id).__enter__()
         try:
             if is_auto:
                 graph = build_graph_auto(
@@ -214,9 +256,10 @@ def run_pipeline(session_id: str) -> dict[str, Any]:
                     version=version,
                 )
             _persist_graph(db, sess.project_id, version, graph)
-            job.status = "done"
-            db.commit()
+            extract_hb.__exit__(None, None, None)
+            _finish(db, job, "Workflow ready")
         except Exception as e:
+            extract_hb.__exit__(None, None, None)
             # Unlike media/whisper, extract has no graceful degradation — without a
             # graph the project is unusable, so surface a real error instead of
             # leaving the job stuck at "running" forever (silently, on every retry).
@@ -273,7 +316,8 @@ def _write_user_transcript(db, sess: CaptureSession, text: str) -> None:
 
 
 # --------------------------------------------------------------------------- #
-def _run_media(db, sess: CaptureSession) -> None:
+def _run_media(db, sess: CaptureSession, report: Reporter | None = None) -> None:
+    report = report or (lambda *_a, **_k: None)
     video = db.scalar(
         select(MediaAsset).where(
             MediaAsset.session_id == sess.id, MediaAsset.kind == "raw_video"
@@ -281,9 +325,9 @@ def _run_media(db, sess: CaptureSession) -> None:
     )
     if not video:
         return  # extension session: screenshots are the keyframes
-    video_path = store.local_path(video.storage_key)
-    if not video_path.exists():
-        log.warning("raw_video missing on disk: %s", video.storage_key)
+    video_path = store.fetch(video.storage_key)  # S3: downloads into the media cache
+    if video_path is None:
+        log.warning("raw_video missing from storage: %s", video.storage_key)
         return
 
     # Normalize the raw recording/upload into a seekable faststart MP4. Browser
@@ -292,8 +336,26 @@ def _run_media(db, sess: CaptureSession) -> None:
     # auto-edit and render all use the well-formed MP4. Idempotent on re-process.
     try:
         norm_key = f"sessions/{sess.id}/source.mp4"
-        norm = media_stage.normalize_video(video_path, store.local_path(norm_key))
+        total_s = (sess.duration_ms or 0) / 1000.0
+        conv = report.sub(0.0, 0.8) if isinstance(report, Reporter) else report
+        conv(0.0, "Converting video…")
+
+        def on_conv(frac: float, done_s: float) -> None:
+            total = total_s or (done_s / frac if frac else 0)
+            conv(frac, f"Converting video · {fmt_clock(done_s)} of {fmt_clock(total)}")
+
+        proxy_key = f"sessions/{sess.id}/proxy.mp4"
+        norm = media_stage.normalize_video(video_path, store.local_path(norm_key),
+                                           duration_s=total_s, on_progress=on_conv,
+                                           proxy_out=store.local_path(proxy_key))
+        if norm is None:  # already a good MP4: only the preview proxy is needed
+            conv(0.0, "Creating preview…")
+            media_stage.make_proxy(video_path, store.local_path(proxy_key), duration_s=total_s,
+                                   on_progress=lambda f, _d: conv(f, "Creating preview…"))
+        store.commit(proxy_key)
+        _upsert_asset(db, sess.id, "proxy", proxy_key)
         if norm is not None:
+            store.commit(norm_key)
             video.storage_key = norm_key
             db.commit()
             video_path = store.local_path(norm_key)
@@ -301,9 +363,12 @@ def _run_media(db, sess: CaptureSession) -> None:
         log.warning("video normalize failed; continuing with the original container")
 
     # audio demux (best-effort)
+    report(0.82, "Extracting audio…")
     audio_key = f"sessions/{sess.id}/audio.wav"
     try:
         out = media_stage.demux_audio(video_path, store.local_path(audio_key))
+        if out is not None:
+            store.commit(audio_key)
         if out is not None and not db.scalar(
             select(MediaAsset).where(
                 MediaAsset.session_id == sess.id, MediaAsset.kind == "audio"
@@ -315,7 +380,9 @@ def _run_media(db, sess: CaptureSession) -> None:
         log.warning("audio demux failed; continuing")
 
     # keyframes
+    report(0.88, "Capturing keyframes…")
     frames = media_stage.extract_keyframes(video_path, store.local_path(f"sessions/{sess.id}/frames"))
+    store.commit_tree(f"sessions/{sess.id}/frames")
     # clear any prior frame assets for a clean re-run
     for old in db.scalars(
         select(MediaAsset).where(MediaAsset.session_id == sess.id, MediaAsset.kind == "frame")
@@ -327,12 +394,25 @@ def _run_media(db, sess: CaptureSession) -> None:
     db.commit()
 
 
-def _run_whisper(db, sess: CaptureSession) -> None:
+def _upsert_asset(db, session_id: str, kind: str, key: str) -> None:
+    if not db.scalar(select(MediaAsset).where(MediaAsset.session_id == session_id, MediaAsset.kind == kind)):
+        db.add(MediaAsset(session_id=session_id, kind=kind, storage_key=key))
+        db.commit()
+
+
+def _run_whisper(db, sess: CaptureSession, report: Reporter | None = None) -> None:
     audio = db.scalar(
         select(MediaAsset).where(MediaAsset.session_id == sess.id, MediaAsset.kind == "audio")
     )
-    audio_path = str(store.local_path(audio.storage_key)) if audio else None
-    result = transcribe(audio_path)
+    fetched = store.fetch(audio.storage_key) if audio else None
+    audio_path = str(fetched) if fetched else None
+    total_s = (sess.duration_ms or 0) / 1000.0
+
+    def on_words(frac: float, done_s: float) -> None:
+        if report:
+            report(frac, f"Transcribing speech · {fmt_clock(done_s)} of {fmt_clock(total_s or done_s / max(frac, 1e-6))}")
+
+    result = transcribe(audio_path, on_progress=on_words)
     existing = db.scalar(select(Transcript).where(Transcript.session_id == sess.id))
     if existing:
         db.delete(existing)
@@ -393,8 +473,8 @@ def _precompute_zooms(db, sess: CaptureSession, version: int) -> None:
     video = db.scalar(
         select(MediaAsset).where(MediaAsset.session_id == sess.id, MediaAsset.kind == "raw_video")
     )
-    video_path = store.local_path(video.storage_key) if video else None
-    if video_path is None or not video_path.exists():
+    video_path = store.fetch(video.storage_key) if video else None
+    if video_path is None:
         return
     graph = db.scalar(
         select(WorkflowGraphRow).where(

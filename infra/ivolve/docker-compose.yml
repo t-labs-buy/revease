@@ -10,6 +10,11 @@
 #     docker pull localhost:5000/revease:api-v1
 #     docker tag  localhost:5000/revease:api-v1 revease:api-v1
 #
+# Since 2026-09-24 the host runs the images pushed to Gitea's registry instead:
+# .env sets IMAGE_NS=reg.ivolve.cloud/ivolve/revease and TAG=v2, which resolves to
+# reg.ivolve.cloud/ivolve/revease:api-v2 etc. The host is `docker login`ed to that
+# registry as karthik; the previous local-registry settings are kept in .env.bak-v1.
+#
 # Everything public goes through the `edge` proxy on 8020: this host's security
 # group only allows 80, 443 and 8020, and 80/443 already belong to
 # nginx-proxy-manager. So web and api share one origin (see edge/nginx.conf).
@@ -32,6 +37,47 @@ services:
       timeout: 3s
       retries: 5
 
+  # Object storage for media (REFRACT_STORAGE_BACKEND=s3). The container name
+  # is what presigned URLs are signed for; the edge proxies /s3/ to it with that
+  # exact Host header (see edge/nginx.conf).
+  minio:
+    # Docker Hub no longer serves MinIO community images; quay.io does. Any
+    # S3-compatible server works (SeaweedFS, RustFS, AWS S3): only the
+    # REFRACT_S3_* settings change.
+    image: quay.io/minio/minio:latest
+    container_name: revease-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-revease}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-change-me-please}
+    volumes:
+      - minio-data:/data
+    ports:
+      - "127.0.0.1:${MINIO_CONSOLE_PORT:-8023}:9001"  # console, loopback only
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Database (REFRACT_DATABASE_URL=postgresql+psycopg://revease:…@revease-postgres:5432/revease).
+  postgres:
+    image: postgres:16-alpine
+    container_name: revease-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: revease
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-please}
+      POSTGRES_DB: revease
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "revease"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   api:
     image: ${IMAGE_NS:-revease}:api-${TAG:-v1}
     container_name: revease-api
@@ -44,6 +90,9 @@ services:
     environment:
       REFRACT_DATA_DIR: /data
       REFRACT_MEDIA_DIR: /data/media
+      # S3 mode: local copies for ffmpeg live on the volume (shared by the
+      # api/worker containers on this host, LRU-capped by REFRACT_MEDIA_CACHE_MAX_GB).
+      REFRACT_MEDIA_CACHE_DIR: /data/cache
       REFRACT_REDIS_URL: redis://redis:6379/0
       REFRACT_CORS_ORIGINS: ${CORS_ORIGINS:-http://13.204.129.141:8020,https://revease.ivolve.cloud}
     volumes:
@@ -67,6 +116,9 @@ services:
     environment:
       REFRACT_DATA_DIR: /data
       REFRACT_MEDIA_DIR: /data/media
+      # S3 mode: local copies for ffmpeg live on the volume (shared by the
+      # api/worker containers on this host, LRU-capped by REFRACT_MEDIA_CACHE_MAX_GB).
+      REFRACT_MEDIA_CACHE_DIR: /data/cache
       REFRACT_REDIS_URL: redis://redis:6379/0
     volumes:
       - revease-data:/data
@@ -75,6 +127,34 @@ services:
         condition: service_healthy
       api:
         condition: service_started
+    # Long CPU-bound work (normalize, transcribe, render): one at a time so a
+    # long recording never starves the host.
+    command: ["celery", "-A", "worker.celery_app", "worker", "--loglevel=info", "-Q", "media", "-c", "1", "-n", "media@%h"]
+
+  worker-light:
+    image: ${IMAGE_NS:-revease}:worker-${TAG:-v1}
+    container_name: revease-worker-light
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      REFRACT_DATA_DIR: /data
+      REFRACT_MEDIA_DIR: /data/media
+      # S3 mode: local copies for ffmpeg live on the volume (shared by the
+      # api/worker containers on this host, LRU-capped by REFRACT_MEDIA_CACHE_MAX_GB).
+      REFRACT_MEDIA_CACHE_DIR: /data/cache
+      REFRACT_REDIS_URL: redis://redis:6379/0
+    volumes:
+      - revease-data:/data
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_started
+    # Quick jobs (documents, snapshots, voice previews) stay responsive while a
+    # long encode runs on the media worker.
+    # -B: this worker also runs the beat scheduler (hourly retention sweep).
+    command: ["celery", "-A", "worker.celery_app", "worker", "--loglevel=info", "-Q", "default", "-c", "3", "-n", "default@%h", "-B", "-s", "/tmp/celerybeat-schedule"]
 
   web:
     image: ${IMAGE_NS:-revease}:web-${TAG:-v1}
@@ -119,3 +199,5 @@ networks:
 volumes:
   revease-data:
   redis-data:
+  minio-data:
+  postgres-data:

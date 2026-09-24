@@ -1,7 +1,8 @@
 "use client";
 
 import { use, useEffect, useState } from "react";
-import { downloadUrl, getSharePublic, mediaUrl, type SharePublic } from "@/lib/api";
+import { downloadUrl, getSharePublic, type SharePublic } from "@/lib/api";
+import { DocView } from "@/components/doc/DocView";
 
 function safeFilename(title: string): string {
   const base = title.replace(/[^\w\- ]+/g, "").trim().replace(/\s+/g, "-");
@@ -39,7 +40,7 @@ export default function SharePage({ params }: { params: Promise<{ token: string 
       {/* minimal public header */}
       <header className="border-b border-zinc-800/60 px-6 py-3">
         <div className="mx-auto flex max-w-4xl items-center gap-2">
-          <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-violet-500 to-fuchsia-600 text-sm font-bold text-[var(--text)]">
+          <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-[#1E8F8E] to-[#16283C] text-sm font-bold text-[var(--text)]">
             R
           </span>
           <span className="font-semibold tracking-tight">RevEase</span>
@@ -56,7 +57,7 @@ export default function SharePage({ params }: { params: Promise<{ token: string 
 
             {data.kind === "video" && data.video_url && (
               <div className="mt-5">
-                <div className="rounded-2xl bg-gradient-to-br from-violet-500/25 via-blue-500/20 to-emerald-500/20 p-4 sm:p-6">
+                <div className="rounded-2xl bg-gradient-to-br from-[#1E8F8E]/25 via-blue-500/20 to-emerald-500/20 p-4 sm:p-6">
                   <video
                     src={data.video_url}
                     controls
@@ -76,28 +77,7 @@ export default function SharePage({ params }: { params: Promise<{ token: string 
 
             {data.kind === "doc" && data.doc && (
               <article className="mt-6">
-                <p className="text-zinc-500">{data.doc.summary}</p>
-                <ol className="mt-6 space-y-6">
-                  {data.doc.steps.map((s) => (
-                    <li key={s.n} className="border-l-2 border-zinc-800 pl-5">
-                      <div className="flex items-center gap-2">
-                        <span className="flex h-6 w-6 items-center justify-center rounded-full bg-violet-600 text-xs font-semibold text-[var(--text)]">
-                          {s.n}
-                        </span>
-                        <h2 className="text-lg font-medium text-zinc-100">{s.title}</h2>
-                      </div>
-                      {s.body && <p className="mt-2 text-zinc-300">{s.body}</p>}
-                      {s.screenshot && (
-                        // eslint-disable-next-line @next/next/no-img-element
-                        <img
-                          src={mediaUrl(s.screenshot)}
-                          alt={`Step ${s.n}`}
-                          className="mt-3 w-full rounded-lg border border-zinc-800"
-                        />
-                      )}
-                    </li>
-                  ))}
-                </ol>
+                <DocView doc={data.doc} />
               </article>
             )}
 

@@ -139,7 +139,7 @@ function SessionPageInner({ params }: { params: Promise<{ id: string; sid: strin
       )}
 
       {next && !graph && (
-        <div className="mt-4 flex items-center gap-2 rounded-lg border border-violet-500/30 bg-violet-500/10 px-3 py-2 text-sm text-violet-200">
+        <div className="mt-4 flex items-center gap-2 rounded-lg border border-[#1E8F8E]/30 bg-[#1E8F8E]/10 px-3 py-2 text-sm text-[#1E8F8E]">
           <StatusDot status="running" />
           Preparing your {next === "doc" ? "document" : "video"} — this opens automatically when
           processing finishes.
@@ -164,7 +164,7 @@ function SessionPageInner({ params }: { params: Promise<{ id: string; sid: strin
 
         {/* right: single AI Generate flow */}
         <div className={`grid gap-4 ${videoAsset ? "lg:col-span-2" : "lg:col-span-5"}`}>
-          <section className="card bg-gradient-to-br from-violet-600/10 to-transparent p-5">
+          <section className="card bg-gradient-to-br from-[#1E8F8E]/10 to-transparent p-5">
             <div className="label mb-1">AI Generate</div>
             <p className="text-sm text-zinc-400">
               One pass — speed up the idle parts, zoom on the action, and add an AI voiceover
@@ -180,7 +180,7 @@ function SessionPageInner({ params }: { params: Promise<{ id: string; sid: strin
               <div className="h-2 overflow-hidden rounded-full bg-zinc-800">
                 <div
                   className={`h-full rounded-full transition-all duration-500 ${
-                    anyError ? "bg-red-500" : "bg-violet-500"
+                    anyError ? "bg-red-500" : "bg-[#1E8F8E]"
                   }`}
                   style={{ width: `${pct}%` }}
                 />

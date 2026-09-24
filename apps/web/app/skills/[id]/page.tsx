@@ -155,7 +155,7 @@ export default function SkillDetail({ params }: { params: Promise<{ id: string }
           )}
           <button
             onClick={() => setShowMd((v) => !v)}
-            className={`btn btn-secondary btn-sm ${showMd ? "ring-1 ring-[#6d5dfb]" : ""}`}
+            className={`btn btn-secondary btn-sm ${showMd ? "ring-1 ring-[#1E8F8E]" : ""}`}
           >
             {"</> SKILL.md"}
           </button>
@@ -205,13 +205,13 @@ export default function SkillDetail({ params }: { params: Promise<{ id: string }
           ) : (
             <h1 className="text-xl font-semibold text-[var(--text)]">{f.name}</h1>
           )}
-          <span className="badge bg-[#6d5dfb]/15 capitalize text-[var(--brand-2)]">{f.target}</span>
+          <span className="badge bg-[#1E8F8E]/15 capitalize text-[var(--brand-2)]">{f.target}</span>
         </div>
 
         {/* tags */}
         <div className="mt-4 flex flex-wrap items-center gap-2">
           {f.tags.map((t, i) => (
-            <span key={i} className="inline-flex items-center gap-1 rounded-full bg-[#6d5dfb]/10 px-2.5 py-1 text-xs font-medium text-[var(--brand-2)]">
+            <span key={i} className="inline-flex items-center gap-1 rounded-full bg-[#1E8F8E]/10 px-2.5 py-1 text-xs font-medium text-[var(--brand-2)]">
               {t}
               {editing && (
                 <button onClick={() => set("tags", f.tags.filter((_, j) => j !== i))} className="text-[var(--text-3)] hover:text-red-400">
@@ -309,7 +309,7 @@ export default function SkillDetail({ params }: { params: Promise<{ id: string }
                       checked={s.include_screenshots}
                       disabled={!editing}
                       onChange={(e) => set("sections", f.sections.map((x, j) => (j === i ? { ...x, include_screenshots: e.target.checked } : x)))}
-                      className="accent-[#6d5dfb]"
+                      className="accent-[#1E8F8E]"
                     />
                     🖼 Include screenshots
                   </label>
@@ -318,7 +318,7 @@ export default function SkillDetail({ params }: { params: Promise<{ id: string }
               {editing && (
                 <button
                   onClick={() => set("sections", [...f.sections, { title: "New section", description: "", include_screenshots: false }])}
-                  className="w-full rounded-xl border border-dashed border-[var(--border-strong)] py-2 text-sm font-medium text-[var(--brand-2)] hover:bg-[#6d5dfb]/5"
+                  className="w-full rounded-xl border border-dashed border-[var(--border-strong)] py-2 text-sm font-medium text-[var(--brand-2)] hover:bg-[#1E8F8E]/5"
                 >
                   + Add section
                 </button>
@@ -351,10 +351,10 @@ export default function SkillDetail({ params }: { params: Promise<{ id: string }
                 )}
               </Field>
               <label className="flex items-center gap-2 text-sm text-[var(--text-2)]">
-                <input type="checkbox" checked={f.captions} disabled={!editing} onChange={(e) => set("captions", e.target.checked)} className="accent-[#6d5dfb]" /> Captions
+                <input type="checkbox" checked={f.captions} disabled={!editing} onChange={(e) => set("captions", e.target.checked)} className="accent-[#1E8F8E]" /> Captions
               </label>
               <label className="flex items-center gap-2 text-sm text-[var(--text-2)]">
-                <input type="checkbox" checked={f.motion_zoom} disabled={!editing} onChange={(e) => set("motion_zoom", e.target.checked)} className="accent-[#6d5dfb]" /> Auto-zoom on clicks
+                <input type="checkbox" checked={f.motion_zoom} disabled={!editing} onChange={(e) => set("motion_zoom", e.target.checked)} className="accent-[#1E8F8E]" /> Auto-zoom on clicks
               </label>
             </div>
             <Field label="AI instruction" className="mt-3">
@@ -415,7 +415,7 @@ export default function SkillDetail({ params }: { params: Promise<{ id: string }
                       value={r.size}
                       disabled={!editing}
                       onChange={(e) => setFont(key, { size: Number(e.target.value) })}
-                      className="flex-1 accent-[#6d5dfb]"
+                      className="flex-1 accent-[#1E8F8E]"
                     />
                     <span className="w-12 rounded-lg border border-[var(--border)] px-2 py-0.5 text-center text-xs">{r.size}pt</span>
                   </div>
