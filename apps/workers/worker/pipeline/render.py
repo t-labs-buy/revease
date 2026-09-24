@@ -36,6 +36,13 @@ log = logging.getLogger("refract.pipeline.render")
 
 ASPECTS = {"16:9": (1920, 1080), "9:16": (1080, 1920), "1:1": (1080, 1080)}
 FPS = 30
+# Every clip that feeds the final concat MUST share one video time base. The
+# concat demuxer (ffmpeg 4.4 on the deploy host) does not rescale between
+# differing time bases: a 30 fps intro (tbn 15360) followed by 25 fps scenes
+# (tbn 12800) had the scenes play 20% fast, then freeze on their last frame
+# until the outro while the audio kept going. Pinning the mp4 timescale on
+# every clip makes the concat safe even if a clip's frame rate ever differs.
+MP4_TIMESCALE = FPS * 512  # 15360 — what the mp4 muxer picks for 30 fps anyway
 DEFAULT_PACE = 1.0  # global tempo, applies uniformly whether a scene has voice or not
 # Breathing room after each narrated scene: without it, one script's narration ends
 # and the next starts on the very next frame, which reads as rushed. The pause is
@@ -69,9 +76,11 @@ def _bg_source(style: str | None, dims: tuple[int, int]) -> str:
     """lavfi source for the backdrop (gradient or flat color)."""
     w, h = dims
     c0, c1 = BG_PRESETS.get(style or "", ("0b0f1a", "1e2637"))
+    # r=FPS: lavfi sources default to 25 fps, and `overlay` takes its rate from
+    # this (first) input — without it every backed scene came out at 25 fps.
     if not c1:
-        return f"color=c=0x{c0}:s={w}x{h}"
-    return f"gradients=s={w}x{h}:c0=0x{c0}:c1=0x{c1}:x0=0:y0=0:x1={w}:y1={h}"
+        return f"color=c=0x{c0}:s={w}x{h}:r={FPS}"
+    return f"gradients=s={w}x{h}:c0=0x{c0}:c1=0x{c1}:x0=0:y0=0:x1={w}:y1={h}:r={FPS}"
 _FONT_CANDIDATES = [
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
@@ -145,7 +154,7 @@ def _make_still(seg: dict, src_video: Path | None, dims: tuple[int, int], out: P
     frame) is applied first, then the result covers WxH."""
     w, h = dims
     pre = _crop_filter(crop)
-    cover = f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}"
+    cover = _fit_filter(crop, w, h)
     cover = f"{pre},{cover}" if pre else cover
     out.parent.mkdir(parents=True, exist_ok=True)
 
@@ -179,20 +188,113 @@ def _crop_for_segment(crops: list[dict] | None, seg: dict) -> dict | None:
     return None
 
 
-def _remap_zoom_into_crop(zoom: dict | None, crop: dict | None) -> dict | None:
-    """Zoom centers (click positions) are normalized to the ORIGINAL frame; when a
-    crop reframes the scene first, remap the center into cropped coordinates so
-    the zoom still aims at the same on-screen spot."""
-    if not zoom or not zoom.get("enabled") or not crop:
-        return zoom
+def _crop_windows_for_segment(crops: list[dict] | None, seg: dict) -> list[tuple[dict, float, float]]:
+    """Every enabled crop that touches THIS scene, with the part of the scene it
+    covers as (crop, start_s, end_s) relative to the scene's source start. A crop
+    without a window covers the whole scene. Listed in spec order: where windows
+    overlap, the earlier crop wins (see _reframe_graph)."""
+    s0 = int(seg.get("source_start_ms", 0) or 0)
+    s1 = int(seg.get("source_end_ms", 0) or 0)
+    length = max(0.0, (s1 - s0) / 1000.0)
+    out: list[tuple[dict, float, float]] = []
+    for crop in crops or []:
+        if not crop or not crop.get("enabled") or not _crop_filter(crop):
+            continue
+        c0, c1 = int(crop.get("start_ms") or 0), int(crop.get("end_ms") or 0)
+        if c1 > c0:
+            if s1 <= c0 or s0 >= c1:
+                continue
+            a = max(0.0, (c0 - s0) / 1000.0)
+            b = min(length, (c1 - s0) / 1000.0)
+        else:
+            a, b = 0.0, length
+        if b <= a + 0.005:
+            continue
+        out.append((crop, round(a, 3), round(b, 3)))
+    return out
+
+
+def _reframe_graph(windows: list[tuple[dict, float, float]], scene_s: float, w: int, h: int) -> str:
+    """Filter chain that reframes footage exactly as the editor previews it: the
+    picture is uncropped except inside each crop's own time window, where that
+    crop's region is shown whole. With one crop covering the whole scene this is
+    the plain crop+fit chain; otherwise the input is split into one branch per
+    crop and the branches are laid over the uncropped base, each enabled only
+    within its window (earlier crops overlaid last so they win overlaps). The
+    chain ends unlabelled so more filters can follow it with a comma."""
+    if not windows:
+        return _fit_filter(None, w, h)
+    if len(windows) == 1 and windows[0][1] <= 0.005 and windows[0][2] >= scene_s - 0.005:
+        crop = windows[0][0]
+        return f"{_crop_filter(crop)},{_fit_filter(crop, w, h)}"
+    n = len(windows)
+    chains = ["split=" + str(n + 1) + "".join(f"[rf{i}]" for i in range(n + 1))]
+    chains.append(f"[rf0]{_fit_filter(None, w, h)}[rfb]")
+    for i, (crop, _a, _b) in enumerate(windows, start=1):
+        chains.append(f"[rf{i}]{_crop_filter(crop)},{_fit_filter(crop, w, h)}[rfc{i}]")
+    last = "rfb"
+    for i in range(n, 0, -1):
+        _crop, a, b = windows[i - 1]
+        # A window reaching the scene's end stays on past it: frames are
+        # re-timed onto the FPS grid, so the last one can land a hair beyond
+        # `b` and drop out — and the last-frame hold that follows would then
+        # freeze on the UNCROPPED picture instead (a visible blink).
+        if b >= scene_s - 0.005:
+            b = scene_s + 1.0
+        ov = f"[{last}][rfc{i}]overlay=0:0:eof_action=pass:enable='between(t,{a:.3f},{b:.3f})'"
+        if i > 1:
+            chains.append(f"{ov}[rfo{i}]")
+            last = f"rfo{i}"
+        else:
+            chains.append(ov)
+    return ";".join(chains)
+
+
+def _footage_head() -> str:
+    """First filter on every footage clip: a constant FPS stream whose first
+    frame sits exactly at t=0. An input seek (-ss) yields its first frame up to
+    one source frame late, and every later stage (backdrop overlay, element
+    windows, the narration audio) assumes the footage starts at 0. The fps
+    filter's start_time pads by repeating the first frame rather than shifting
+    the footage, so nothing moves in time."""
+    return f"fps={FPS}:start_time=0"
+
+
+def _crop_box(crop: dict) -> tuple[float, float, float, float]:
+    """Clamped normalized (x, y, w, h) of a crop region, inside the frame."""
     cw = min(1.0, max(0.05, float(crop.get("w", 1.0))))
     ch = min(1.0, max(0.05, float(crop.get("h", 1.0))))
     cx = min(max(0.0, float(crop.get("x", 0.0))), 1.0 - cw)
     cy = min(max(0.0, float(crop.get("y", 0.0))), 1.0 - ch)
+    return cx, cy, cw, ch
+
+
+def _fit_filter(crop: dict | None, w: int, h: int) -> str:
+    """How the (possibly cropped) picture fills the WxH frame. A crop region is
+    shown WHOLE: scaled to fit inside the frame and letterboxed/pillarboxed in
+    black, so a wide or tall selection is never cut down again to the output
+    aspect. Without a crop the full source covers the frame as before."""
+    if _crop_filter(crop):
+        return (f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
+                f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black")
+    return f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}"
+
+
+def _remap_zoom_into_crop(zoom: dict | None, crop: dict | None) -> dict | None:
+    """Zoom centers (click positions) are normalized to the ORIGINAL frame; when a
+    crop reframes the scene first, remap the center into output-frame coordinates
+    so the zoom still aims at the same on-screen spot. The region is fitted whole
+    (see _fit_filter): scaled by k = min(1/w, 1/h) and centered, so a source point
+    lands at center + (point - region_center) * k."""
+    if not zoom or not zoom.get("enabled") or not crop:
+        return zoom
+    cx, cy, cw, ch = _crop_box(crop)
+    k = min(1.0 / cw, 1.0 / ch)
+    zx, zy = float(zoom.get("cx", 0.5)), float(zoom.get("cy", 0.5))
     return {
         **zoom,
-        "cx": min(1.0, max(0.0, (float(zoom.get("cx", 0.5)) - cx) / cw)),
-        "cy": min(1.0, max(0.0, (float(zoom.get("cy", 0.5)) - cy) / ch)),
+        "cx": min(1.0, max(0.0, 0.5 + (zx - (cx + cw / 2)) * k)),
+        "cy": min(1.0, max(0.0, 0.5 + (zy - (cy + ch / 2)) * k)),
     }
 
 
@@ -205,10 +307,7 @@ def _crop_filter(crop: dict | None) -> str | None:
     past the edge still shows exactly the selected area."""
     if not crop or not crop.get("enabled"):
         return None
-    cw = min(1.0, max(0.05, float(crop.get("w", 1.0))))
-    ch = min(1.0, max(0.05, float(crop.get("h", 1.0))))
-    cx = min(max(0.0, float(crop.get("x", 0.0))), 1.0 - cw)
-    cy = min(max(0.0, float(crop.get("y", 0.0))), 1.0 - ch)
+    cx, cy, cw, ch = _crop_box(crop)
     if cw >= 0.999 and ch >= 0.999 and cx <= 0.001 and cy <= 0.001:
         return None
     return f"crop=iw*{cw:.4f}:ih*{ch:.4f}:iw*{cx:.4f}:ih*{cy:.4f}"
@@ -322,6 +421,10 @@ def _render_segment(seg, seg_tl, src_video, dims, captions, font, work: Path,
     # into the cropped frame so it still points at the same on-screen spot
     crop_eff = _crop_for_segment(crops, seg)
     zoom_eff = _remap_zoom_into_crop(seg.get("zoom"), crop_eff)
+    # footage is reframed per crop WINDOW (a crop starts and ends exactly where
+    # it was set, mid-scene included); crop_eff still names the scene's first
+    # crop for the still fallback and the zoom-centre remap
+    crop_windows = _crop_windows_for_segment(crops, seg)
 
     def _src_to_clip(ms: float) -> float:
         """Source ms -> clip seconds. The clip is retimed: sped up when the
@@ -361,24 +464,29 @@ def _render_segment(seg, seg_tl, src_video, dims, captions, font, work: Path,
             "ease_s": _zoom_ease_s(zoom_eff),
         })
 
-    clip_hash = _sha("v14", seg.get("step_id"), script, tts_path.name, zoom_eff,
+    # bump the version tag whenever the way a clip is composed changes (fit,
+    # timing, filters…) — the inputs below can't see code changes
+    clip_hash = _sha("v19", seg.get("step_id"), script, tts_path.name, zoom_eff,
                      dims, captions, font, seg.get("screenshot"), seg.get("source_start_ms"),
                      seg.get("source_end_ms"), round(dur_s, 3), use_footage,
-                     crop_eff, elements, str(logo), logo_pos, background, zoom_windows)
+                     crop_eff, crop_windows, elements, str(logo), logo_pos, background, zoom_windows)
     clip = work / f"seg_{seg_tl.index:03d}_{clip_hash}.mp4"
     if clip.exists():
         return clip, False  # reused — unchanged since last render
 
     w, h = dims
     parts: list[str] = []
-    cf = _crop_filter(crop_eff)
     if use_footage:
+        # Seeking to the scene start lands on the next source frame, which can
+        # be a fraction of a frame late; without this the backdrop overlay
+        # (and the clip itself) starts before the footage does and the first
+        # frame flashes backdrop-only. Pin the first frame to t=0.
+        parts.append(_footage_head())
         # crop the ORIGINAL frame first (the frame the crop was drawn on), then
-        # normalize the remaining content to cover WxH — only the selected
-        # region reaches the output, so source padding can't leak back in
-        if cf:
-            parts.append(cf)
-        parts.append(f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}")
+        # fit it into WxH: a crop region is shown whole (letterboxed), the
+        # uncropped source covers the frame. Each crop applies only inside its
+        # own time window, so a scene can start uncropped and crop mid-way.
+        parts.append(_reframe_graph(crop_windows, src_len_s, w, h))
         speed = src_len_s / dur_s
         if speed >= 1.02:
             parts.append(f"setpts=PTS/{speed:.6f}")  # play faster to fit the slot
@@ -492,9 +600,13 @@ def _render_segment(seg, seg_tl, src_video, dims, captions, font, work: Path,
             overlay_opt += f":enable='{enable_expr}'"
         steps.append(f"[{last}][{image_label}]{overlay_opt}[{image_label}out]")
         last = f"{image_label}out"
+    # The overlays above can change the frame rate (they follow their first
+    # input) — re-pin it so every scene clip is FPS regardless of composition.
+    steps.append(f"[{last}]fps={FPS}[vout]")
     fc = ";".join(steps)
-    cmd += ["-filter_complex", fc, "-map", f"[{last}]", "-map", "1:a",
+    cmd += ["-filter_complex", fc, "-map", "[vout]", "-map", "1:a",
             "-c:v", "libx264", "-preset", "veryfast", "-crf", CRF, "-pix_fmt", "yuv420p",
+            "-video_track_timescale", str(MP4_TIMESCALE),
             "-c:a", "aac", "-ar", "24000", "-shortest", "-t", f"{dur_s:.3f}", str(clip)]
     ok = _run(cmd)
     if not ok:
@@ -567,9 +679,20 @@ def _render_titlecard(text, dur_ms, dims, font, work, tag, brand: dict | None = 
         "ffmpeg", "-y", *inputs,
         "-filter_complex", fc, "-map", "[v]", "-map", "1:a",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", CRF, "-pix_fmt", "yuv420p",
+        "-video_track_timescale", str(MP4_TIMESCALE),
         "-c:a", "aac", "-ar", "24000", "-t", f"{dur_s:.3f}", str(clip),
     ])
     return clip
+
+
+def _has_audio(path: Path) -> bool:
+    """True when the file carries at least one audio stream."""
+    proc = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=index",
+         "-of", "csv=p=0", str(path)],
+        capture_output=True, text=True,
+    )
+    return proc.returncode == 0 and bool(proc.stdout.strip())
 
 
 def _render_media_card(media_key: str, media_type: str, duration_ms: int, dims: tuple[int, int], work: Path, tag: str) -> tuple[Path, int]:
@@ -580,17 +703,25 @@ def _render_media_card(media_key: str, media_type: str, duration_ms: int, dims: 
     actual_ms = _probe_duration_ms(source) if media_type == "video" else None
     dur_ms = max(500, actual_ms or duration_ms)
     w, h = dims
-    chash = _sha(tag, media_key, media_type, dur_ms, dims)
+    # A video card keeps its own soundtrack; an image (or a silent video) gets
+    # a silent track so the concat always sees an audio stream.
+    keep_audio = media_type == "video" and _has_audio(source)
+    chash = _sha("v2", tag, media_key, media_type, dur_ms, dims, keep_audio)
     clip = work / f"{tag}_{chash}.mp4"
     if clip.exists():
         return clip, dur_ms
     cover = f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},fps={FPS},setsar=1"
     inputs = (["-loop", "1", "-i", str(source)] if media_type == "image" else ["-i", str(source)])
-    inputs += ["-f", "lavfi", "-i", "anullsrc=r=24000:cl=stereo"]
+    if keep_audio:
+        audio_map = ["-map", "0:a:0"]
+    else:
+        inputs += ["-f", "lavfi", "-i", "anullsrc=r=24000:cl=stereo"]
+        audio_map = ["-map", "1:a:0"]
     ok = _run([
-        "ffmpeg", "-y", *inputs, "-vf", cover, "-map", "0:v:0", "-map", "1:a:0",
+        "ffmpeg", "-y", *inputs, "-vf", cover, "-map", "0:v:0", *audio_map,
         "-c:v", "libx264", "-preset", "veryfast", "-crf", CRF, "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-ar", "24000", "-t", f"{dur_ms / 1000:.3f}", str(clip),
+        "-video_track_timescale", str(MP4_TIMESCALE),
+        "-c:a", "aac", "-ar", "24000", "-ac", "2", "-t", f"{dur_ms / 1000:.3f}", str(clip),
     ])
     if not ok:
         raise RuntimeError(f"media card render failed: {media_key}")

@@ -32,6 +32,12 @@ class Settings(BaseSettings):
     anthropic_model: str = "claude-opus-4-8"
     openrouter_api_key: str = ""
     openrouter_model: str = "anthropic/claude-opus-4.1"
+    # OpenRouter *management* key (not a regular API key): lets the admin Usage
+    # page read total AI spend for a date range from the analytics API.
+    openrouter_management_key: str = ""
+    # Name of the OpenRouter API key whose spend to report (as shown on
+    # openrouter.ai/settings/keys). Empty = every key in the workspace.
+    openrouter_cost_key: str = ""
 
     # --- TTS voice (keyless local). `kokoro` = high-quality neural (default),
     #     `piper` = lighter fallback, `openai` needs a key; else silent clips. ---

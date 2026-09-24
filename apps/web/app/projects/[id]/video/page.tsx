@@ -5,6 +5,7 @@ import Link from "next/link";
 import {
   activeCrop,
   activeTimelineZoom,
+  cropActive,
   cropList,
   type ZoomRegion,
   downloadMedia,
@@ -275,9 +276,21 @@ export default function VideoEditor({
   // audibly right at every freeze -> resume transition.
   const conductorResumingRef = useRef(false);
   const activeRef = useRef<HTMLDivElement>(null);
-  const frameRef = useRef<HTMLDivElement>(null);
-  const [frameSize, setFrameSize] = useState({ w: 0, h: 0 });
+  const frameRef = useRef<HTMLDivElement>(null); // whole preview (fullscreen target)
+  // The space the preview may occupy. The video box is sized in JS to fit it at
+  // the source's aspect ratio (minus the backdrop margin), so the box the crop /
+  // element overlay measures against is EXACTLY the box the video fills. CSS
+  // alone let the video overflow a short preview area (clipped top and bottom),
+  // which silently skewed every crop and element coordinate against the render.
+  const stageRef = useRef<HTMLDivElement>(null);
+  const [stageSize, setStageSize] = useState({ w: 0, h: 0 });
+  const [videoAspect, setVideoAspect] = useState(16 / 9);
   const [cur, setCur] = useState(0);
+  // Scene the AI voice is currently speaking, set by the conductor from the
+  // voice's own clock. The Script highlight follows this while the voice plays:
+  // the video's clock (`cur`) only updates a few times a second and stalls
+  // while a scene holds its last frame, so it visibly trails the narration.
+  const [voiceSegId, setVoiceSegId] = useState<string | null>(null);
   const [dur, setDur] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [showRender, setShowRender] = useState(false);
@@ -480,9 +493,14 @@ export default function VideoEditor({
     if (!video || !audio) return;
     let raf = 0;
     let frozenAt = -1; // index of the segment currently holding its last frame
+    let spokenId: string | null = null;
 
     const tick = () => {
       const seg = segmentAtOutMs(audio.currentTime * 1000, liveTimeline);
+      if (seg && seg.step_id !== spokenId) {
+        spokenId = seg.step_id;
+        setVoiceSegId(spokenId);
+      }
       if (seg) {
         const srcLen = seg.source_end_ms - seg.source_start_ms;
         const segRate = scenePlaybackRate(seg); // clamped: never below 1x, see scenePlaybackRate
@@ -518,7 +536,10 @@ export default function VideoEditor({
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
+    return () => {
+      cancelAnimationFrame(raf);
+      setVoiceSegId(null); // paused/stopped: the highlight follows the playhead again
+    };
   }, [playing, aiVoiceActive, liveTimeline, rate]);
 
   useEffect(() => {
@@ -540,11 +561,11 @@ export default function VideoEditor({
         setSavedSpec(v?.edit_spec ?? null);
         setSource(v?.source_video ?? null);
         baseline.current = v?.edit_spec ?? null;
-        // open on the last generated video (play / download); "back to
-        // preview" returns to the editor
+        // remember the last generated video (the header button opens it) but
+        // always open on the live preview so editing starts immediately
         const last = v?.latest_render ?? null;
         setRender(last);
-        setShowRender(!!last?.output_key);
+        setShowRender(false);
       })
       .catch((e) => setError(String(e)));
   }, [id]);
@@ -819,15 +840,29 @@ export default function VideoEditor({
   }, []);
 
   useEffect(() => {
-    const el = frameRef.current;
+    const el = stageRef.current;
     if (!el) return;
     const update = () =>
-      setFrameSize({ w: el.clientWidth, h: el.clientHeight });
+      setStageSize({ w: el.clientWidth, h: el.clientHeight });
     update();
     const ro = new ResizeObserver(update);
     ro.observe(el);
     return () => ro.disconnect();
   }, [source, showRender]);
+
+  // Largest box of the video's aspect that fits the stage. With a backdrop on,
+  // the outer frame pads 1.3% / 2.6% — percentage padding is relative to the
+  // containing block's WIDTH, i.e. the stage width — so reserve that first.
+  const frameSize = useMemo(() => {
+    let { w, h } = stageSize;
+    if (!w || !h) return { w: 0, h: 0 };
+    if (spec?.background?.enabled) {
+      w -= 2 * 0.026 * stageSize.w;
+      h -= 2 * 0.013 * stageSize.w;
+    }
+    const fitW = Math.max(0, Math.min(w, h * videoAspect));
+    return { w: Math.floor(fitW), h: Math.floor(fitW / videoAspect) };
+  }, [stageSize, videoAspect, spec?.background?.enabled]);
 
   const addElement = useCallback(
     (type: EditElement["type"], mediaKey?: string) => {
@@ -1193,13 +1228,17 @@ export default function VideoEditor({
     void frameRef.current?.requestFullscreen?.();
   }
 
-  const activeIdx = spec
-    ? spec.segments.findIndex(
-      (s) =>
-        cur * 1000 >= s.source_start_ms &&
-        cur * 1000 < Math.max(s.source_end_ms, s.source_start_ms + 300),
-    )
-    : -1;
+  const voiceIdx =
+    spec && voiceSegId ? spec.segments.findIndex((s) => s.step_id === voiceSegId) : -1;
+  const activeIdx = !spec
+    ? -1
+    : voiceIdx >= 0
+      ? voiceIdx // the voice is speaking this scene right now
+      : spec.segments.findIndex(
+        (s) =>
+          cur * 1000 >= s.source_start_ms &&
+          cur * 1000 < Math.max(s.source_end_ms, s.source_start_ms + 300),
+      );
 
   useEffect(() => {
     if (playing && tab === "Script")
@@ -1241,15 +1280,6 @@ export default function VideoEditor({
       : null;
   const zoomOn = !!zoomSrc;
   const zoomSpeed = zoomSrc?.speed ?? 3;
-  const zoomStyle: React.CSSProperties = {
-    transform: zoomOn ? `scale(${zoomSrc!.scale})` : "scale(1)",
-    transformOrigin: zoomSrc
-      ? `${zoomSrc.cx * 100}% ${zoomSrc.cy * 100}%`
-      : activeSeg
-        ? `${activeSeg.zoom.cx * 100}% ${activeSeg.zoom.cy * 100}%`
-        : "center",
-    transition: `transform ${((6 - zoomSpeed) * 0.3).toFixed(2)}s ease`,
-  };
   const captionText = spec.captions.enabled && activeSeg ? eff(activeSeg) : "";
 
   // Backdrop behind the recording (inset), mirrored by the renderer.
@@ -1269,22 +1299,69 @@ export default function VideoEditor({
   const cx = Math.min(Math.max(0, cr?.x ?? 0), 1 - cw);
   const cy = Math.min(Math.max(0, cr?.y ?? 0), 1 - ch);
   const cropOn = !!cr && (cw < 0.999 || ch < 0.999 || cx > 0.001 || cy > 0.001);
-  // Uniform cover-scale about the region center, then shift that center to the
-  // middle of the frame — same "crop, then cover" the render does, so the
-  // preview shows exactly the selected content with no stretch and no padding.
-  const cropScale = Math.max(1 / cw, 1 / ch);
-  // While actively editing a crop region, show the full raw frame instead of
-  // the reframed preview so the box can be dragged against the whole source.
-  const cropStyle: React.CSSProperties =
-    cropOn && activeTool !== "crop"
-      ? {
-        transform: `translate(${((0.5 - (cx + cw / 2)) * 100).toFixed(2)}%, ${(
-          (0.5 - (cy + ch / 2)) *
-          100
-        ).toFixed(2)}%) scale(${cropScale.toFixed(4)})`,
-        transformOrigin: `${((cx + cw / 2) * 100).toFixed(2)}% ${((cy + ch / 2) * 100).toFixed(2)}%`,
-      }
-      : {};
+  // Show the region WHOLE: uniform scale so it fits inside the frame (letterboxed
+  // in black, same as the render), about the region center, then shift that
+  // center to the middle of the frame. Everything outside the region is clipped.
+  const cropScale = Math.min(1 / cw, 1 / ch);
+  // While actively editing a crop region AND the playhead is inside it, show the
+  // full raw frame instead of the reframed preview so the box can be dragged
+  // against the whole source. Outside its window the normal preview applies.
+  // The region being edited follows the playhead: the selected one while the
+  // playhead is inside it, else whichever region is in effect there — so every
+  // crop gets the same box-on-raw-frame view, not just the last one clicked.
+  const atMs = cur * 1000;
+  const firstActiveCrop = crops.findIndex((c) => cropActive(c, atMs));
+  const cropEditIdx =
+    crops[cropSel] && cropActive(crops[cropSel], atMs)
+      ? cropSel
+      : firstActiveCrop >= 0
+        ? firstActiveCrop
+        : cropSel;
+  const editingCropHere =
+    activeTool === "crop" && !!crops[cropEditIdx] && cropActive(crops[cropEditIdx], atMs);
+  const cropReframed = cropOn && !editingCropHere;
+  // Reframe geometry in plain pixels — no clip-path / CSS transforms on the
+  // video (those left black compositor artefacts along the window's edges): a
+  // window the size of the fitted region, centred in the box, containing the
+  // video scaled by cropScale and offset so the region's top-left sits at the
+  // window's top-left. When not reframed the window IS the box.
+  const reframe = (() => {
+    const { w: fw, h: fh } = frameSize;
+    const full = { left: 0, top: 0, width: fw, height: fh };
+    if (!cropReframed || !fw || !fh) return { win: full, vid: full };
+    const k = cropScale;
+    const ww = cw * fw * k;
+    const wh = ch * fh * k;
+    return {
+      win: { left: (fw - ww) / 2, top: (fh - wh) / 2, width: ww, height: wh },
+      vid: { left: -cx * fw * k, top: -cy * fh * k, width: fw * k, height: fh * k },
+    };
+  })();
+  // Zoom, applied to the reframe window exactly as the render applies it to
+  // the output frame: origin-anchored at the aim point (smoothzoom.py). Aim
+  // points are stored against the ORIGINAL frame; under a crop reframe the
+  // render maps them into the fitted region and clamps them inside the frame
+  // (render.py _remap_zoom_into_crop) — mirror that, else a point outside the
+  // region drags a different part of the recording into view than the video.
+  const zoomStyle: React.CSSProperties = (() => {
+    const aim = zoomSrc ?? activeSeg?.zoom ?? null;
+    const { w: fw, h: fh } = frameSize;
+    if (!aim || !fw || !fh) {
+      return { transform: "scale(1)", transformOrigin: "center" };
+    }
+    let ax = aim.cx;
+    let ay = aim.cy;
+    if (cropReframed) {
+      const k = cropScale;
+      ax = Math.min(1, Math.max(0, 0.5 + (aim.cx - (cx + cw / 2)) * k));
+      ay = Math.min(1, Math.max(0, 0.5 + (aim.cy - (cy + ch / 2)) * k));
+    }
+    return {
+      transform: zoomOn ? `scale(${zoomSrc!.scale})` : "scale(1)",
+      transformOrigin: `${ax * fw - reframe.win.left}px ${ay * fh - reframe.win.top}px`,
+      transition: `transform ${((6 - zoomSpeed) * 0.3).toFixed(2)}s ease`,
+    };
+  })();
 
   const totalMs =
     (dur ? dur * 1000 : 0) ||
@@ -1314,8 +1391,9 @@ export default function VideoEditor({
         <div className="flex min-w-0 items-center gap-3">
           <Link
             href={`/projects/${id}`}
-            className="btn btn-ghost btn-sm -ml-1"
-            title="Back"
+            className="btn btn-ghost -ml-3 flex h-12 w-12 items-center justify-center text-2xl leading-none"
+            title="Back to project"
+            aria-label="Back to project"
           >
             ←
           </Link>
@@ -1757,30 +1835,40 @@ export default function VideoEditor({
           ) : (
             <div className="mx-auto flex min-h-0 w-full max-w-4xl flex-1 flex-col">
               {/* preview */}
-              <div className="flex min-h-0 flex-1 items-center justify-center">
+              <div ref={stageRef} className="flex min-h-0 flex-1 items-center justify-center">
                 {source ? (
                   <div
                     ref={frameRef}
-                    className="relative flex h-full max-h-full items-center justify-center overflow-hidden rounded-2xl shadow-lg"
+                    className="relative flex items-center justify-center overflow-hidden rounded-2xl shadow-lg"
                     style={{
                       background: bgOn ? bgCss : "#000",
                       padding: bgOn ? "1.3% 2.6%" : undefined,
                     }}
                   >
+                    {/* the video box: explicit size (see frameSize) so the overlay's
+                        0..1 coordinates map onto the video exactly as the render reads them */}
                     <div
-                      className={`relative flex max-h-full min-h-0 items-center justify-center overflow-hidden ${bgOn ? "rounded-xl shadow-lg" : ""}`}
+                      className={`relative overflow-hidden ${bgOn ? "rounded-xl shadow-lg" : ""}`}
+                      style={{
+                        width: frameSize.w || undefined,
+                        height: frameSize.h || undefined,
+                        // letterbox behind a reframed crop is black, like the render
+                        background: cropReframed ? "#000" : undefined,
+                      }}
                     >
-                      <div
-                        className="flex max-h-full min-h-0 items-center justify-center"
-                        style={cropStyle}
-                      >
+                      {/* the zoom scales the whole window (region + its clip),
+                          like the render warps the whole output frame */}
+                      <div className="absolute overflow-hidden" style={{ ...reframe.win, ...zoomStyle }}>
                         <video
                           ref={videoRef}
                           src={mediaUrl(source)}
-                          className="max-h-full w-auto"
-                          style={zoomStyle}
+                          className="absolute max-w-none"
+                          style={reframe.vid}
                           onLoadedMetadata={(e) => {
                             resolveDuration(e.currentTarget, setDur);
+                            const v = e.currentTarget;
+                            if (v.videoWidth && v.videoHeight)
+                              setVideoAspect(v.videoWidth / v.videoHeight);
                             e.currentTarget.muted = wantAiVoice;
                             e.currentTarget.playbackRate = rate;
                           }}
@@ -1888,6 +1976,21 @@ export default function VideoEditor({
                           }}
                         />
                       </div>
+                      {/* inside the video box so 0..1 coordinates map onto the
+                          video itself, exactly as the renderer reads them */}
+                      <PreviewOverlay
+                        frame={frameSize}
+                        tab={tab}
+                        cropEditing={activeTool === "crop"}
+                        crops={crops}
+                        cropSel={cropEditIdx}
+                        onPatchCrop={patchCrop}
+                        spec={spec}
+                        setSpec={setSpec}
+                        selId={selEl}
+                        setSelId={setSelEl}
+                        curMs={cur * 1000}
+                      />
                     </div>
                     <audio
                       ref={audioRef}
@@ -1901,19 +2004,6 @@ export default function VideoEditor({
                         </span>
                       </div>
                     )}
-                    <PreviewOverlay
-                      frame={frameSize}
-                      tab={tab}
-                      cropEditing={activeTool === "crop"}
-                      crops={crops}
-                      cropSel={cropSel}
-                      onPatchCrop={patchCrop}
-                      spec={spec}
-                      setSpec={setSpec}
-                      selId={selEl}
-                      setSelId={setSelEl}
-                      curMs={cur * 1000}
-                    />
                   </div>
                 ) : (
                   <div className="flex aspect-video w-full items-center justify-center rounded-2xl border border-[var(--border)] bg-[var(--card)] text-sm text-[var(--text-3)]">
@@ -2133,7 +2223,7 @@ export default function VideoEditor({
           cur={cur}
           dur={dur}
           crops={crops}
-          cropSel={cropSel}
+          cropSel={cropEditIdx}
           setCropSel={setCropSel}
           seekTo={seekTo}
           onPatchCrop={patchCrop}
@@ -4167,6 +4257,9 @@ function CropTrack({
   ) => {
     e.stopPropagation();
     setCropSel(idx);
+    // The preview only shows a region's box while the playhead is inside it,
+    // so picking a block from the track also moves the playhead into it.
+    if (!cropActive(crops[idx], cur * 1000)) seekTo((crops[idx].start_ms ?? 0) / 1000);
     dragRef.current = {
       mode,
       idx,
