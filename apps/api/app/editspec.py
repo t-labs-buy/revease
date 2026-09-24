@@ -82,8 +82,10 @@ def _zoom_from_bbox(bbox: Any, vw: int, vh: int) -> dict[str, Any]:
     x, y, w, h = bbox
     cx = min(1.0, max(0.0, (x + w / 2) / vw))
     cy = min(1.0, max(0.0, (y + h / 2) / vh))
+    # Off by default: the click position is kept as the zoom target so the user
+    # can switch it on per scene in the Zoom tab and it already aims right.
     # auto: derived from the click — user-tweakable in the Zoom tab (drops the flag)
-    return {"enabled": True, "scale": 1.6, "cx": round(cx, 4), "cy": round(cy, 4), "speed": 3, "auto": True}
+    return {"enabled": False, "scale": 1.6, "cx": round(cx, 4), "cy": round(cy, 4), "speed": 3, "auto": True}
 
 
 def build_edit_spec(graph_json: dict[str, Any], viewport: dict[str, int] | None) -> dict[str, Any]:
@@ -123,12 +125,14 @@ def build_edit_spec(graph_json: dict[str, Any], viewport: dict[str, int] | None)
         "title": graph_json.get("title", "Workflow"),
         "voice": {"voice_id": "af_sarah", "speed": 1.0, "use_original": False},
         "aspect": "16:9",
-        "intro": {"enabled": True, "title": graph_json.get("title", "Workflow"), "duration_ms": 2000},
-        "outro": {"enabled": True, "title": "Thanks for watching", "duration_ms": 1500},
+        # intro/outro cards and automatic zooms are opt-in: a new project renders
+        # the plain recording until the user turns them on in the editor.
+        "intro": {"enabled": False, "title": graph_json.get("title", "Workflow"), "duration_ms": 2000},
+        "outro": {"enabled": False, "title": "Thanks for watching", "duration_ms": 1500},
         "captions": {"enabled": True},
         # auto-zoom toward mouse/cursor activity (clicks) per scene at render time,
-        # for scenes without an explicit click/user zoom. On by default.
-        "motion_zoom": True,
+        # for scenes without an explicit click/user zoom. Off by default.
+        "motion_zoom": False,
         # pace: uniform tempo (1.0–1.5) applied to every scene, narrated or
         # silent alike. 1.0 = original speed, full source length kept.
         "pace": 1.0,

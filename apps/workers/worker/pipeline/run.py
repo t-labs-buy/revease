@@ -513,6 +513,11 @@ def _precompute_zooms(db, sess: CaptureSession, version: int) -> None:
         db.commit()
 
     spec = vp.edit_spec_json
+    # Auto zooms are opt-in (spec.motion_zoom, off for new projects): only
+    # materialize them when the user has the toggle on — same gate the render uses.
+    if not spec.get("motion_zoom", True):
+        log.info("zoom precompute: motion_zoom off; no auto zooms added")
+        return
     clicks = _click_points(db, sess.id)
     vdims = probe_dims(video_path)
     zoomed = 0

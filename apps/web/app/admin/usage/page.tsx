@@ -6,7 +6,14 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { getUsageSummary, listUsageEvents, type UsageEventRow, type UsageSummary } from "@/lib/api";
+import {
+  getUsageCost,
+  getUsageSummary,
+  listUsageEvents,
+  type UsageCost,
+  type UsageEventRow,
+  type UsageSummary,
+} from "@/lib/api";
 import { useAuth } from "@/contexts/AuthContext";
 import { EmptyState } from "@/components/ui";
 
@@ -62,17 +69,50 @@ const PAGE_SIZE = 10;
 const IST_OFFSET_MS = 5.5 * 3600 * 1000;
 const istToday = () => iso(new Date(Date.now() + IST_OFFSET_MS));
 
-function monthStart(): string {
-  const now = new Date(Date.now() + IST_OFFSET_MS);
-  return iso(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)));
-}
+/** "2026-09-22" shifted by n calendar months (day overflow rolls forward). */
+const shiftMonths = (d: string, n: number): string => {
+  const [y, m, day] = d.split("-").map(Number);
+  return iso(new Date(Date.UTC(y, m - 1 + n, day)));
+};
+const minDate = (a: string, b: string) => (a < b ? a : b);
+const maxDate = (a: string, b: string) => (a > b ? a : b);
+
+// Quick periods: today (0), or the last N months up to today. A custom range is
+// capped at the longest of these (the AI-cost source also rejects ranges over a year).
+const PRESETS = [0, 1, 3, 6] as const;
+const presetLabel = (months: number) => (months === 0 ? "Today" : `${months}M`);
+const presetTitle = (months: number) =>
+  months === 0 ? "Today only" : `Last ${months} month${months > 1 ? "s" : ""}`;
+const MAX_RANGE_MONTHS = 6;
+const presetFrom = (months: number) => shiftMonths(istToday(), -months);
 
 export default function AdminUsagePage() {
   const { isAdmin, loading } = useAuth();
   const router = useRouter();
-  const [from, setFrom] = useState(monthStart());
+  const [from, setFrom] = useState(presetFrom(1));
   const [to, setTo] = useState(istToday());
+  // Custom dates only query once both are picked.
+  const rangeReady = !!from && !!to;
+  const activePreset = PRESETS.find((n) => to === istToday() && from === presetFrom(n));
+
+  const pickPreset = (months: number) => {
+    setFrom(presetFrom(months));
+    setTo(istToday());
+  };
+  // Typed dates bypass the inputs' min/max, so keep the pair inside the cap here.
+  const pickFrom = (v: string) => {
+    setFrom(v);
+    if (v && to)
+      setTo(minDate(minDate(maxDate(to, v), shiftMonths(v, MAX_RANGE_MONTHS)), istToday()));
+  };
+  const pickTo = (v: string) => {
+    const t = v ? minDate(v, istToday()) : v;
+    setTo(t);
+    if (t && from) setFrom(maxDate(minDate(from, t), shiftMonths(t, -MAX_RANGE_MONTHS)));
+  };
   const [summary, setSummary] = useState<UsageSummary | null>(null);
+  // null = not configured on the server; undefined = still loading / failed
+  const [cost, setCost] = useState<UsageCost | null | undefined>(undefined);
   const [events, setEvents] = useState<UsageEventRow[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(0); // zero-based
@@ -86,10 +126,10 @@ export default function AdminUsagePage() {
   useEffect(() => setPage(0), [from, to]);
 
   useEffect(() => {
-    if (!isAdmin) return;
+    if (!isAdmin || !rangeReady) return;
     Promise.all([
-      getUsageSummary(from || undefined, to || undefined),
-      listUsageEvents(from || undefined, to || undefined, PAGE_SIZE, page * PAGE_SIZE),
+      getUsageSummary(from, to),
+      listUsageEvents(from, to, PAGE_SIZE, page * PAGE_SIZE),
     ])
       .then(([s, ev]) => {
         setSummary(s);
@@ -98,11 +138,20 @@ export default function AdminUsagePage() {
         setError(null);
       })
       .catch((e) => setError(String(e)));
-  }, [isAdmin, from, to, page]);
+  }, [isAdmin, rangeReady, from, to, page]);
+
+  // AI cost comes from OpenRouter, a separate (slower, optional) source — load it
+  // on its own so it never blocks or breaks the local totals.
+  useEffect(() => {
+    if (!isAdmin || !rangeReady) return;
+    setCost(undefined);
+    getUsageCost(from, to)
+      .then(setCost)
+      .catch((e) => setError(String(e)));
+  }, [isAdmin, rangeReady, from, to]);
 
   if (loading || !isAdmin) return null;
 
-  const allTime = !from && !to;
   const tiles = [
     {
       label: "Videos generated",
@@ -122,6 +171,12 @@ export default function AdminUsagePage() {
       icon: "⬆️",
       grad: "from-[#f97316] to-[#16283C]",
     },
+    {
+      label: cost === null ? "AI cost (not configured)" : "AI cost",
+      value: cost ? `$${cost.cost_usd.toFixed(2)}` : undefined,
+      icon: "💸",
+      grad: "from-[#10b981] to-[#14b8a6]",
+    },
   ];
 
   return (
@@ -131,15 +186,31 @@ export default function AdminUsagePage() {
         <div>
           <h1 className="text-3xl font-semibold tracking-tight text-[var(--text)]">Usage</h1>
           <p className="mt-1.5 text-[15px] text-[var(--text-2)]">
-            {allTime ? "Totals across all users, all time." : "Totals across all users for the selected period."}
+            Totals across all users for the selected period (up to {MAX_RANGE_MONTHS} months).
           </p>
         </div>
         <div className="flex items-center gap-2 rounded-2xl border border-[var(--border)] bg-[var(--card)] p-1.5">
+          {PRESETS.map((n) => (
+            <button
+              key={n}
+              onClick={() => pickPreset(n)}
+              title={presetTitle(n)}
+              className={`rounded-xl px-3 py-1.5 text-sm font-medium transition-colors ${
+                activePreset === n
+                  ? "bg-[#1E8F8E] text-white"
+                  : "text-[var(--text-2)] hover:bg-[var(--hover)] hover:text-[var(--text)]"
+              }`}
+            >
+              {presetLabel(n)}
+            </button>
+          ))}
+          <span className="mx-1 h-5 w-px bg-[var(--border)]" />
           <input
             type="date"
             value={from}
-            max={to || undefined}
-            onChange={(e) => setFrom(e.target.value)}
+            min={to ? shiftMonths(to, -MAX_RANGE_MONTHS) : undefined}
+            max={to || istToday()}
+            onChange={(e) => pickFrom(e.target.value)}
             aria-label="From date"
             className="rounded-xl border-0 bg-transparent px-2.5 py-1.5 text-sm text-[var(--text)] outline-none"
           />
@@ -148,24 +219,11 @@ export default function AdminUsagePage() {
             type="date"
             value={to}
             min={from || undefined}
-            onChange={(e) => setTo(e.target.value)}
+            max={from ? minDate(shiftMonths(from, MAX_RANGE_MONTHS), istToday()) : istToday()}
+            onChange={(e) => pickTo(e.target.value)}
             aria-label="To date"
             className="rounded-xl border-0 bg-transparent px-2.5 py-1.5 text-sm text-[var(--text)] outline-none"
           />
-          <button
-            onClick={() => {
-              setFrom("");
-              setTo("");
-            }}
-            title="Show totals across all time"
-            className={`rounded-xl px-3 py-1.5 text-sm font-medium transition-colors ${
-              allTime
-                ? "bg-[#1E8F8E] text-white"
-                : "text-[var(--text-2)] hover:bg-[var(--hover)] hover:text-[var(--text)]"
-            }`}
-          >
-            All time
-          </button>
         </div>
       </div>
 
@@ -176,7 +234,7 @@ export default function AdminUsagePage() {
       )}
 
       {/* totals */}
-      <div className="mt-8 grid gap-5 sm:grid-cols-2 lg:max-w-4xl lg:grid-cols-3">
+      <div className="mt-8 grid gap-5 sm:grid-cols-2 lg:max-w-5xl lg:grid-cols-4">
         {tiles.map((t) => (
           <div key={t.label} className="card flex items-center gap-4 p-6">
             <span
