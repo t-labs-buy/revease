@@ -12,6 +12,7 @@ import {
   getVideo,
   mediaUrl,
   patchVideo,
+  reprocessSession,
   setKeepRanges,
   type CropRegion,
   type EditSpec,
@@ -76,6 +77,18 @@ function PrepareInner({ params }: { params: Promise<{ id: string }> }) {
     detail?.assets.find((a) => a.kind === "proxy") ?? detail?.assets.find((a) => a.kind === "raw_video");
   const pct = graph ? 100 : Math.round((status?.progress ?? 0) * 100);
   const processed = !!graph;
+  const failed = !processed && status?.status === "error";
+  const [retrying, setRetrying] = useState(false);
+  async function retryProcessing() {
+    setRetrying(true);
+    try {
+      await reprocessSession(sid);
+    } catch (e) {
+      setError(String(e instanceof Error ? e.message : e));
+    } finally {
+      setRetrying(false);
+    }
+  }
 
   async function generate() {
     if (genRef.current) return;
@@ -259,25 +272,36 @@ function PrepareInner({ params }: { params: Promise<{ id: string }> }) {
               ))}
             </dl>
 
+            {/* Generation needs the finished workflow, so the button stays off until
+                processing completes — clicking earlier used to wait silently. */}
             <button
               onClick={generate}
-              disabled={generating || !videoAsset}
-              className="btn btn-primary mt-4 w-full bg-gradient-to-r from-[#1E8F8E] to-[var(--brand-2)] py-3 text-[15px]"
+              disabled={generating || !videoAsset || !processed}
+              title={!processed ? "Available once processing finishes" : undefined}
+              className="btn btn-primary mt-4 w-full bg-gradient-to-r from-[#1E8F8E] to-[var(--brand-2)] py-3 text-[15px] disabled:cursor-not-allowed"
             >
               {generating ? (
                 <>
-                  <Spinner /> Generating… {pct}%
+                  <Spinner /> Opening…
                 </>
               ) : (
                 "✦ Generate AI content"
               )}
             </button>
-
-            {generating && !processed && (
-              <p className="mt-2 text-center text-[12px] text-[var(--text-3)]">
-                We&apos;ll open the {wantDoc ? "document" : "editor"} as soon as processing finishes.
+            {!processed && !failed && (
+              <p className="mt-2 text-center text-[12.5px] text-[var(--text-3)]">
+                Available once processing finishes{pct ? ` · ${pct}% done` : ""}. You can leave this page meanwhile.
               </p>
             )}
+            {failed && (
+              <div className="mt-3 rounded-lg border border-[#D9534F]/30 bg-[#D9534F]/10 px-3 py-2.5 text-[13px] text-[var(--error)]">
+                Processing failed, so there is nothing to generate from yet.{" "}
+                <button onClick={() => void retryProcessing()} disabled={retrying} className="font-semibold underline">
+                  {retrying ? "Retrying…" : "Retry processing"}
+                </button>
+              </div>
+            )}
+
           </section>
 
           <ProcessingPanel status={status} ready={processed} />
