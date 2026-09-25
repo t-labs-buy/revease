@@ -103,20 +103,11 @@ def _parse_array(content: str, n: int) -> list[str]:
 
 
 def _claude_align(steps: list[dict], plan_items: list[dict], transcript: str) -> list[str]:
-    import anthropic
+    from app.llm import complete
 
-    settings = get_settings()
-    client = anthropic.Anthropic(api_key=settings.anthropic_api_key, timeout=120)
     prompt = _align_prompt(steps, plan_items, transcript)
     for attempt in range(2):
-        msg = client.messages.create(
-            model=settings.anthropic_model,
-            max_tokens=min(16000, 2000 + len(_words(transcript)) * 3),
-            thinking={"type": "adaptive"},
-            system=ALIGN_SYSTEM,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        text = "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
+        text = complete(ALIGN_SYSTEM, prompt, max_tokens=min(16000, 2000 + len(_words(transcript)) * 3))
         segments = _parse_array(text, len(steps))
         if _is_verbatim_partition(segments, transcript):
             return [s.strip() for s in segments]
@@ -140,7 +131,7 @@ def narrate_steps(steps: list[dict], plan_items: list[dict], transcript: str) ->
     if not transcript:
         return [""] * n
     settings = get_settings()
-    if settings.anthropic_api_key:
+    if settings.anthropic_api_key or settings.openrouter_api_key:
         try:
             return _claude_align(steps, plan_items, transcript)
         except Exception as e:

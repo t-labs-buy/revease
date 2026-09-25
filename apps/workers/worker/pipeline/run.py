@@ -279,19 +279,21 @@ def run_pipeline(session_id: str, token: str | None = None) -> dict[str, Any]:
         except Exception:
             log.exception("zoom precompute failed; render-time fallback still applies")
 
-        # Give the project a meaningful name from the transcript (replaces the
-        # placeholder "Screen Recording · …" / uploaded file name). Skipped when
-        # there's no speech to title from.
+        # Give the project a meaningful name from what the recording shows (replaces
+        # the placeholder "Screen Recording · …" / uploaded file name): the task the
+        # speaker states, else the dominant topic, else the screens the steps
+        # touched. An empty answer keeps the current name.
         try:
             from app.models import Project
-            from app.rewrite import generate_title
+            from app.titles import is_placeholder_name, suggest_title
 
-            new_name = generate_title(transcript.text)
-            if new_name:
-                proj = db.get(Project, sess.project_id)
-                if proj is not None:
-                    proj.name = new_name
-                    db.commit()
+            new_name, source = suggest_title(transcript.text, graph.get("steps", []))
+            proj = db.get(Project, sess.project_id)
+            # An AI title may replace any name; the offline heuristic only replaces
+            # an automatic placeholder, so it never downgrades a good name.
+            if new_name and proj is not None and (source == "llm" or is_placeholder_name(proj.name)):
+                proj.name = new_name
+                db.commit()
         except Exception:
             log.warning("project auto-title failed; keeping current name")
 

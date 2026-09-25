@@ -5,6 +5,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Repo root = apps/api/app/config.py -> up 3.
@@ -156,6 +157,17 @@ class Settings(BaseSettings):
     # Static key an external app sends as `X-Report-Key` to pull the usage
     # report (GET /admin/usage/report). Empty disables the endpoint.
     usage_report_key: str = ""
+
+    @model_validator(mode="after")
+    def _route_openrouter_key(self) -> "Settings":
+        """An OpenRouter key (sk-or-…) put in REFRACT_ANTHROPIC_API_KEY makes every
+        Anthropic call fail with 401 and every AI feature silently fall back to
+        its offline heuristic. Treat it as the OpenRouter key it is."""
+        if self.anthropic_api_key.startswith("sk-or-"):
+            if not self.openrouter_api_key:
+                self.openrouter_api_key = self.anthropic_api_key
+            self.anthropic_api_key = ""
+        return self
 
     def resolved_database_url(self) -> str:
         if self.database_url:
