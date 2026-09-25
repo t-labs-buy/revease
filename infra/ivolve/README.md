@@ -2,7 +2,7 @@
 
 The live deployment. Host `13.204.129.141` (`ssh ivolve_cloud`), deploy root
 `~/apps/revease`. **URL: http://13.204.129.141:8020** (see "Why one port" for who
-can reach it). Running **v4** (2026-09-25; v3 since 2026-09-24): object storage (MinIO), Postgres,
+can reach it). Running **v5** (2026-09-25; v3 since 2026-09-24): object storage (MinIO), Postgres,
 separate media/light workers, live progress, AI documentation.
 
 This directory is the source of truth for everything except `.env` (secrets) and
@@ -25,10 +25,10 @@ This directory is the source of truth for everything except `.env` (secrets) and
 | container | image | role |
 |---|---|---|
 | `revease-edge` | nginx:1.27-alpine | the single entry point (8090 in the container, 8020 on the host) |
-| `revease-web` | `reg.ivolve.cloud/ivolve/revease:web-v4` | Next.js UI |
-| `revease-api` | `…:api-v4` | FastAPI (also `127.0.0.1:8021` for curl on the host) |
-| `revease-worker` | `…:worker-v4` | queue `media`, 1 at a time: convert, transcribe, render, auto-edit |
-| `revease-worker-light` | `…:worker-v4` | queue `default`, 3 at a time: documents, snapshots, voice previews; runs Celery beat (hourly retention) |
+| `revease-web` | `reg.ivolve.cloud/ivolve/revease:web-v5` | Next.js UI |
+| `revease-api` | `…:api-v5` | FastAPI (also `127.0.0.1:8021` for curl on the host) |
+| `revease-worker` | `…:worker-v5` | queue `media`, 1 at a time: convert, transcribe, render, auto-edit |
+| `revease-worker-light` | `…:worker-v5` | queue `default`, 3 at a time: documents, snapshots, voice previews; runs Celery beat (hourly retention) |
 | `revease-minio` | `reg.ivolve.cloud/ivolve/minio:RELEASE.2025-09-07T16-13-09Z` (mirrored; quay.io now refuses pulls) | media bucket `revease-media` (console on `127.0.0.1:8023`) |
 | `revease-postgres` | postgres:16-alpine | the database |
 | `revease-redis` | redis:7-alpine | Celery broker |
@@ -125,13 +125,13 @@ Apple-silicon Mac, and Next.js segfaults under qemu) and pushed to Gitea's
 container registry `reg.ivolve.cloud` under the `ivolve` org:
 
 ```
-reg.ivolve.cloud/ivolve/revease:api-v4
-reg.ivolve.cloud/ivolve/revease:worker-v4   (ffmpeg + faster-whisper)
-reg.ivolve.cloud/ivolve/revease:web-v4
+reg.ivolve.cloud/ivolve/revease:api-v5
+reg.ivolve.cloud/ivolve/revease:worker-v5   (ffmpeg + faster-whisper)
+reg.ivolve.cloud/ivolve/revease:web-v5
 ```
 
 The host is `docker login`ed to `reg.ivolve.cloud` as `karthik`. `.env` sets
-`REGISTRY` and `IMAGE_NS` to `reg.ivolve.cloud/ivolve/revease` and `TAG=v4` (v3 images stay in the registry for rollback: set `TAG=v3`, `docker compose up -d`).
+`REGISTRY` and `IMAGE_NS` to `reg.ivolve.cloud/ivolve/revease` and `TAG=v5` (earlier tags stay in the registry for rollback: set `TAG=v4`, `docker compose up -d`).
 (Earlier versions used a private `registry:2` on `localhost:5000`; `v1`/`v2` images
 are still in the local Docker cache.)
 
@@ -245,6 +245,11 @@ Spend and limit: https://openrouter.ai/settings/keys (the admin Usage page shows
 it too once `REFRACT_OPENROUTER_MANAGEMENT_KEY` is set).
 
 ## Not configured
+
+- **Auto Record** (the AI that drives a browser tab) needs a real Anthropic key
+  (`REFRACT_ANTHROPIC_API_KEY=sk-ant-…`): it uses Anthropic's tool-use API, which
+  OpenRouter does not provide. Every other AI feature works on OpenRouter; AI zoom
+  also falls back to rule-based suggestions if no AI answers.
 
 - No HTTPS yet: blocked on the `revease.ivolve.cloud` DNS record (see above).
 - `DEFAULT_API_BASE` in `apps/extension/src/api.js` points at
