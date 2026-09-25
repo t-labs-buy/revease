@@ -171,12 +171,11 @@ def start_voice_track(
     vp = _get_or_build(db, user, project_id)
     key = voice_track_key(project_id, payload.voice_id, payload.speed, vp.edit_spec_json)
     tkey = voice_timeline_key(project_id, payload.voice_id, payload.speed, vp.edit_spec_json)
-    if store.exists(key):
-        return {
-            "url": store.download_url(key),
-            "ready": True,
-            "timeline_url": store.download_url(tkey) if store.exists(tkey) else None,
-        }
+    # ready means BOTH the audio and its pacing timeline exist: the editor
+    # needs the timeline to place each line under its scene, and a track
+    # without one (an interrupted build) is rebuilt rather than served as-is.
+    if store.exists(key) and store.exists(tkey):
+        return {"url": store.download_url(key), "ready": True, "timeline_url": store.download_url(tkey)}
     enqueue_voice_track(project_id, payload.voice_id, payload.speed)
     return {"url": store.download_url(key), "ready": False, "timeline_url": None}
 
@@ -193,11 +192,11 @@ def voice_track_status(
     vp = _get_or_build(db, user, project_id)
     key = voice_track_key(project_id, voice_id, speed, vp.edit_spec_json)
     tkey = voice_timeline_key(project_id, voice_id, speed, vp.edit_spec_json)
-    ready = store.exists(key)
+    ready = store.exists(key) and store.exists(tkey)  # see start_voice_track
     return {
         "url": store.download_url(key),
         "ready": ready,
-        "timeline_url": store.download_url(tkey) if ready and store.exists(tkey) else None,
+        "timeline_url": store.download_url(tkey) if ready else None,
     }
 
 

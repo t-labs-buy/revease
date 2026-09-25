@@ -33,7 +33,8 @@ def build_voice_track(project_id: str, voice_id: str, speed: float) -> dict:
         key = voice_track_key(project_id, voice_id, speed, spec)
         timeline_key = voice_timeline_key(project_id, voice_id, speed, spec)
         out = store.local_path(key)
-        if out.exists():
+        tpath = store.local_path(timeline_key)
+        if out.exists() and tpath.exists():
             return {"key": key, "timeline_key": timeline_key, "cached": True}
 
         pace = min(1.5, max(1.0, float(spec.get("pace") or DEFAULT_PACE)))
@@ -87,16 +88,24 @@ def build_voice_track(project_id: str, voice_id: str, speed: float) -> dict:
             ";".join(filters)
             + f";{labels}amix=inputs={len(timeline.segments)}:normalize=0:dropout_transition=0[a]"
         )
+        # The track's existence is what the API reports as "ready", so it must
+        # appear only once it is complete AND its timeline is on disk: ffmpeg
+        # writes into a scratch file, the timeline is saved, then the finished
+        # wav is renamed into place (atomic on the same filesystem). A poll that
+        # used to land mid-write got a half-written wav and no timeline, and the
+        # editor then played the voice unretimed — lines under the wrong scenes.
+        partial = out.with_name(out.stem + ".part.wav")
         cmd = ["ffmpeg", "-y", *inputs, "-filter_complex", fc, "-map", "[a]",
-               "-ar", "24000", "-ac", "1", str(out)]
+               "-ar", "24000", "-ac", "1", str(partial)]
         proc = subprocess.run(cmd, capture_output=True, text=True)
         if proc.returncode != 0:
             log.warning("voice-track build failed: %s", proc.stderr[-400:])
+            partial.unlink(missing_ok=True)
             return {"error": "build failed"}
 
-        tpath = store.local_path(timeline_key)
         tpath.parent.mkdir(parents=True, exist_ok=True)
         tpath.write_text(json.dumps(timeline.as_dict()))
+        partial.replace(out)
         return {"key": key, "timeline_key": timeline_key}
     finally:
         db.close()
