@@ -32,7 +32,7 @@ export function ScopeToggle({
           key={o.key}
           onClick={() => onChange(o.key)}
           className={`rounded-full px-3.5 py-1 text-sm font-medium transition-colors ${
-            scope === o.key ? "bg-[#6d5dfb] text-white" : "text-[var(--text-2)] hover:text-[var(--text)]"
+            scope === o.key ? "bg-[#1E8F8E] text-white" : "text-[var(--text-2)] hover:text-[var(--text)]"
           }`}
         >
           {o.label}

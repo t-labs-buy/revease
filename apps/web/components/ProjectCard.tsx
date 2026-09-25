@@ -6,10 +6,11 @@ import { mediaUrl, toggleFavorite, type Project, type Session } from "@/lib/api"
 import { fmtDateIST } from "@/lib/time";
 
 const GRADS = [
-  "from-[#6d5dfb] to-[#a855f7]",
-  "from-[#8b5cf6] to-[#ec4899]",
-  "from-[#6366f1] to-[#06b6d4]",
-  "from-[#f97316] to-[#ec4899]",
+  // Navy/teal placeholders only — the palette is deliberately two-colour.
+  "from-[#1E8F8E] to-[#16283C]",
+  "from-[#16283C] to-[#1E8F8E]",
+  "from-[#1F3650] to-[#2BA5A4]",
+  "from-[#0F1B29] to-[#1E8F8E]",
 ];
 
 const mmss = (ms: number) =>
@@ -21,7 +22,7 @@ function statusOf(s?: Session): { label: string; cls: string } {
   if (!s) return { label: "Active", cls: "bg-emerald-500/10 text-emerald-500 ring-emerald-500/20" };
   if (s.status === "ready") return { label: "Ready", cls: "bg-emerald-500/10 text-emerald-500 ring-emerald-500/20" };
   if (s.status === "processing" || s.status === "captured")
-    return { label: "Processing", cls: "bg-[#6d5dfb]/10 text-[var(--brand-2)] ring-[#6d5dfb]/25" };
+    return { label: "Processing", cls: "bg-[#1E8F8E]/10 text-[var(--brand-2)] ring-[#1E8F8E]/25" };
   if (s.status === "error") return { label: "Error", cls: "bg-red-500/10 text-red-500 ring-red-500/20" };
   return { label: "Active", cls: "bg-emerald-500/10 text-emerald-500 ring-emerald-500/20" };
 }
@@ -63,7 +64,7 @@ export function ProjectCard({
         }
       }}
       className={`card card-hover relative overflow-hidden ${
-        selected ? "ring-2 ring-[#6d5dfb]" : ""
+        selected ? "ring-2 ring-[#1E8F8E]" : ""
       } ${className}`}
     >
       {/* selection check */}
@@ -71,7 +72,7 @@ export function ProjectCard({
         <span
           className={`absolute left-2.5 top-2.5 z-10 flex h-6 w-6 items-center justify-center rounded-full text-[13px] shadow ${
             selected
-              ? "bg-[#6d5dfb] text-white"
+              ? "bg-[#1E8F8E] text-white"
               : "border border-white/70 bg-black/30 text-transparent backdrop-blur-sm"
           }`}
         >
@@ -79,7 +80,7 @@ export function ProjectCard({
         </span>
       )}
       {/* thumbnail */}
-      <div className="relative aspect-video bg-gradient-to-br from-[#1c1c2e] to-[#2b2b45]">
+      <div className="relative aspect-video bg-gradient-to-br from-[#16283C] to-[#1F3650]">
         {latest?.poster ? (
           // eslint-disable-next-line @next/next/no-img-element
           <img src={mediaUrl(latest.poster)} alt={project.name} className="h-full w-full object-cover" />
@@ -87,7 +88,7 @@ export function ProjectCard({
           <div className={`h-full w-full bg-gradient-to-br ${GRADS[index % GRADS.length]} opacity-70`} />
         )}
         <span className="absolute inset-0 flex items-center justify-center">
-          <span className="flex h-12 w-12 items-center justify-center rounded-full bg-white/90 pl-0.5 text-[#6d5dfb] shadow-lg">
+          <span className="flex h-12 w-12 items-center justify-center rounded-full bg-white/90 pl-0.5 text-[#1E8F8E] shadow-lg">
             ▶
           </span>
         </span>

@@ -16,7 +16,7 @@ const TONES: Record<Tone, string> = {
   green: "bg-emerald-500/10 text-emerald-500 ring-1 ring-inset ring-emerald-500/25",
   amber: "bg-amber-500/10 text-amber-600 ring-1 ring-inset ring-amber-500/25",
   red: "bg-red-500/10 text-red-500 ring-1 ring-inset ring-red-500/25",
-  violet: "bg-[#7C3AED]/10 text-[#7C3AED] ring-1 ring-inset ring-[#7C3AED]/25",
+  violet: "bg-[#1E8F8E]/10 text-[#1E8F8E] ring-1 ring-inset ring-[#1E8F8E]/25",
   zinc: "bg-[var(--text-3)]/10 text-[var(--text-2)] ring-1 ring-inset ring-[var(--border-strong)]",
 };
 
@@ -47,7 +47,7 @@ export function ComingSoon({
   return (
     <main className="mx-auto max-w-3xl px-6 py-16">
       <div className="card flex flex-col items-center px-6 py-16 text-center">
-        <span className="badge mb-4 bg-[#7C3AED]/10 text-[#7C3AED] ring-1 ring-inset ring-[#7C3AED]/25">
+        <span className="badge mb-4 bg-[#1E8F8E]/10 text-[#1E8F8E] ring-1 ring-inset ring-[#1E8F8E]/25">
           Coming in V2
         </span>
         <h1 className="text-2xl font-semibold tracking-tight text-[var(--text)]">{title}</h1>

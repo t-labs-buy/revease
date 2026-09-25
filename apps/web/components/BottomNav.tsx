@@ -23,7 +23,7 @@ export function BottomNav() {
       title="Home"
       className="hidden fixed right-5 top-1/2 z-50 -translate-y-1/2 items-center rounded-full border border-[var(--border)] bg-[var(--card)] p-3 shadow-xl shadow-black/20"
     >
-      <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-[#6d5dfb] to-[#a855f7] text-white">
+      <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-[#1E8F8E] to-[#16283C] text-white">
         <IconHome width={22} height={22} />
       </span>
     </Link>

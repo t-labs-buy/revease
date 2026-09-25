@@ -34,8 +34,9 @@ def build_voice_track(project_id: str, voice_id: str, speed: float) -> dict:
         timeline_key = voice_timeline_key(project_id, voice_id, speed, spec)
         out = store.local_path(key)
         tpath = store.local_path(timeline_key)
-        if out.exists() and tpath.exists():
+        if store.exists(key) and store.exists(timeline_key):
             return {"key": key, "timeline_key": timeline_key, "cached": True}
+        out.parent.mkdir(parents=True, exist_ok=True)
 
         pace = min(1.5, max(1.0, float(spec.get("pace") or DEFAULT_PACE)))
         voice = {"voice_id": voice_id, "speed": speed}
@@ -106,6 +107,9 @@ def build_voice_track(project_id: str, voice_id: str, speed: float) -> dict:
         tpath.parent.mkdir(parents=True, exist_ok=True)
         tpath.write_text(json.dumps(timeline.as_dict()))
         partial.replace(out)
+        # timeline first: the API reports the track ready once `key` exists
+        store.commit(timeline_key)
+        store.commit(key)
         return {"key": key, "timeline_key": timeline_key}
     finally:
         db.close()

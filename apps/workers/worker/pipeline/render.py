@@ -160,8 +160,8 @@ def _make_still(seg: dict, src_video: Path | None, dims: tuple[int, int], out: P
 
     shot = seg.get("screenshot")
     if shot:
-        p = store.local_path(shot)
-        if p.exists() and _run(["ffmpeg", "-y", "-i", str(p), "-vf", cover, "-frames:v", "1", str(out)]):
+        p = store.fetch(shot)
+        if p is not None and _run(["ffmpeg", "-y", "-i", str(p), "-vf", cover, "-frames:v", "1", str(out)]):
             return
     if src_video and src_video.exists():
         ss = max(0, seg.get("source_start_ms", 0)) / 1000.0
@@ -373,8 +373,8 @@ def _element_filters(elements, dims: tuple[int, int], font: str | None, work: Pa
             out.append(f"drawbox=x={x}:y={y}:w={ew}:h={eh}:color=0x{c}@0.95:t=3{enable_str}")
         elif et == "image":
             key = str(el.get("media_key") or "")
-            path = store.local_path(key) if key else None
-            if path and path.exists():
+            path = store.fetch(key) if key else None
+            if path is not None:
                 image_overlays.append((image_input_start + len(image_inputs), x, y, ew, eh, enable_expr))
                 image_inputs.append(path)
         elif et == "text" and font:
@@ -697,8 +697,8 @@ def _has_audio(path: Path) -> bool:
 
 def _render_media_card(media_key: str, media_type: str, duration_ms: int, dims: tuple[int, int], work: Path, tag: str) -> tuple[Path, int]:
     """Normalize an uploaded intro/outro image or video to a concat-ready clip."""
-    source = store.local_path(media_key)
-    if not source.exists():
+    source = store.fetch(media_key)
+    if source is None:
         raise RuntimeError(f"intro/outro media missing: {media_key}")
     actual_ms = _probe_duration_ms(source) if media_type == "video" else None
     dur_ms = max(500, actual_ms or duration_ms)
@@ -737,8 +737,8 @@ def _music_source(music: dict | None, work: Path) -> Path | None:
         return None
     key = music.get("storage_key")
     if key:
-        p = store.local_path(key)
-        if p.exists():
+        p = store.fetch(key)
+        if p is not None:
             return p
         log.warning("music track %s missing; falling back to the built-in pad", key)
     pad = work / "ambient_pad.wav"
@@ -830,7 +830,13 @@ def run_render(render_job_id: str) -> dict:
             log.warning("render job %s not found; skipping", render_job_id)
             return {"render_job_id": render_job_id, "skipped": "render job not found"}
         job.status = "running"
+        job.progress = 0.0
+        job.message = "Preparing render…"
         db.commit()
+        from worker.pipeline.progress import Heartbeat, Reporter
+
+        report = Reporter(RenderJob, job.id)
+        heartbeat = Heartbeat(RenderJob, job.id).__enter__()
 
         vp = db.get(VideoProject, job.video_project_id)
         spec = vp.edit_spec_json
@@ -939,7 +945,8 @@ def run_render(render_job_id: str) -> dict:
         # per-step audio (TTS, or the original narration if "use original voice") -> timeline
         step_inputs = []
         tts_synth = tts_cached = 0
-        for s in segs:
+        for vi, s in enumerate(segs):
+            report(0.15 * vi / max(1, len(segs)), f"Generating voiceover {vi + 1} of {len(segs)}…")
             audio = compute_step_audio(
                 s, work=work, src_video=src_video, pace=pace, voice=voice, use_original=use_original,
             )
@@ -985,7 +992,9 @@ def run_render(render_job_id: str) -> dict:
             else:
                 clips.append(_render_titlecard(intro.get("title", ""), intro.get("duration_ms", 2000),
                                                dims, font, work, "intro", brand=brand, logo=logo))
-        for s, seg_tl in zip(segs, timeline.segments):
+        n_segs = max(1, len(segs))
+        for i, (s, seg_tl) in enumerate(zip(segs, timeline.segments)):
+            report(0.15 + 0.7 * i / n_segs, f"Rendering scene {i + 1} of {len(segs)}…")
             clip, did = _render_segment(s, seg_tl, src_video, dims, captions, font, work,
                                         crops=crops, elements=elements, logo=logo, logo_pos=logo_pos,
                                         background=spec.get("background"), zooms=tl_zooms)
@@ -1005,6 +1014,7 @@ def run_render(render_job_id: str) -> dict:
                                                dims, font, work, "outro", brand=brand, logo=logo))
 
         # concat (re-encode for safe, uniform output)
+        report(0.87, "Joining scenes into the final video…")
         list_file = work / "concat.txt"
         list_file.write_text("".join(f"file '{c}'\n" for c in clips))
         music_src = _music_source(spec.get("music"), work)
@@ -1051,9 +1061,14 @@ def run_render(render_job_id: str) -> dict:
             "music": music_src is not None,
             "aspect": spec.get("aspect"),
         }
+        report(0.96, "Saving the video…")
+        store.commit(out_key)
+        heartbeat.__exit__(None, None, None)
         job.output_key = out_key
         job.stats_json = stats
         job.status = "done"
+        job.progress = 1.0
+        job.message = f"Rendered {rendered} scenes, reused {reused}"
         db.commit()
         project = db.get(Project, vp.project_id)
         record_event(
@@ -1065,6 +1080,8 @@ def run_render(render_job_id: str) -> dict:
         return {"render_job_id": render_job_id, **stats}
     except Exception as e:
         log.exception("render failed")
+        if "heartbeat" in locals():
+            heartbeat.__exit__(None, None, None)
         if "job" in dir() and job is not None:
             job.status = "error"
             job.error_json = {"error": str(e)}
@@ -1089,8 +1106,8 @@ def _find_source_video(db, project_id: str) -> tuple[Path | None, str | None]:
             select(MediaAsset).where(MediaAsset.session_id == sid, MediaAsset.kind == "raw_video")
         )
         if asset:
-            p = store.local_path(asset.storage_key)
-            if p.exists():
+            p = store.fetch(asset.storage_key)
+            if p is not None:
                 return p, sid
     return None, None
 

@@ -1,32 +1,23 @@
 "use client";
 
 /**
- * The app's shared header: brand, primary nav, notifications and the account
- * avatar. It lives in the root layout, so every signed-in page gets it — which
- * is what makes Sign out reachable from anywhere.
+ * The app's shared header. Navigation lives in the Sidebar; this bar keeps only
+ * what belongs with the page: search, theme and the account
+ * avatar (which is what makes Sign out reachable from anywhere).
  *
- * The centre of the bar is a *slot*: pages that own a search box (the dashboard)
+ * The left of the bar is a *slot*: pages that own a search box (the dashboard)
  * portal theirs into it via `useTopBarSlot`, so the header stays shared without
- * having to know about any one page's state.
+ * having to know about any one page's state. Below the md breakpoint the
+ * sidebar is hidden, so the bar also shows the brand.
  */
 
 import { createContext, useContext, useMemo, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { IconBell } from "@/components/icons";
+import { ActivityIndicator } from "@/components/ActivityIndicator";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { UserMenu } from "@/components/UserMenu";
 import { useAuth } from "@/contexts/AuthContext";
-
-// `soon` renders the tab dimmed and inert with a "Soon" pill. The page behind it
-// still exists and works — flip the flag off to bring it back.
-// `adminOnly` shows the tab to admins only.
-const NAV = [
-  { label: "Home", href: "/" },
-  { label: "Library", href: "/library" },
-  { label: "Knowledge Base", href: "/knowledge-base", soon: true },
-  { label: "Usage", href: "/admin/usage", adminOnly: true },
-];
 
 // The public share viewer and the auth screens get no app chrome.
 const HIDE_ON = [/^\/share\//, /^\/login$/, /^\/register$/];
@@ -44,73 +35,36 @@ export function TopBarProvider({ children }: { children: React.ReactNode }) {
   return <TopBarContext.Provider value={value}>{children}</TopBarContext.Provider>;
 }
 
-/** The header's centre element, or null before it mounts (or where it's hidden).
+/** The header's search element, or null before it mounts (or where it's hidden).
  *  Portal into it to put page-specific controls in the shared bar. */
 export function useTopBarSlot(): HTMLDivElement | null {
   return useContext(TopBarContext)?.slot ?? null;
 }
 
-const isActive = (pathname: string, href: string) =>
-  href === "/" ? pathname === "/" : pathname.startsWith(href);
-
 export function TopBar() {
   const pathname = usePathname();
-  const { user, isAdmin } = useAuth();
+  const { user } = useAuth();
   const context = useContext(TopBarContext);
 
   if (HIDE_ON.some((re) => re.test(pathname))) return null;
   if (!user) return null; // signed out: the login screen is the whole UI
 
   return (
-    <header className="sticky top-0 z-20 flex items-center gap-6 border-b border-[var(--border)] bg-[var(--bg)]/85 px-8 py-3 backdrop-blur-md">
-      <Link href="/" className="flex items-center gap-2.5">
-        <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-[#7C3AED] to-[#A78BFA] text-base font-bold text-white shadow-sm shadow-[#7C3AED]/30">
-          R
-        </span>
-        <span className="text-[17px] font-semibold tracking-tight text-[var(--text)]">
-          RevEase
-        </span>
+    <header className="sticky top-0 z-20 flex h-14 items-center gap-4 border-b border-[var(--border)] bg-[var(--panel)] px-5 md:px-8">
+      {/* brand shows only where the sidebar doesn't */}
+      <Link href="/" className="text-[17px] font-bold tracking-tight text-[var(--navy)] md:hidden">
+        Rev<span className="text-[var(--brand)]">Ease</span>
       </Link>
 
-      <nav className="hidden items-center gap-1 md:flex">
-        {NAV.filter((n) => !n.adminOnly || isAdmin).map((n) =>
-          n.soon ? (
-            <span
-              key={n.href}
-              aria-disabled="true"
-              className="select-none rounded-full px-4 py-2 text-sm font-medium text-[var(--text-3)] opacity-45"
-            >
-              {n.label}
-            </span>
-          ) : (
-            <Link
-              key={n.href}
-              href={n.href}
-              className={`rounded-full px-4 py-2 text-sm font-medium transition-colors duration-200 ${
-                isActive(pathname, n.href)
-                  ? "bg-[#7C3AED]/10 text-[#7C3AED]"
-                  : "text-[var(--text-2)] hover:bg-[var(--hover)] hover:text-[var(--text)]"
-              }`}
-            >
-              {n.label}
-            </Link>
-          ),
-        )}
-      </nav>
-
       {/* page-owned controls land here (see useTopBarSlot) */}
-      <div ref={context?.setSlot} className="relative ml-auto w-full max-w-xl" />
+      <div ref={context?.setSlot} className="relative w-full max-w-xl" />
 
-      <div className="flex items-center gap-2.5">
+      <div className="ml-auto flex items-center gap-1.5">
+        <ActivityIndicator />
         <ThemeToggle compact />
-        <button
-          aria-label="Notifications"
-          className="relative flex h-10 w-10 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--card)] text-[var(--text-2)] transition-colors hover:text-[var(--text)]"
-        >
-          <IconBell width={17} height={17} />
-          <span className="absolute right-2.5 top-2 h-1.5 w-1.5 rounded-full bg-[#EC4899]" />
-        </button>
-        <UserMenu />
+        <div className="ml-1.5">
+          <UserMenu />
+        </div>
       </div>
     </header>
   );

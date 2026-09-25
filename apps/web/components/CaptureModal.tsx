@@ -11,12 +11,23 @@ import {
   type CaptureEvent,
 } from "@/lib/api";
 import { IconDoc, IconPlus, IconUpload, IconVideo } from "@/components/icons";
+import type { UploadProgress } from "@/lib/upload";
+import { fmtBytes } from "@/lib/upload";
 import { Spinner } from "@/components/ui";
 import { readDurationMs } from "@/components/Uploader";
 
+/** "Uploading 42% · 1.2 GB of 2.9 GB" — large recordings take a while. */
+function uploadLabel(p: UploadProgress | null): string {
+  if (!p || !p.total) return "Uploading…";
+  const pct = Math.floor((p.loaded / p.total) * 100);
+  return pct >= 100 ? "Finishing upload…" : `Uploading ${pct}% · ${fmtBytes(p.loaded)} of ${fmtBytes(p.total)}`;
+}
+
 export type CaptureIntent = "record" | "upload" | "video" | "doc";
 
-const MAX_BYTES = 2 * 1024 * 1024 * 1024; // 2 GB
+// Uploads go in resumable parts straight to storage, so size is bounded by
+// patience, not by a single request. Matches the server's 50 GB ceiling.
+const MAX_BYTES = 50 * 1024 * 1024 * 1024; // 50 GB
 const MIN_BYTES = 50 * 1024; // 50 KB
 const ACCEPT = "video/mp4,video/quicktime,.mp4,.mov";
 
@@ -71,6 +82,7 @@ export function CaptureModal({
 
   // ---- recording ----
   const [recPhase, setRecPhase] = useState<"idle" | "recording" | "saving" | "saveError">("idle");
+  const [uploadProg, setUploadProg] = useState<UploadProgress | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const [hasAudio, setHasAudio] = useState<boolean | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -165,7 +177,7 @@ export function CaptureModal({
     const ids = idsRef.current;
     if (!ids) throw new Error("no session");
     if (!blob.size) throw new Error("No video was captured — please try again.");
-    await registerAndUpload(ids.sid, "raw_video", "webm", blob);
+    await registerAndUpload(ids.sid, "raw_video", "webm", blob, setUploadProg);
     await postEvents(ids.sid, eventsRef.current);
     await completeSession(ids.sid, durationMs);
     goToSession(ids.pid, ids.sid);
@@ -227,7 +239,7 @@ export function CaptureModal({
     setError(null);
     const okType = /\.(mp4|mov)$/i.test(f.name) || ["video/mp4", "video/quicktime"].includes(f.type);
     if (!okType) return setError("Please choose an MP4 or MOV file.");
-    if (f.size > MAX_BYTES) return setError(`File is ${fmtSize(f.size)} — the limit is 2 GB.`);
+    if (f.size > MAX_BYTES) return setError(`File is ${fmtSize(f.size)} — the limit is 50 GB.`);
     if (f.size < MIN_BYTES) return setError("File looks too small / empty.");
     setFile(f);
   }
@@ -241,7 +253,7 @@ export function CaptureModal({
       const durationMs = await readDurationMs(file);
       const project = await createProject(prettyName(file.name));
       const session = await createSession(project.id, "upload");
-      await registerAndUpload(session.id, "raw_video", ext, file);
+      await registerAndUpload(session.id, "raw_video", ext, file, setUploadProg);
       await completeSession(session.id, durationMs);
       goToSession(project.id, session.id);
     } catch (e) {
@@ -263,7 +275,7 @@ export function CaptureModal({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center gap-3">
-          <span className="flex h-11 w-11 flex-none items-center justify-center rounded-2xl bg-gradient-to-br from-[#6d5dfb] to-[#a855f7] text-white shadow-sm shadow-[#6d5dfb]/30">
+          <span className="flex h-11 w-11 flex-none items-center justify-center rounded-2xl bg-gradient-to-br from-[#1E8F8E] to-[#16283C] text-white shadow-sm shadow-[#1E8F8E]/30">
             {intent === "doc" ? <IconDoc width={18} height={18} /> : <IconVideo width={18} height={18} />}
           </span>
           <div className="min-w-0 flex-1">
@@ -291,9 +303,9 @@ export function CaptureModal({
           <div className="mt-5 grid gap-4 sm:grid-cols-2">
             <button
               onClick={() => setMode("record")}
-              className="group flex flex-col items-center gap-3 rounded-2xl border border-[var(--border)] bg-[var(--input-bg)] py-8 transition-all hover:border-[#6d5dfb]/60 hover:bg-[#6d5dfb]/5"
+              className="group flex flex-col items-center gap-3 rounded-2xl border border-[var(--border)] bg-[var(--input-bg)] py-8 transition-all hover:border-[#1E8F8E]/60 hover:bg-[#1E8F8E]/5"
             >
-              <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-[#6d5dfb] to-[#8b5cf6] text-white shadow-sm shadow-[#6d5dfb]/30 transition-transform group-hover:scale-105">
+              <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-[#1E8F8E] to-[#8b5cf6] text-white shadow-sm shadow-[#1E8F8E]/30 transition-transform group-hover:scale-105">
                 <IconVideo width={22} height={22} />
               </span>
               <span className="text-sm font-semibold text-[var(--text)]">Record your screen</span>
@@ -301,9 +313,9 @@ export function CaptureModal({
             </button>
             <button
               onClick={() => setMode("upload")}
-              className="group flex flex-col items-center gap-3 rounded-2xl border border-[var(--border)] bg-[var(--input-bg)] py-8 transition-all hover:border-[#6d5dfb]/60 hover:bg-[#6d5dfb]/5"
+              className="group flex flex-col items-center gap-3 rounded-2xl border border-[var(--border)] bg-[var(--input-bg)] py-8 transition-all hover:border-[#1E8F8E]/60 hover:bg-[#1E8F8E]/5"
             >
-              <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-[#8b5cf6] to-[#ec4899] text-white shadow-sm shadow-[#8b5cf6]/30 transition-transform group-hover:scale-105">
+              <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-[#8b5cf6] to-[#16283C] text-white shadow-sm shadow-[#8b5cf6]/30 transition-transform group-hover:scale-105">
                 <IconUpload width={22} height={22} />
               </span>
               <span className="text-sm font-semibold text-[var(--text)]">Upload a video</span>
@@ -366,7 +378,7 @@ export function CaptureModal({
             )}
             {recPhase === "saving" && (
               <div className="flex items-center justify-center gap-2 py-8 text-sm text-[var(--text-2)]">
-                <Spinner /> Saving & processing…
+                <Spinner /> {uploadProg ? uploadLabel(uploadProg) : "Saving & processing…"}
               </div>
             )}
             {recPhase === "saveError" && (
@@ -395,7 +407,7 @@ export function CaptureModal({
               }}
               className="flex flex-col items-center rounded-2xl border border-dashed border-[var(--border-strong)] bg-[var(--input-bg)] p-8 text-center"
             >
-              <span className="mb-3 flex h-14 w-14 items-center justify-center rounded-2xl bg-[#6d5dfb]/12 text-[var(--brand-2)]">
+              <span className="mb-3 flex h-14 w-14 items-center justify-center rounded-2xl bg-[#1E8F8E]/12 text-[var(--brand-2)]">
                 {file ? "🎬" : <IconUpload width={24} height={24} />}
               </span>
               {file ? (
@@ -423,7 +435,7 @@ export function CaptureModal({
                 }}
               />
             </div>
-            <p className="mt-2 text-center text-xs text-[var(--text-3)]">MP4 or MOV · up to 2 GB</p>
+            <p className="mt-2 text-center text-xs text-[var(--text-3)]">MP4 or MOV · up to 50 GB</p>
             <div className="mt-4 flex justify-end gap-2">
               {(intent === "video" || intent === "doc") && (
                 <button onClick={() => setMode("choose")} className="btn btn-ghost btn-sm">
@@ -437,7 +449,7 @@ export function CaptureModal({
               >
                 {uploading ? (
                   <>
-                    <Spinner /> Uploading…
+                    <Spinner /> {uploadLabel(uploadProg)}
                   </>
                 ) : (
                   "Upload & process"

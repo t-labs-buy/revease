@@ -30,11 +30,11 @@ def _latest_graph(db: Session, project_id: str) -> WorkflowGraphRow | None:
     )
 
 
-def _source_video(db: Session, project_id: str) -> str | None:
+def _source_video(db: Session, project_id: str, kind: str = "raw_video") -> str | None:
     asset = db.scalar(
         select(MediaAsset)
         .join(CaptureSession, CaptureSession.id == MediaAsset.session_id)
-        .where(CaptureSession.project_id == project_id, MediaAsset.kind == "raw_video")
+        .where(CaptureSession.project_id == project_id, MediaAsset.kind == kind)
         .order_by(CaptureSession.created_at.desc())
     )
     return asset.storage_key if asset else None
@@ -93,6 +93,8 @@ def _render_out(job: RenderJob) -> RenderJobOut:
         output_url=store.download_url(job.output_key) if job.output_key else None,
         stats_json=job.stats_json,
         error_json=job.error_json,
+        progress=job.progress,
+        message=job.message,
     )
 
 
@@ -122,6 +124,7 @@ def get_video(
         graph_version=vp.graph_version,
         edit_spec=vp.edit_spec_json,
         source_video=_source_video(db, project_id),
+        source_proxy=_source_video(db, project_id, "proxy"),
         latest_render=_latest_render(db, vp),
     )
 
@@ -141,6 +144,7 @@ def patch_video(
         graph_version=vp.graph_version,
         edit_spec=vp.edit_spec_json,
         source_video=_source_video(db, project_id),
+        source_proxy=_source_video(db, project_id, "proxy"),
     )
 
 
@@ -154,7 +158,7 @@ def render_video(
     db.commit()
     db.refresh(job)
     enqueue_render(job.id)
-    return RenderJobOut(id=job.id, status=job.status)
+    return RenderJobOut(id=job.id, status=job.status, progress=0.0, message="Queued…")
 
 
 class VoiceTrackReq(BaseModel):

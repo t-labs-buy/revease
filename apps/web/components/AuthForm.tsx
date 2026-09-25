@@ -21,7 +21,7 @@ export function AuthShell({
   return (
     <main className="mx-auto flex min-h-[80vh] w-full max-w-md flex-col justify-center px-6 py-12">
       <div className="mb-8 text-center">
-        <span className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-[#6d5dfb] to-[#a855f7] text-lg font-semibold text-white">
+        <span className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-[#1E8F8E] to-[#16283C] text-lg font-semibold text-white">
           R
         </span>
         <h1 className="text-2xl font-semibold tracking-tight text-[var(--text)]">{title}</h1>

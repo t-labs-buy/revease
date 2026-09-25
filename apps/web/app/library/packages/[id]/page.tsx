@@ -58,8 +58,8 @@ function fromPkg(p: BrandPackage): Form {
     logo_key: str("logo_key"),
     logo_url: str("logo_url"),
     logo_position: str("logo_position", "Top Right"),
-    primary_color: str("primary_color", "#6d5dfb"),
-    accent_color: str("accent_color", "#a855f7"),
+    primary_color: str("primary_color", "#1E8F8E"),
+    accent_color: str("accent_color", "#16283C"),
     bg_color: str("bg_color", "#0b0b12"),
     text_color: str("text_color", "#ffffff"),
     font: str("font", "Geist"),
@@ -192,7 +192,7 @@ export default function PackageEditor({ params }: { params: Promise<{ id: string
             key={t}
             onClick={() => setTab(t)}
             className={`rounded-t-lg px-4 py-2.5 text-sm font-medium transition-colors ${tab === t
-                ? "border-b-2 border-[#6d5dfb] text-[var(--text)]"
+                ? "border-b-2 border-[#1E8F8E] text-[var(--text)]"
                 : "text-[var(--text-2)] hover:text-[var(--text)]"
               }`}
           >
@@ -338,7 +338,7 @@ export default function PackageEditor({ params }: { params: Promise<{ id: string
                   step={0.05}
                   value={f.voice_speed}
                   onChange={(e) => set("voice_speed", Number(e.target.value))}
-                  className="w-full accent-[#6d5dfb]"
+                  className="w-full accent-[#1E8F8E]"
                 />
               </div>
               <button onClick={playVoice} disabled={busy === "voice"} className="btn btn-secondary btn-sm">

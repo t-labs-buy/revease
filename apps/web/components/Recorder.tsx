@@ -44,6 +44,7 @@ function labelFor(el: Element | null): string | null {
 
 export function Recorder({ projectId, onDone }: { projectId: string; onDone: () => void }) {
   const [phase, setPhase] = useState<Phase>("idle");
+  const [uploadPct, setUploadPct] = useState<number | null>(null);
   const [count, setCount] = useState(3);
   const [elapsed, setElapsed] = useState(0);
   const [micOn, setMicOn] = useState(true);
@@ -208,7 +209,9 @@ export function Recorder({ projectId, onDone }: { projectId: string; onDone: () 
     try {
       const vp = { w: window.screen.width, h: window.screen.height };
       const session = await createSession(projectId, "recorder", vp);
-      await registerAndUpload(session.id, "raw_video", "webm", blob);
+      await registerAndUpload(session.id, "raw_video", "webm", blob, (pr) =>
+        setUploadPct(pr.total ? Math.floor((pr.loaded / pr.total) * 100) : null),
+      );
       await postEvents(session.id, eventsRef.current);
       await completeSession(session.id, durationMs);
       recorderRef.current = null;
@@ -234,7 +237,7 @@ export function Recorder({ projectId, onDone }: { projectId: string; onDone: () 
         <div className="flex items-center gap-4">
           <button
             onClick={runCountdown}
-            className="inline-flex items-center gap-2 rounded-xl bg-[#7C3AED] px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition-transform duration-200 hover:scale-[1.03]"
+            className="inline-flex items-center gap-2 rounded-xl bg-[#1E8F8E] px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition-transform duration-200 hover:scale-[1.03]"
           >
             Start recording
           </button>
@@ -243,7 +246,7 @@ export function Recorder({ projectId, onDone }: { projectId: string; onDone: () 
               type="checkbox"
               checked={micOn}
               onChange={(e) => setMicOn(e.target.checked)}
-              className="h-4 w-4 accent-[#7C3AED]"
+              className="h-4 w-4 accent-[#1E8F8E]"
             />
             Mic
           </label>
@@ -251,7 +254,7 @@ export function Recorder({ projectId, onDone }: { projectId: string; onDone: () 
       )}
 
       {phase === "countdown" && (
-        <div className="text-4xl font-bold tabular-nums text-[#7C3AED]">
+        <div className="text-4xl font-bold tabular-nums text-[#1E8F8E]">
           {count > 0 ? count : "Go"}
         </div>
       )}
@@ -274,7 +277,9 @@ export function Recorder({ projectId, onDone }: { projectId: string; onDone: () 
         </div>
       )}
 
-      {phase === "uploading" && <p className="text-sm text-[var(--text-2)]">Uploading…</p>}
+      {phase === "uploading" && (
+        <p className="text-sm text-[var(--text-2)]">Uploading{uploadPct != null ? ` ${uploadPct}%` : "…"}</p>
+      )}
       {phase === "error" && (
         <p className="mt-3 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-400">
           {error}

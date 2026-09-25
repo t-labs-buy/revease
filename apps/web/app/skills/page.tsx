@@ -21,7 +21,7 @@ const TEMPLATES: {
     name: "Product Demo",
     target: "video",
     icon: "🎬",
-    grad: "from-[#6d5dfb] to-[#a855f7]",
+    grad: "from-[#1E8F8E] to-[#16283C]",
     desc: "Screen walkthrough with auto-zoom on clicks and a clear AI voiceover.",
     settings: {
       voice_id: "af_sarah",
@@ -36,7 +36,7 @@ const TEMPLATES: {
     name: "Marketing Explainer",
     target: "video",
     icon: "✨",
-    grad: "from-[#f97316] to-[#ec4899]",
+    grad: "from-[#f97316] to-[#16283C]",
     desc: "Punchy, benefit-led promo that hooks the viewer and ends with a CTA.",
     settings: {
       voice_id: "af_bella",
@@ -66,7 +66,7 @@ const TEMPLATES: {
     name: "FAQ Guide",
     target: "doc",
     icon: "❓",
-    grad: "from-[#8b5cf6] to-[#ec4899]",
+    grad: "from-[#8b5cf6] to-[#16283C]",
     desc: "Question-and-answer format generated from the transcript.",
     settings: {
       instruction:
@@ -200,9 +200,9 @@ export default function SkillsPage() {
       <div className="mt-6 grid gap-4 sm:grid-cols-3">
         <button
           onClick={() => setAiOpen((v) => !v)}
-          className={`card card-hover flex items-start gap-3 p-4 text-left ${aiOpen ? "ring-1 ring-[#6d5dfb]" : ""}`}
+          className={`card card-hover flex items-start gap-3 p-4 text-left ${aiOpen ? "ring-1 ring-[#1E8F8E]" : ""}`}
         >
-          <span className="flex h-10 w-10 flex-none items-center justify-center rounded-xl bg-gradient-to-br from-[#6d5dfb] to-[#a855f7] text-white">
+          <span className="flex h-10 w-10 flex-none items-center justify-center rounded-xl bg-gradient-to-br from-[#1E8F8E] to-[#16283C] text-white">
             ✨
           </span>
           <div>
@@ -211,7 +211,7 @@ export default function SkillsPage() {
           </div>
         </button>
         <button onClick={blank} disabled={busy === "blank"} className="card card-hover flex items-start gap-3 p-4 text-left">
-          <span className="flex h-10 w-10 flex-none items-center justify-center rounded-xl bg-[#6d5dfb]/12 text-[var(--brand-2)]">
+          <span className="flex h-10 w-10 flex-none items-center justify-center rounded-xl bg-[#1E8F8E]/12 text-[var(--brand-2)]">
             {busy === "blank" ? <Spinner /> : "✎"}
           </span>
           <div>
@@ -220,7 +220,7 @@ export default function SkillsPage() {
           </div>
         </button>
         <Link href="/skills/gallery" className="card card-hover flex items-start gap-3 p-4 text-left">
-          <span className="flex h-10 w-10 flex-none items-center justify-center rounded-xl bg-[#6d5dfb]/12 text-[var(--brand-2)]">
+          <span className="flex h-10 w-10 flex-none items-center justify-center rounded-xl bg-[#1E8F8E]/12 text-[var(--brand-2)]">
             📦
           </span>
           <div>
@@ -289,7 +289,7 @@ export default function SkillsPage() {
             <div className="p-4">
               <div className="flex items-center gap-2">
                 <span className="text-sm font-semibold text-[var(--text)]">{t.name}</span>
-                <span className="badge bg-[#6d5dfb]/12 capitalize text-[var(--brand-2)]">{t.target}</span>
+                <span className="badge bg-[#1E8F8E]/12 capitalize text-[var(--brand-2)]">{t.target}</span>
               </div>
               <p className="mt-1 line-clamp-2 text-xs text-[var(--text-2)]">{t.desc}</p>
             </div>
@@ -314,7 +314,7 @@ export default function SkillsPage() {
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
               {list.map((s) => (
                 <Link key={s.id} href={`/skills/${s.id}`} className="card card-hover group relative flex gap-3 p-4">
-                  <span className="flex h-11 w-11 flex-none items-center justify-center rounded-xl bg-gradient-to-br from-[#6d5dfb] to-[#a855f7] text-white">
+                  <span className="flex h-11 w-11 flex-none items-center justify-center rounded-xl bg-gradient-to-br from-[#1E8F8E] to-[#16283C] text-white">
                     {s.target === "video" ? "🎬" : "📄"}
                   </span>
                   <div className="min-w-0 flex-1">

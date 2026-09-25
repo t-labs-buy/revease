@@ -91,7 +91,7 @@ export default function AdminUsersPage() {
                     <span
                       className={`badge px-2.5 py-0.5 ring-1 ring-inset ${
                         admin
-                          ? "bg-[#6d5dfb]/10 text-[var(--brand-2)] ring-[#6d5dfb]/25"
+                          ? "bg-[#1E8F8E]/10 text-[var(--brand-2)] ring-[#1E8F8E]/25"
                           : "bg-[var(--hover)] text-[var(--text-2)] ring-[var(--border)]"
                       }`}
                     >

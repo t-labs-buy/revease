@@ -67,6 +67,39 @@ Release-gate checklist (§5) all satisfied except the two provider-key items (Wh
 - **Verified:** api 43/43 (incl. a cross-account isolation suite), workers 45/45, web typecheck + `next build` clean.
 - **Password reset is admin-driven.** No email transport, so no self-service "forgot password" link: an admin sets a new password from **Admin → Users → Reset password** (`POST /admin/users/{id}/password`) and shares it out of band; the login page's "Forgot password?" says so. The reset stamps `users.password_changed_at` (unix seconds, fractional) and `get_current_user` refuses tokens whose `iat` predates it, so the user's existing sessions are signed out. You can't reset your own password (it would revoke the session making the request). Still not built: self-service change under Account, and an email flow (`PasswordResetToken` table, `POST /auth/forgot-password` always-200, `/reset-password` page) if SMTP/Resend ever appears.
 
+## Documentation from a recording (2026-09-24)
+
+- **Pipeline**: `POST /projects/{id}/document/generate` marks the `Document` row queued and enqueues `refract.document.generate`; the worker writes the text via `app.docwriter.write_document` (Anthropic → OpenRouter → deterministic fallback), then grabs one frame per step from the source video (`docshots.pick_snapshot_time`: click + 150 ms, input near the end, navigation +1 s) and draws a teal highlight from the step bbox for extension/auto captures. Recorder/upload sessions get clean frames (the recorder's click coordinates are on the RevEase page, not the captured screen).
+- **Model**: `DocV2` (`schemas.py`) — overview, prerequisites, steps `{id, title, body, tip, snapshot, source}`, tips, meta. Step ids equal graph step ids; order is positional. Legacy v1 rows upgrade on read. Inline markup is only `**bold**` and `` `code` ``.
+- **Editing**: `PATCH /projects/{id}/document` (409 while generating; snapshot keys must belong to the project). `POST …/steps/{id}/snapshot {t}` re-grabs one step's frame; only that step's snapshot is rewritten so concurrent text edits survive.
+- **Export**: `?format=md|pdf|docx`. PDF embeds DejaVu Sans (`app/fonts/`) so non-Latin text renders; DOCX via python-docx with inline bold/code runs and images scaled to the text column.
+- **Web**: `components/doc/*` — generate/progress cards, `DocEditor` with autosave (800 ms debounce, sequence-guarded, keepalive flush on unload), `SnapshotPicker` (paused `<video>` preview + window filmstrip), `ExportMenu`, `DocView` shared with the public share page. The home "Generate document" tile is live.
+- **Verified**: `make test` offline (writer fallback, merge rules, renderers, routes with a mocked queue, worker job against a lavfi clip with click events); end to end locally with a 12 s upload — graph in ~20 s, document ready 3 s later, both steps annotated, DOCX/PDF exports contain the frames.
+
+## Long recordings: load handling + live progress (2026-09-24)
+
+- **Incident**: a 29-minute 1080p WebM recording on ivolve ran two identical ffmpeg normalizes writing the same `source.mp4`. Cause: `acks_late` + Redis's 1h default visibility timeout redelivered the task mid-encode. The encode itself was unbounded (WebM reports 1000 fps, no thread cap).
+- **Fixes**: 12h visibility timeout, `media`/`default` queues with a worker each, `worker_prefetch_multiplier=1`, heartbeat + `pipeline_token` duplicate guard, bounded normalize (30 fps, thread cap, timeout, temp file + rename), reprocess 409 while live.
+- **Visibility**: per-stage progress and messages from ffmpeg `-progress` and the Whisper segment loop, overall progress + ETA on session status, real progress for documents (writing, snapshot i of n) and renders (voiceover i of n, scene i of n, joining), header activity indicator backed by `GET /activity`.
+- **Verified locally**: 10-minute 1080p60 WebM showed "Converting video · 04:17 of 10:00", 34%, "about 2 min left"; only one ffmpeg ran; reprocess during the run returned 409.
+
+## Scale-out: object storage, direct uploads, preview proxy, Postgres, retention (2026-09-24)
+
+- **Object storage**: `REFRACT_STORAGE_BACKEND=s3` (MinIO in compose, or AWS S3). All ~50 media call sites follow fetch / write+commit; API and workers share only the bucket and DB, each with its own LRU cache. Verified with MinIO: separate caches for API (1.6 MB), media worker, light worker.
+- **Direct resumable uploads**: browser uploads in 16 MB parts, 4 in parallel, per-part retry, resume after reload; parts go to the store via presigned URLs (local backend: same API, part files). 162 MB file -> 11 direct PUTs, byte-identical download.
+- **Preview proxy**: 540p `proxy` asset produced in the same ffmpeg pass as normalize (33 MB vs 156 MB source); editor, prepare page and snapshot picker use it.
+- **Postgres**: `REFRACT_DATABASE_URL=postgresql+psycopg://…`; 95 API + 76 worker tests pass on Postgres 16; `make db-copy` migrated the dev DB (765 rows, counts verified).
+- **Retention**: hourly beat task on the light worker; originals 7 d, audio 2 d, superseded renders 7 d, TTS cache 30 d, abandoned uploads 24 h, cache LRU. `make retention-dry`.
+- **Raw video download**: `GET /sessions/{id}/download?variant=original|processed` -> signed attachment link; falls back to the processed MP4 once retention removed the original. Menu on the prepare page and capture cards.
+- **Gotcha**: Docker Hub stopped serving MinIO community images; compose uses `quay.io/minio/minio`.
+
+## Deployed to ivolve as v3 (2026-09-24)
+
+- Images `reg.ivolve.cloud/ivolve/revease:{api,worker,web}-v3`, built natively on the host.
+- Switched to MinIO + Postgres: 1,440 media files (911 MB) and 1,633 rows copied; per-table counts matched. Rollback files kept (`.env.bak-v2`, `.pre-v3/`, the v2 data volume).
+- Found and fixed while deploying: `app.dbcopy` failed on an older SQLite missing new columns (now copies the source's columns); a deferred pipeline request gave up after 3 retries because Celery's `retry(max_retries=None)` means "default", not unlimited (now waits up to a day; regression test added).
+- Verified on the host: edge health/web, presigned media via `/s3/` (307 -> 200), video Range (206), public share video, both workers + beat, new backup (pg_dump + MinIO volume), zero 5xx after the switch.
+
 ## Notes / environment
 - **No NVIDIA GPU visible** in the current dev shell — Whisper will fall back to CPU (slow) in P2 until CUDA 12.x is set up on the RTX 5070 target.
 - TTS: OpenRouter has no TTS endpoint; voice uses OpenAI TTS behind the `TTSProvider` adapter (swappable).

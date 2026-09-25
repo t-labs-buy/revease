@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { deleteProject, listProjects, listSessions, type ListScope, type Project, type Session } from "@/lib/api";
 import { ProjectCard } from "@/components/ProjectCard";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -9,6 +10,14 @@ import { EmptyState } from "@/components/ui";
 import { ScopeToggle } from "@/components/ScopeToggle";
 
 type Filter = "all" | "starred" | "ready" | "processing";
+// `?kind=video|document` narrows to one content type; the sidebar's Videos and
+// Documents entries deep-link here with it.
+type Kind = "all" | "video" | "document";
+const KIND_TITLE: Record<Kind, { title: string; blurb: string }> = {
+  all: { title: "Projects", blurb: "All your projects and captures — starred first." },
+  video: { title: "Videos", blurb: "Projects with recordings or uploads — starred first." },
+  document: { title: "Documents", blurb: "Projects with a generated step-by-step document." },
+};
 const FILTERS: { key: Filter; label: string }[] = [
   { key: "all", label: "All" },
   { key: "starred", label: "★ Starred" },
@@ -16,7 +25,10 @@ const FILTERS: { key: Filter; label: string }[] = [
   { key: "processing", label: "Processing" },
 ];
 
-export default function LibraryPage() {
+function LibraryInner() {
+  const params = useSearchParams();
+  const kindParam = params.get("kind");
+  const kind: Kind = kindParam === "video" || kindParam === "document" ? kindParam : "all";
   const [sessions, setSessions] = useState<Session[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -76,6 +88,8 @@ export default function LibraryPage() {
     const t = q.trim().toLowerCase();
     return projects.filter((p) => {
       if (t && !p.name.toLowerCase().includes(t)) return false;
+      if (kind === "document" && !p.has_document) return false;
+      if (kind === "video" && !(p.capture_count ?? sessions.some((s) => s.project_id === p.id))) return false;
       if (filter === "starred") return !!p.favorite;
       if (filter === "ready") return latestStatus(p.id) === "ready";
       if (filter === "processing")
@@ -83,7 +97,7 @@ export default function LibraryPage() {
       return true;
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projects, sessions, q, filter]);
+  }, [projects, sessions, q, filter, kind]);
 
   // Projects other people invited me to edit are listed apart from my own.
   const own = useMemo(() => filtered.filter((p) => !p.shared_with_me), [filtered]);
@@ -110,10 +124,8 @@ export default function LibraryPage() {
       {/* header */}
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h1 className="text-3xl font-semibold tracking-tight text-[var(--text)]">Library</h1>
-          <p className="mt-1.5 text-[15px] text-[var(--text-2)]">
-            All your projects and captures — starred first.
-          </p>
+          <h1 className="text-[28px] font-semibold tracking-tight text-[var(--text)]">{KIND_TITLE[kind].title}</h1>
+          <p className="mt-1.5 text-[14px] text-[var(--text-2)]">{KIND_TITLE[kind].blurb}</p>
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -178,7 +190,7 @@ export default function LibraryPage() {
               onClick={() => setFilter(f.key)}
               className={`rounded-full border px-3.5 py-1.5 text-sm font-medium transition-colors ${
                 filter === f.key
-                  ? "border-[#6d5dfb] bg-[#6d5dfb]/10 text-[var(--brand-2)]"
+                  ? "border-[#1E8F8E] bg-[#1E8F8E]/10 text-[var(--brand-2)]"
                   : "border-[var(--border)] bg-[var(--card)] text-[var(--text-2)] hover:text-[var(--text)]"
               }`}
             >
@@ -198,7 +210,7 @@ export default function LibraryPage() {
       {filtered.length === 0 && !error ? (
         <div className="mt-10">
           <EmptyState
-            title={q || filter !== "all" ? "Nothing matches" : "Your library is empty"}
+            title={q || filter !== "all" || kind !== "all" ? "Nothing matches" : "Your library is empty"}
             hint={
               q || filter !== "all"
                 ? "Try a different search or filter."
@@ -249,5 +261,14 @@ export default function LibraryPage() {
         />
       )}
     </main>
+  );
+}
+
+/** useSearchParams needs a Suspense boundary so the route can still prerender. */
+export default function LibraryPage() {
+  return (
+    <Suspense fallback={null}>
+      <LibraryInner />
+    </Suspense>
   );
 }

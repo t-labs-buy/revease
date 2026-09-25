@@ -412,7 +412,7 @@ export function TrimModal({
           onClick={toggleSkipSelected}
           disabled={!sel}
           className={`inline-flex items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--card)] px-3 py-1.5 text-sm hover:bg-[var(--hover)] disabled:opacity-40 ${
-            selSkipped ? "text-[#6d5dfb]" : "text-[var(--text)]"
+            selSkipped ? "text-[#1E8F8E]" : "text-[var(--text)]"
           }`}
           title="Skip — keeps the block in place but excludes it from playback & render"
         >
@@ -428,7 +428,7 @@ export function TrimModal({
         <div className="mx-auto flex items-center gap-2">
           <button
             onClick={togglePlay}
-            className="flex h-8 w-8 items-center justify-center rounded-full bg-[#6d5dfb] text-xs text-white"
+            className="flex h-8 w-8 items-center justify-center rounded-full bg-[#1E8F8E] text-xs text-white"
           >
             {playing ? "❚❚" : "▶"}
           </button>
@@ -444,7 +444,7 @@ export function TrimModal({
           step={0.5}
           value={zoom}
           onChange={(e) => setZoom(Number(e.target.value))}
-          className="w-24 accent-[#6d5dfb]"
+          className="w-24 accent-[#1E8F8E]"
         />
       </div>
 
@@ -501,7 +501,7 @@ export function TrimModal({
                     style={{ left: `${left}%`, width: `${width}%` }}
                     title="Removed — click Restore Block to bring it back"
                     className={`absolute top-0 flex h-full items-center justify-center overflow-hidden rounded-md border border-dashed bg-[repeating-linear-gradient(45deg,#f4f5fa,#f4f5fa_6px,#e9ebf3_6px,#e9ebf3_12px)] ${
-                      active ? "border-[#6d5dfb] ring-2 ring-[#6d5dfb]" : "border-[var(--border-strong)]"
+                      active ? "border-[#1E8F8E] ring-2 ring-[#1E8F8E]" : "border-[var(--border-strong)]"
                     }`}
                   >
                     {width > 6 && <span className="text-[10px] font-medium text-[var(--text-3)]">removed</span>}
@@ -514,7 +514,7 @@ export function TrimModal({
                   style={{ left: `${left}%`, width: `${width}%` }}
                   title={it.b.skipped ? `Skipped — ${it.b.words.slice(0, 8).join(" ")}` : it.b.words.slice(0, 8).join(" ")}
                   className={`absolute top-0 h-full overflow-hidden rounded-md bg-[#0e1116] ring-1 ring-inset ${
-                    active ? "ring-2 ring-[#6d5dfb]" : "ring-black/20"
+                    active ? "ring-2 ring-[#1E8F8E]" : "ring-black/20"
                   }`}
                 >
                   {/* real frames */}
@@ -564,14 +564,14 @@ export function TrimModal({
                       <span
                         onPointerDown={(e) => beginResize(e, it.b.step_id, "l")}
                         title="Drag to adjust start"
-                        className="absolute inset-y-0 -left-1.5 z-10 flex w-4 cursor-ew-resize touch-none items-center justify-center rounded-l-md bg-[#6d5dfb] hover:bg-[#5b4ce6]"
+                        className="absolute inset-y-0 -left-1.5 z-10 flex w-4 cursor-ew-resize touch-none items-center justify-center rounded-l-md bg-[#1E8F8E] hover:bg-[#5b4ce6]"
                       >
                         <span className="h-6 w-0.5 rounded bg-white" />
                       </span>
                       <span
                         onPointerDown={(e) => beginResize(e, it.b.step_id, "r")}
                         title="Drag to adjust end"
-                        className="absolute inset-y-0 -right-1.5 z-10 flex w-4 cursor-ew-resize touch-none items-center justify-center rounded-r-md bg-[#6d5dfb] hover:bg-[#5b4ce6]"
+                        className="absolute inset-y-0 -right-1.5 z-10 flex w-4 cursor-ew-resize touch-none items-center justify-center rounded-r-md bg-[#1E8F8E] hover:bg-[#5b4ce6]"
                       >
                         <span className="h-6 w-0.5 rounded bg-white" />
                       </span>
@@ -591,7 +591,7 @@ export function TrimModal({
               style={{ left: `${playheadPct}%` }}
               className="pointer-events-none absolute -top-1 bottom-0 w-0.5 -translate-x-1/2 bg-[#111827]"
             >
-              <span className="absolute -top-1.5 left-1/2 h-3.5 w-3.5 -translate-x-1/2 rounded-full border-2 border-white bg-[#6d5dfb] shadow" />
+              <span className="absolute -top-1.5 left-1/2 h-3.5 w-3.5 -translate-x-1/2 rounded-full border-2 border-white bg-[#1E8F8E] shadow" />
             </span>
           </div>
         </div>
@@ -698,7 +698,7 @@ export function RangeTrimModal({
             if (v.paused) void v.play();
             else v.pause();
           }}
-          className="flex h-8 w-8 items-center justify-center rounded-full bg-[#6d5dfb] text-xs text-[var(--text)]"
+          className="flex h-8 w-8 items-center justify-center rounded-full bg-[#1E8F8E] text-xs text-[var(--text)]"
         >
           {playing ? "❚❚" : "▶"}
         </button>
@@ -730,7 +730,7 @@ export function RangeTrimModal({
         <div className="absolute inset-y-0 right-0 bg-white/75" style={{ width: `${100 - R}%` }} />
         {/* kept-range border */}
         <div
-          className="pointer-events-none absolute inset-y-0 border-y-2 border-[#6d5dfb]"
+          className="pointer-events-none absolute inset-y-0 border-y-2 border-[#1E8F8E]"
           style={{ left: `${L}%`, width: `${R - L}%` }}
         />
         {/* handles */}
@@ -747,7 +747,7 @@ export function RangeTrimModal({
               (e.currentTarget.parentElement as HTMLElement).setPointerCapture(e.pointerId);
             }}
             style={{ left: `${pct}%` }}
-            className="absolute inset-y-0 z-10 flex w-3 -translate-x-1/2 cursor-ew-resize items-center justify-center rounded bg-[#6d5dfb]"
+            className="absolute inset-y-0 z-10 flex w-3 -translate-x-1/2 cursor-ew-resize items-center justify-center rounded bg-[#1E8F8E]"
           >
             <span className="h-6 w-0.5 rounded bg-white/80" />
           </div>
@@ -935,7 +935,7 @@ export function RawTrimModal({
               if (v.paused) void v.play();
               else v.pause();
             }}
-            className="flex h-8 w-8 items-center justify-center rounded-full bg-[#6d5dfb] text-xs text-white"
+            className="flex h-8 w-8 items-center justify-center rounded-full bg-[#1E8F8E] text-xs text-white"
           >
             {playing ? "❚❚" : "▶"}
           </button>
@@ -969,7 +969,7 @@ export function RawTrimModal({
               key={b.id}
               style={{ left: `${left}%`, width: `${width}%` }}
               className={`pointer-events-none absolute top-0 h-full overflow-hidden rounded-md bg-[#0e1116] ring-1 ring-inset ${
-                active ? "ring-2 ring-[#6d5dfb]" : "ring-black/20"
+                active ? "ring-2 ring-[#1E8F8E]" : "ring-black/20"
               }`}
             >
               {/* real frames */}
@@ -980,7 +980,7 @@ export function RawTrimModal({
                     <img key={i} src={f.url} alt="" draggable={false} className="h-full flex-1 object-cover" style={{ minWidth: 0 }} />
                   ))
                 ) : (
-                  <span className="h-full w-full bg-[#8b7cff]" />
+                  <span className="h-full w-full bg-[#16283C]" />
                 )}
               </span>
               {/* start · duration chip */}
@@ -997,7 +997,7 @@ export function RawTrimModal({
                   ))}
                 </span>
               )}
-              {active && <span className="absolute inset-0 bg-[#6d5dfb]/25" />}
+              {active && <span className="absolute inset-0 bg-[#1E8F8E]/25" />}
             </div>
           );
         })}
@@ -1006,7 +1006,7 @@ export function RawTrimModal({
           style={{ left: `${Math.min(100, (cur * 1000 * 100) / totalMs)}%` }}
           className="pointer-events-none absolute top-0 h-full w-0.5 -translate-x-1/2 bg-[#111827]"
         >
-          <span className="absolute -top-0.5 left-1/2 h-3 w-3 -translate-x-1/2 rounded-full border-2 border-white bg-[#6d5dfb] shadow" />
+          <span className="absolute -top-0.5 left-1/2 h-3 w-3 -translate-x-1/2 rounded-full border-2 border-white bg-[#1E8F8E] shadow" />
         </span>
       </div>
       <p className="mt-1 text-[11px] text-[#9aa1b2]">
@@ -1225,7 +1225,7 @@ export function CropModal({
             if (v.paused) void v.play();
             else v.pause();
           }}
-          className="flex h-8 w-8 items-center justify-center rounded-full bg-[#6d5dfb] text-xs text-[var(--text)]"
+          className="flex h-8 w-8 items-center justify-center rounded-full bg-[#1E8F8E] text-xs text-[var(--text)]"
         >
           {playing ? "❚❚" : "▶"}
         </button>
@@ -1238,7 +1238,7 @@ export function CropModal({
           onChange={(e) => {
             if (videoRef.current) videoRef.current.currentTime = Number(e.target.value);
           }}
-          className="flex-1 accent-[#6d5dfb]"
+          className="flex-1 accent-[#1E8F8E]"
         />
       </div>
 
@@ -1251,7 +1251,7 @@ export function CropModal({
               key={i}
               className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs ${
                 i === sel
-                  ? "border-[#6d5dfb] bg-[#6d5dfb]/10 text-[var(--text)]"
+                  ? "border-[#1E8F8E] bg-[#1E8F8E]/10 text-[var(--text)]"
                   : "border-[var(--border)] text-[var(--text-2)]"
               }`}
             >
@@ -1321,7 +1321,7 @@ export function CropModal({
                   : { start_ms: 0, end_ms: 0 },
               )
             }
-            className="h-4 w-8 accent-[#6d5dfb]"
+            className="h-4 w-8 accent-[#1E8F8E]"
           />
         </label>
         {/* filmstrip timeline — drag a crop window like a trim block */}
@@ -1346,8 +1346,8 @@ export function CropModal({
                 onPointerDown={(e) => blockDown(e, i, "move")}
                 style={{ left: `${left}%`, width: `${width}%` }}
                 title={`Crop ${i + 1} · ${mmss(s / 1000)}–${mmss(en / 1000)} — drag to move`}
-                className={`absolute inset-y-0 cursor-grab rounded-md border bg-[#6d5dfb]/30 backdrop-brightness-110 ${
-                  active ? "border-[#6d5dfb] ring-2 ring-inset ring-[#6d5dfb]" : "border-white/40"
+                className={`absolute inset-y-0 cursor-grab rounded-md border bg-[#1E8F8E]/30 backdrop-brightness-110 ${
+                  active ? "border-[#1E8F8E] ring-2 ring-inset ring-[#1E8F8E]" : "border-white/40"
                 }`}
               >
                 {width > 7 && (
@@ -1360,14 +1360,14 @@ export function CropModal({
                     <span
                       onPointerDown={(e) => blockDown(e, i, "l")}
                       title="Drag to adjust start"
-                      className="absolute inset-y-0 -left-0.5 flex w-2.5 cursor-ew-resize items-center justify-center rounded-l-md bg-[#6d5dfb]"
+                      className="absolute inset-y-0 -left-0.5 flex w-2.5 cursor-ew-resize items-center justify-center rounded-l-md bg-[#1E8F8E]"
                     >
                       <span className="h-6 w-0.5 rounded bg-white" />
                     </span>
                     <span
                       onPointerDown={(e) => blockDown(e, i, "r")}
                       title="Drag to adjust end"
-                      className="absolute inset-y-0 -right-0.5 flex w-2.5 cursor-ew-resize items-center justify-center rounded-r-md bg-[#6d5dfb]"
+                      className="absolute inset-y-0 -right-0.5 flex w-2.5 cursor-ew-resize items-center justify-center rounded-r-md bg-[#1E8F8E]"
                     >
                       <span className="h-6 w-0.5 rounded bg-white" />
                     </span>

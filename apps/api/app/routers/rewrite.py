@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.auth import CurrentUser
 from app.db import get_session
 from app.ownership import owned_project
-from app.rewrite import generate_script, rewrite_lines, suggest_zooms
+from app.rewrite import generate_script, rewrite_lines, suggest_zooms_with_source
 
 router = APIRouter(tags=["rewrite"])
 
@@ -35,6 +35,9 @@ class ZoomReq(BaseModel):
 
 class ZoomOut(BaseModel):
     zooms: list[dict]
+    # "anthropic:…" / "openrouter:…" when the AI answered, "rules" for the
+    # rule-based fallback (no key configured, or the AI call failed)
+    source: str = "none"
 
 
 @router.post("/projects/{project_id}/rewrite", response_model=RewriteOut)
@@ -70,7 +73,5 @@ def suggest(
     owned_project(db, user, project_id)
     if not payload.scenes:
         return ZoomOut(zooms=[])
-    try:
-        return ZoomOut(zooms=suggest_zooms(payload.scenes))
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"AI zoom suggestion failed: {e}")
+    zooms, source = suggest_zooms_with_source(payload.scenes)
+    return ZoomOut(zooms=zooms, source=source)

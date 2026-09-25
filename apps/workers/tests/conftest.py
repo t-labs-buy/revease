@@ -6,7 +6,9 @@ import tempfile
 _tmp = tempfile.mkdtemp(prefix="refract-worker-test-")
 os.environ["REFRACT_DATA_DIR"] = _tmp
 os.environ["REFRACT_MEDIA_DIR"] = os.path.join(_tmp, "media")
-os.environ["REFRACT_DATABASE_URL"] = f"sqlite:///{_tmp}/test.sqlite3"
+# REFRACT_TEST_DATABASE_URL runs the suite against another database (e.g. a
+# throwaway Postgres) to prove dialect compatibility; default is a temp SQLite.
+os.environ["REFRACT_DATABASE_URL"] = os.environ.get("REFRACT_TEST_DATABASE_URL") or f"sqlite:///{_tmp}/test.sqlite3"
 # Ensure deterministic (no-network) LLM labeling, transcription, and voice in tests.
 os.environ.pop("REFRACT_OPENROUTER_API_KEY", None)
 os.environ.pop("REFRACT_ANTHROPIC_API_KEY", None)

@@ -12,8 +12,8 @@ from sqlalchemy.orm import Session
 
 from app.auth import CurrentUser
 from app.db import get_session
-from app.docgen import build_document
-from app.models import RenderJob, Share, VideoProject, WorkflowGraphRow
+from app.docgen import build_document_v2, upgrade_doc
+from app.models import Document, RenderJob, Share, VideoProject, WorkflowGraphRow
 from app.ownership import owned_project, project_ids_for
 from app.schemas import ShareCreate, SharePublic, ShareOut, ShareUpdate
 from app.storage import store
@@ -140,8 +140,16 @@ def get_share(token: str, db: Session = Depends(get_session)) -> SharePublic:
     if s.kind == "doc":
         if graph is None:
             raise HTTPException(status_code=404, detail="no document to share")
-        return SharePublic(kind="doc", title=title, project_id=s.project_id,
-                           allow_download=allow_download, doc=build_document(graph.graph_json))
+        # Prefer the stored (AI-written, possibly edited) document so share links
+        # show what the owner sees; fall back to a mechanical build for projects
+        # that never generated one.
+        row = db.scalar(select(Document).where(Document.project_id == s.project_id))
+        if row is not None and row.doc_json and row.status == "ready":
+            doc = upgrade_doc(row.doc_json, graph.graph_json if row.graph_version == graph.version else None)
+        else:
+            doc = build_document_v2(graph.graph_json)
+        return SharePublic(kind="doc", title=doc.get("title") or title, project_id=s.project_id,
+                           allow_download=allow_download, doc=doc)
     key = _latest_render_key(db, s.project_id)
     if key is None:
         raise HTTPException(status_code=404, detail="no rendered video yet")

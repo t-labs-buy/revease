@@ -24,8 +24,8 @@ export default function PackagesPage() {
     try {
       const p = await createPackage("Untitled brand", {
         outro: "Thanks for watching!",
-        primary_color: "#6d5dfb",
-        accent_color: "#a855f7",
+        primary_color: "#1E8F8E",
+        accent_color: "#16283C",
         font: "Geist",
       });
       router.push(`/library/packages/${p.id}`);
@@ -71,7 +71,7 @@ export default function PackagesPage() {
             <div key={p.id} className="card card-hover group overflow-hidden">
               <div
                 className="relative flex h-24 items-center justify-center"
-                style={{ background: `linear-gradient(135deg, ${s.primary_color || "#6d5dfb"}, ${s.accent_color || "#a855f7"})` }}
+                style={{ background: `linear-gradient(135deg, ${s.primary_color || "#1E8F8E"}, ${s.accent_color || "#16283C"})` }}
               >
                 {logo ? (
                   // eslint-disable-next-line @next/next/no-img-element

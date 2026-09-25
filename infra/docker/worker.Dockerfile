@@ -38,4 +38,6 @@ COPY infra/docker/worker-entrypoint.sh /usr/local/bin/worker-entrypoint.sh
 RUN chmod +x /usr/local/bin/worker-entrypoint.sh
 
 ENTRYPOINT ["worker-entrypoint.sh"]
-CMD ["celery", "-A", "worker.celery_app", "worker", "--loglevel=info", "--concurrency=2"]
+# Default: one worker consuming both queues (small installs). Production runs a
+# worker per queue instead — see docker-compose files (`-Q media -c 1` / `-Q default -c 3`).
+CMD ["celery", "-A", "worker.celery_app", "worker", "--loglevel=info", "-Q", "media,default", "--concurrency=2"]

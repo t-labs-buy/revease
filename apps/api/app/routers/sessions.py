@@ -3,14 +3,21 @@ regardless of source (extension | recorder | upload)."""
 
 from __future__ import annotations
 
+import re
+from datetime import datetime, timedelta, timezone
+from typing import Literal
+from urllib.parse import quote
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
+from app.progress import summarize
 from app.auth import CurrentUser
 from app.db import get_session
-from app.models import CaptureSession, Event, Job, MediaAsset
+from app.models import CaptureSession, Event, Job, MediaAsset, Project
 from app.ownership import owned_project, owned_session, project_ids_for
 from app.queue import enqueue_understanding
 from app.usage import record_event
@@ -170,11 +177,19 @@ def get_session_status(
         )
     )
     latest_version = db.scalar(select(func.max(Job.version)).where(Job.session_id == session_id))
+    current = [j for j in jobs if j.version == (latest_version or 0)]
+    summary = summarize(current, stale_after_s=get_settings().pipeline_stale_after_s)
     return SessionStatus(
         session_id=sess.id,
         status=sess.status,
         latest_version=latest_version,
-        jobs=[JobOut.model_validate(j) for j in jobs if j.version == (latest_version or 0)],
+        jobs=[JobOut.model_validate(j) for j in current],
+        progress=summary.progress if current else None,
+        stage=summary.stage,
+        message=summary.message,
+        elapsed_s=summary.elapsed_s,
+        eta_s=summary.eta_s,
+        stalled=summary.stalled,
     )
 
 
@@ -183,8 +198,21 @@ def reprocess_session(
     session_id: str, user: CurrentUser, db: Session = Depends(get_session)
 ) -> CaptureSession:
     sess = owned_session(db, user, session_id)
+    if _pipeline_running(db, sess.id):
+        # A second run would start a duplicate encode of the same file.
+        raise HTTPException(status_code=409, detail="this recording is still being processed")
     enqueue_understanding(sess.id)
     return sess
+
+
+def _pipeline_running(db: Session, session_id: str) -> bool:
+    """A stage is running with a fresh heartbeat (see worker progress.Heartbeat)."""
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=get_settings().pipeline_stale_after_s)
+    for job in db.scalars(select(Job).where(Job.session_id == session_id, Job.status == "running")):
+        updated = job.updated_at if job.updated_at.tzinfo else job.updated_at.replace(tzinfo=timezone.utc)
+        if updated > cutoff:
+            return True
+    return False
 
 
 @router.patch("/{session_id}/trim", response_model=SessionOut)
@@ -235,3 +263,47 @@ def get_session_detail(
     detail.event_count = event_count or 0
     detail.poster = _poster_for(db, sess.id)
     return detail
+
+
+_ORIGINAL_RE = re.compile(r"^sessions/[^/]+/raw_video_[^/]+\.[A-Za-z0-9]+$")
+
+
+@router.get("/{session_id}/download")
+def download_video(
+    session_id: str,
+    user: CurrentUser,
+    variant: Literal["original", "processed"] = "original",
+    db: Session = Depends(get_session),
+) -> dict:
+    """A direct-download link for a capture's video.
+
+    `original` is the file exactly as recorded/uploaded; `processed` is the
+    full-quality MP4 the pipeline produced (seekable, plays everywhere). The
+    original is kept 7 days after processing by default (retention), so when it
+    is gone this falls back to the processed file and says so.
+
+    The link is a signed store URL (S3) or the public /media route with
+    `?download=`, so a multi-GB file streams straight to disk — never through
+    this API or the browser's memory."""
+    sess = owned_session(db, user, session_id)
+    asset = db.scalar(select(MediaAsset).where(MediaAsset.session_id == sess.id, MediaAsset.kind == "raw_video"))
+    processed_key = asset.storage_key if asset else None
+    original_key = None
+    if variant == "original":
+        originals = [o for o in store.list(f"sessions/{sess.id}/") if _ORIGINAL_RE.match(o.key)]
+        if originals:
+            original_key = max(originals, key=lambda o: o.modified).key
+    key = original_key or processed_key
+    if not key or not store.exists(key):
+        raise HTTPException(status_code=404, detail="no video file for this capture")
+    project = db.get(Project, sess.project_id)
+    stem = re.sub(r"[^\w\- ]+", "", (project.name if project else "") or "recording").strip().replace(" ", "-") or "recording"
+    # The asset only points at source.mp4 once the pipeline re-encoded the file;
+    # an upload that was already a good MP4 is served as-is, i.e. the original.
+    reencoded = key == processed_key and key.endswith("/source.mp4")
+    used = "processed" if reencoded else "original"
+    ext = key.rsplit(".", 1)[-1].lower()
+    filename = f"{stem}-{used}.{ext}"
+    url = store.presigned_get(key, download_name=filename) or f"/media/{key}?download={quote(filename)}"
+    return {"url": url, "filename": filename, "variant": used, "size": store.size(key),
+            "fallback": variant == "original" and used != "original"}

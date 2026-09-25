@@ -85,7 +85,7 @@ export default function SharedPage() {
                     href={shareLink(s.token)}
                     target="_blank"
                     rel="noreferrer"
-                    className="truncate text-xs text-violet-400 hover:text-violet-300"
+                    className="truncate text-xs text-[#1E8F8E] hover:text-[#1E8F8E]"
                   >
                     {shareLink(s.token)}
                   </a>
@@ -99,7 +99,7 @@ export default function SharedPage() {
                       type="checkbox"
                       checked={s.allow_download}
                       onChange={(e) => void toggleDownload(s, e.target.checked)}
-                      className="accent-violet-500"
+                      className="accent-[#1E8F8E]"
                     />
                     Download
                   </label>

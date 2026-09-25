@@ -129,6 +129,10 @@ class CaptureSession(Base):
     trim_end_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     keep_ranges_json: Mapped[list | None] = mapped_column(JSON, nullable=True)  # [[startMs,endMs],…]
     viewport_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    # Token of the pipeline request now running. A redelivered copy of the same
+    # message carries the same token and is dropped; a new request (re-trim,
+    # reprocess) carries a new one and waits for the running one to finish.
+    pipeline_token: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     project: Mapped[Project] = relationship(back_populates="sessions")
@@ -196,11 +200,32 @@ class MediaAsset(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
     session_id: Mapped[str] = mapped_column(ForeignKey("capture_sessions.id"), index=True)
-    kind: Mapped[str] = mapped_column(String, nullable=False)  # raw_video|audio|screenshot|frame
+    # raw_video|audio|screenshot|frame|docshot — docshot = a documentation snapshot
+    # the worker grabbed (and maybe annotated) for one doc step; never client-uploaded.
+    kind: Mapped[str] = mapped_column(String, nullable=False)
     storage_key: Mapped[str] = mapped_column(String, nullable=False)
     meta_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
     session: Mapped[CaptureSession] = relationship(back_populates="assets")
+
+
+class Upload(Base):
+    """A resumable multipart upload of a large capture file, straight to storage.
+    The asset row is created only on complete, so a half-finished upload never
+    looks like a recording the pipeline could process."""
+
+    __tablename__ = "uploads"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    session_id: Mapped[str] = mapped_column(ForeignKey("capture_sessions.id"), index=True)
+    kind: Mapped[str] = mapped_column(String, nullable=False)  # raw_video | audio
+    storage_key: Mapped[str] = mapped_column(String, nullable=False)
+    backend_upload_id: Mapped[str] = mapped_column(String, nullable=False)
+    size: Mapped[int] = mapped_column(Integer, nullable=False)
+    part_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String, default="uploading")  # uploading | done | aborted
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
 
 class WorkflowGraphRow(Base):
@@ -278,7 +303,11 @@ class Share(Base):
 
 
 class Document(Base):
-    """A generated step-by-step doc (SOP) derived from a Workflow Graph."""
+    """A step-by-step doc derived from a Workflow Graph (doc_json is a DocV2, see
+    schemas.py; legacy v1 rows are upgraded on read). Generation runs in the
+    worker (it needs ffmpeg for snapshots), so the row carries its own status
+    like AutoEditJob does: the API bumps `doc_version` and enqueues; the task
+    refuses anything older than the row's current version (stale redelivery)."""
 
     __tablename__ = "documents"
 
@@ -286,6 +315,12 @@ class Document(Base):
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
     graph_version: Mapped[int] = mapped_column(Integer, nullable=False)
     doc_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    # queued | running | ready | error. Pre-existing rows read as ready.
+    status: Mapped[str] = mapped_column(String, default="ready", server_default="ready")
+    doc_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    error_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    progress: Mapped[float | None] = mapped_column(Float, nullable=True)  # 0..1 while generating
+    message: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now
@@ -300,6 +335,8 @@ class RenderJob(Base):
     status: Mapped[str] = mapped_column(String, default="pending")
     output_key: Mapped[str | None] = mapped_column(String, nullable=True)
     stats_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    progress: Mapped[float | None] = mapped_column(Float, nullable=True)  # 0..1
+    message: Mapped[str | None] = mapped_column(String, nullable=True)
     error_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(
@@ -317,6 +354,12 @@ class Job(Base):
     status: Mapped[str] = mapped_column(String, default="pending")
     error_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
+    # Live progress for the UI: 0..1 within this stage + a human line ("Converting
+    # video · 12:03 of 28:46"). The worker also touches updated_at every ~20s while
+    # the stage runs (heartbeat) so a redelivered duplicate can tell it is alive.
+    progress: Mapped[float | None] = mapped_column(Float, nullable=True)
+    message: Mapped[str | None] = mapped_column(String, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now
     )

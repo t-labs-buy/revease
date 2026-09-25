@@ -65,13 +65,13 @@ export function VoicePanel({
           type="checkbox"
           checked={!!value.use_original}
           onChange={(e) => onChange({ use_original: e.target.checked })}
-          className="h-5 w-9 accent-[#6d5dfb]"
+          className="h-5 w-9 accent-[#1E8F8E]"
         />
       </label>
 
       {!value.use_original && (
         <>
-          <p className="rounded-lg border border-[#6d5dfb]/25 bg-[#6d5dfb]/8 px-3 py-2 text-xs text-[var(--brand-2)]">
+          <p className="rounded-lg border border-[#1E8F8E]/25 bg-[#1E8F8E]/8 px-3 py-2 text-xs text-[var(--brand-2)]">
             The chosen AI voice <strong>replaces your original narration</strong> in the generated
             video, speaking the same transcribed words. Preview a voice with ▶, click a row to
             select, then hit <strong>Generate video</strong>.
@@ -108,7 +108,7 @@ export function VoicePanel({
                     onClick={() => onChange({ voice_id: v.id })}
                     className={`flex cursor-pointer items-center gap-3 rounded-lg border p-2.5 transition-colors ${
                       active
-                        ? "border-[#6d5dfb]/40 bg-[#6d5dfb]/5"
+                        ? "border-[#1E8F8E]/40 bg-[#1E8F8E]/5"
                         : "border-transparent hover:bg-[var(--hover)]"
                     }`}
                   >
@@ -117,7 +117,7 @@ export function VoicePanel({
                         e.stopPropagation();
                         void play(v.id);
                       }}
-                      className="flex h-9 w-9 flex-none items-center justify-center rounded-full bg-[#6d5dfb] text-white hover:bg-[#5b4ce6]"
+                      className="flex h-9 w-9 flex-none items-center justify-center rounded-full bg-[#1E8F8E] text-white hover:bg-[#5b4ce6]"
                       title="Preview"
                     >
                       {previewing === v.id ? <Spinner /> : "►"}
@@ -129,11 +129,11 @@ export function VoicePanel({
                       </div>
                     </div>
                     {active ? (
-                      <span className="rounded-full bg-[#6d5dfb] px-2 py-0.5 text-[11px] font-medium text-[var(--text)]">
+                      <span className="rounded-full bg-[#1E8F8E] px-2 py-0.5 text-[11px] font-medium text-[var(--text)]">
                         ✓ Selected
                       </span>
                     ) : (
-                      <span className="rounded-full bg-[var(--hover)] px-2 py-0.5 text-[11px] text-[#6d5dfb]">
+                      <span className="rounded-full bg-[var(--hover)] px-2 py-0.5 text-[11px] text-[#1E8F8E]">
                         {v.style}
                       </span>
                     )}
@@ -153,7 +153,7 @@ export function VoicePanel({
                 step={0.05}
                 value={value.speed}
                 onChange={(e) => onChange({ speed: Number(e.target.value) })}
-                className="flex-1 accent-[#6d5dfb]"
+                className="flex-1 accent-[#1E8F8E]"
               />
               <span className="w-10 text-right text-sm text-[var(--text-2)]">{value.speed.toFixed(2)}×</span>
             </div>

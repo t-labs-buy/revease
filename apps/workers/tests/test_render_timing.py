@@ -44,6 +44,8 @@ def test_media_card_keeps_video_soundtrack_and_normalizes_timing(tmp_path, monke
     )
     assert _has_audio(tone) and not _has_audio(silent)
     monkeypatch.setattr(render.store, "local_path", lambda key: tmp_path / key)
+    # media is read through store.fetch (the storage contract: S3 downloads first)
+    monkeypatch.setattr(render.store, "fetch", lambda key: (tmp_path / key) if (tmp_path / key).exists() else None)
 
     with_sound, _ = render._render_media_card("tone.mp4", "video", 1000, (320, 180), tmp_path, "intro")
     no_sound, _ = render._render_media_card("silent.mp4", "video", 1000, (320, 180), tmp_path, "outro")

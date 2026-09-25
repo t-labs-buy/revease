@@ -27,8 +27,8 @@ def _find_source_video(db, project_id: str):
             )
         )
         if asset:
-            p = store.local_path(asset.storage_key)
-            if p.exists():
+            p = store.fetch(asset.storage_key)
+            if p is not None:
                 return p, sess.id
     return None, None
 
@@ -72,6 +72,7 @@ def run_autoedit(job_id: str) -> dict:
         out_key = f"autoedit/{job.id}.mp4"
         out_path = store.local_path(out_key)
         stats = autoedit.render(video, analysis, out_path, work, srt_path=srt_path)
+        store.commit(out_key)
 
         job.output_key = out_key
         job.stats_json = stats

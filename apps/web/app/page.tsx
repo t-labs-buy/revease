@@ -1,27 +1,34 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+/**
+ * The dashboard. Laid out as a workspace rather than a landing page: a compact
+ * hero, a task-oriented "Create content" panel, then a grid of overview
+ * metrics, recent activity, the most recent project to resume, and a project
+ * list. Everything shown is derived from real projects/sessions — no
+ * placeholder numbers — and the header search filters the lists below.
+ *
+ * Shelved features (the knowledge base) are shown inert with a small "Beta"
+ * pill rather than a "Coming soon" overlay, so the page doesn't advertise what
+ * it can't do yet.
+ */
+
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { listArticles, listProjects, listSessions, mediaUrl, type Project, type Session } from "@/lib/api";
-import { fmtDateIST } from "@/lib/time";
 import { createPortal } from "react-dom";
+import { listArticles, listProjects, listSessions, mediaUrl, type Project, type Session } from "@/lib/api";
 import { CaptureModal, type CaptureIntent } from "@/components/CaptureModal";
 import { EmptyState } from "@/components/ui";
 import { useTopBarSlot } from "@/components/TopBar";
 import { useAuth } from "@/contexts/AuthContext";
 import {
   IconArrowRight,
-  IconBook,
-  IconChevronDown,
-  IconDatabase,
+  IconChevronRight,
   IconDoc,
   IconFolder,
   IconLibrary,
-  IconMoreHorizontal,
   IconPlay,
   IconPlus,
   IconSearch,
-  IconSettings,
   IconSparkles,
   IconUpload,
   IconVideo,
@@ -34,33 +41,63 @@ function timeGreeting() {
   return "Good evening";
 }
 
-const GRADS = [
-  "from-[#6d5dfb] to-[#a855f7]",
-  "from-[#8b5cf6] to-[#ec4899]",
-  "from-[#6366f1] to-[#06b6d4]",
-  "from-[#f97316] to-[#ec4899]",
-];
-
 const mmss = (ms: number) =>
   `${String(Math.floor(ms / 60000)).padStart(2, "0")}:${String(Math.floor((ms % 60000) / 1000)).padStart(2, "0")}`;
 
-const relTime = (iso?: string) => {
-  if (!iso) return "recently";
-  // API timestamps are UTC but carry no zone marker (SQLite drops it) — without
-  // the "Z" the browser reads them as local time and everything looks ~5.5h old.
+/** API timestamps are UTC but carry no zone marker (SQLite drops it) — without
+ *  the "Z" the browser reads them as local time and everything looks ~5.5h old. */
+const toMs = (iso?: string) => {
+  if (!iso) return 0;
   const utc = /[zZ]|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : iso + "Z";
   const d = new Date(utc).getTime();
-  if (isNaN(d)) return "recently";
+  return isNaN(d) ? 0 : d;
+};
+
+const relTime = (iso?: string) => {
+  const d = toMs(iso);
+  if (!d) return "recently";
   const s = Math.max(1, Math.floor((Date.now() - d) / 1000));
   if (s < 60) return "just now";
   const m = Math.floor(s / 60);
-  if (m < 60) return `Updated ${m}m ago`;
+  if (m < 60) return `${m} min ago`;
   const h = Math.floor(m / 60);
-  if (h < 24) return `Updated ${h}h ago`;
+  if (h < 24) return `${h} hour${h === 1 ? "" : "s"} ago`;
   const day = Math.floor(h / 24);
-  if (day < 30) return `Updated ${day}d ago`;
-  return `Updated ${Math.floor(day / 30)}mo ago`;
+  if (day === 1) return "yesterday";
+  if (day < 30) return `${day} days ago`;
+  return `${Math.floor(day / 30)} mo ago`;
 };
+
+const pad2 = (n: number) => String(n).padStart(2, "0");
+
+const STATUS_LABEL: Record<string, string> = {
+  ready: "Ready to edit",
+  processing: "Processing",
+  captured: "Queued",
+  error: "Needs attention",
+};
+
+/** Small section header: eyebrow label on the left, optional link on the right. */
+function SectionHead({ label, href, linkText = "View all" }: { label: string; href?: string; linkText?: string }) {
+  return (
+    <div className="flex items-center justify-between">
+      <span className="eyebrow">{label}</span>
+      {href && (
+        <Link href={href} className="inline-flex items-center gap-1 text-[13px] font-medium text-[var(--brand)] hover:underline">
+          {linkText} <IconArrowRight width={13} height={13} />
+        </Link>
+      )}
+    </div>
+  );
+}
+
+function BetaPill() {
+  return (
+    <span className="rounded bg-[var(--hover)] px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide text-[var(--text-3)]">
+      Beta
+    </span>
+  );
+}
 
 export default function Home() {
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -81,7 +118,7 @@ export default function Home() {
     Promise.all([listSessions(), listProjects()])
       .then(([s, ps]) => {
         setSessions(s);
-        setProjects(ps.slice(0, 12));
+        setProjects(ps);
       })
       .catch((e) => setError(String(e)));
     // Knowledge base count is a nice-to-have stat; don't surface its errors on the homepage.
@@ -104,96 +141,96 @@ export default function Home() {
 
   const open = (intent: CaptureIntent) => setModal(intent);
 
-  // A project is a "Document" when one has actually been generated for it — the
-  // old rule (more than one capture) had nothing to do with documents and
-  // mislabelled every re-recorded project.
+  // A project is a "Document" when one has actually been generated for it.
   const isDocProject = (p: Project) => !!p.has_document;
 
-  const FEATURES = [
-    {
-      title: "Record your screen",
-      desc: "Capture your screen and microphone. AI will handle the rest.",
-      icon: <IconVideo width={26} height={26} />,
-      cta: "Start recording",
-      onClick: () => open("record"),
-      accent: "#7C3AED",
-      gradient: "linear-gradient(135deg, rgba(124,58,237,0.12), rgba(167,139,250,0.04))",
-      border: "rgba(124,58,237,0.16)",
-      art: (
-        <div className="flex flex-col items-center gap-2">
-          <span className="flex h-20 w-28 items-center justify-center rounded-2xl bg-white/70 shadow-sm ring-1 ring-black/5">
-            <span className="inline-flex items-center gap-1.5 rounded-full bg-[#7C3AED]/10 px-3 py-1.5 text-xs font-semibold text-[#7C3AED]">
-              <span className="h-2 w-2 rounded-full bg-red-500" /> REC
-            </span>
-          </span>
-        </div>
-      ),
-    },
-    {
-      title: "Create a video",
-      desc: "Polished videos with AI voiceover, auto-zoom and captions.",
-      icon: <IconSparkles width={26} height={26} />,
-      cta: "Create video",
-      onClick: () => open("video"),
-      accent: "#EC4899",
-      gradient: "linear-gradient(135deg, rgba(236,72,153,0.12), rgba(244,114,182,0.04))",
-      border: "rgba(236,72,153,0.16)",
-      art: (
-        <div className="flex w-28 flex-col items-center gap-2 rounded-2xl bg-white/70 p-3.5 shadow-sm ring-1 ring-black/5">
-          <span className="flex h-12 w-12 items-center justify-center rounded-full bg-[#EC4899] pl-0.5 text-white shadow">
-            <IconPlay width={18} height={18} />
-          </span>
-          <span className="relative h-1.5 w-full rounded-full bg-[#EC4899]/20">
-            <span className="absolute left-0 top-0 h-full w-1/3 rounded-full bg-[#EC4899]" />
-            <span className="absolute left-1/3 top-1/2 h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full bg-[#EC4899]" />
-          </span>
-        </div>
-      ),
-    },
-    {
-      title: "Create a document",
-      soon: true,
-      desc: "Step-by-step guides & SOPs generated from your captures.",
-      icon: <IconDoc width={26} height={26} />,
-      cta: "Create document",
-      onClick: () => open("doc"),
-      accent: "#10B981",
-      gradient: "linear-gradient(135deg, rgba(16,185,129,0.12), rgba(52,211,153,0.04))",
-      border: "rgba(16,185,129,0.16)",
-      art: (
-        <div className="relative h-28 w-24 rounded-2xl bg-white/80 p-3.5 shadow-sm ring-1 ring-black/5">
-          <span className="block h-1.5 w-3/4 rounded bg-[#10B981]/70" />
-          <span className="mt-3 block h-1 w-full rounded bg-black/10" />
-          <span className="mt-1.5 block h-1 w-5/6 rounded bg-black/10" />
-          <span className="mt-1.5 block h-1 w-full rounded bg-black/10" />
-          <span className="mt-1.5 block h-1 w-2/3 rounded bg-black/10" />
-        </div>
-      ),
-    },
-  ];
+  // ---- derived data -------------------------------------------------------
+
+  const byProject = useMemo(() => {
+    const m = new Map<string, Session[]>();
+    for (const s of sessions) m.set(s.project_id, [...(m.get(s.project_id) ?? []), s]);
+    for (const list of m.values()) list.sort((a, b) => toMs(b.created_at) - toMs(a.created_at));
+    return m;
+  }, [sessions]);
+
+  const latestOf = (p: Project) => byProject.get(p.id)?.[0];
+  const touchedAt = (p: Project) => Math.max(toMs(p.created_at), toMs(latestOf(p)?.created_at));
+
+  const term = q.trim().toLowerCase();
+  const matches = (name: string) => !term || name.toLowerCase().includes(term);
+
+  const recentProjects = useMemo(
+    () => [...projects].filter((p) => matches(p.name)).sort((a, b) => touchedAt(b) - touchedAt(a)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [projects, byProject, term],
+  );
+
+  // One row per session (a video) plus one per generated document, newest first.
+  const activity = useMemo(() => {
+    const names = new Map(projects.map((p) => [p.id, p.name]));
+    const rows: { key: string; title: string; kind: string; at: string; href: string }[] = [];
+    for (const s of sessions) {
+      const title = names.get(s.project_id);
+      if (!title) continue;
+      rows.push({ key: `s-${s.id}`, title, kind: "Video", at: s.created_at, href: `/projects/${s.project_id}` });
+    }
+    for (const p of projects) {
+      if (isDocProject(p))
+        rows.push({ key: `d-${p.id}`, title: p.name, kind: "Document", at: p.created_at, href: `/projects/${p.id}/document` });
+      if (!byProject.has(p.id))
+        rows.push({ key: `p-${p.id}`, title: p.name, kind: "Project", at: p.created_at, href: `/projects/${p.id}` });
+    }
+    return rows.filter((r) => matches(r.title)).sort((a, b) => toMs(b.at) - toMs(a.at)).slice(0, 6);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projects, sessions, byProject, term]);
+
+  // The most recently touched project that has a capture — the thing to resume.
+  const resume = useMemo(() => {
+    const p = [...projects].filter((p) => byProject.has(p.id)).sort((a, b) => touchedAt(b) - touchedAt(a))[0];
+    return p ? { project: p, session: latestOf(p)! } : null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projects, byProject]);
 
   const documentsCount = projects.filter(isDocProject).length;
 
-  const STATS = [
-    { label: "Projects", value: projects.length, icon: <IconFolder width={20} height={20} />, color: "#7C3AED" },
-    { label: "Videos", value: sessions.length, icon: <IconVideo width={20} height={20} />, color: "#EC4899" },
-    { label: "Documents", value: documentsCount, icon: <IconDoc width={20} height={20} />, color: "#10B981" },
-    { label: "Knowledge Bases", value: kbCount, icon: <IconDatabase width={20} height={20} />, color: "#A78BFA", soon: true },
+  const METRICS = [
+    { label: "Projects", value: projects.length, href: "/library" },
+    { label: "Videos", value: sessions.length, href: "/library?kind=video" },
+    { label: "Documents", value: documentsCount, href: "/library?kind=document" },
+    { label: "Knowledge items", value: kbCount, soon: true },
   ];
 
-  const QUICK = [
-    { title: "Record", desc: "Capture screen & voice", icon: <IconVideo width={22} height={22} />, onClick: () => open("record") },
-    { title: "Upload", desc: "Bring an MP4 or MOV", icon: <IconUpload width={22} height={22} />, onClick: () => open("upload") },
-    { title: "New video", desc: "AI video from a capture", icon: <IconSparkles width={22} height={22} />, onClick: () => open("video") },
-    { title: "New doc", desc: "AI step-by-step guide", icon: <IconDoc width={22} height={22} />, onClick: () => open("doc"), soon: true },
-    { title: "Library", desc: "All your content", icon: <IconLibrary width={22} height={22} />, href: "/library" },
-    { title: "Knowledge base", desc: "Team guides in one place", icon: <IconBook width={22} height={22} />, href: "/knowledge-base", soon: true },
+  const CREATE: { title: string; desc: string; icon: JSX.Element; onClick: () => void; soon?: boolean }[] = [
+    {
+      title: "Record screen",
+      desc: "Capture your screen and microphone. AI handles the rest.",
+      icon: <IconVideo width={22} height={22} />,
+      onClick: () => open("record"),
+    },
+    {
+      title: "Create video",
+      desc: "Polished video with AI voiceover, auto-zoom and captions.",
+      icon: <IconSparkles width={22} height={22} />,
+      onClick: () => open("video"),
+    },
+    {
+      title: "Generate document",
+      desc: "Step-by-step guides and SOPs from your captures.",
+      icon: <IconDoc width={22} height={22} />,
+      onClick: () => open("doc"),
+    },
   ];
 
-  const filtered = projects.filter((p) => p.name.toLowerCase().includes(q.trim().toLowerCase()));
+  const QUICK: { label: string; icon: JSX.Element; onClick?: () => void; href?: string; soon?: boolean }[] = [
+    { label: "Record", icon: <IconPlus width={15} height={15} />, onClick: () => open("record") },
+    { label: "Upload", icon: <IconUpload width={15} height={15} />, onClick: () => open("upload") },
+    { label: "Create video", icon: <IconPlay width={13} height={13} />, onClick: () => open("video") },
+    { label: "Document", icon: <IconDoc width={15} height={15} />, onClick: () => open("doc") },
+    { label: "Open library", icon: <IconLibrary width={15} height={15} />, href: "/library" },
+  ];
 
   return (
-    <main className="min-h-screen bg-[var(--bg)]">
+    <main className="min-h-full">
       {modal && <CaptureModal intent={modal} onClose={() => setModal(null)} />}
 
       {/* Search belongs to this page (it filters the lists below) but is shown in
@@ -202,278 +239,282 @@ export default function Home() {
         createPortal(
           <>
             <IconSearch
-              width={16}
-              height={16}
-              className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-[var(--text-3)]"
+              width={15}
+              height={15}
+              className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--text-3)]"
             />
             <input
               ref={searchRef}
               value={q}
               onChange={(e) => setQ(e.target.value)}
               placeholder="Search projects, videos, documents..."
-              className="input input-pill py-2.5 pl-10 pr-14"
+              className="input h-9 pl-9 pr-12"
             />
-            <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 rounded-md border border-[var(--border)] bg-[var(--hover)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--text-3)]">
+            <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 rounded border border-[var(--border)] bg-[var(--hover)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--text-3)]">
               ⌘K
             </span>
           </>,
           topBarSlot,
         )}
 
-      <div className="mx-auto max-w-[1600px] px-8 py-10">
-        {/* greeting */}
-        <section className="animate-fade-in">
-          <h1 className="text-[42px] font-bold leading-[1.1] tracking-tight text-[var(--text)]">
-            {greeting}, {displayName} <span className="align-middle">👋</span>
-          </h1>
-          <p className="mt-2.5 text-lg text-[var(--text-2)]">
-            Create tutorials, videos and documentation using AI.
-          </p>
+      <div className="mx-auto max-w-[1440px] px-5 py-7 md:px-8">
+        {/* ---- hero -------------------------------------------------------- */}
+        <section className="animate-fade-in relative overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--card)] px-6 py-6 md:px-8">
+          {/* Tarento geometry: two angled planes, kept faint so it reads as texture */}
+          <div aria-hidden className="pointer-events-none absolute inset-y-0 right-0 hidden w-[42%] md:block">
+            <div className="tarento-lines absolute inset-0 opacity-70" />
+            <div className="absolute -right-24 -top-10 h-[240%] w-40 -rotate-[28deg] bg-[var(--navy)] opacity-[0.06]" />
+            <div className="absolute -right-2 -top-10 h-[240%] w-24 -rotate-[28deg] bg-[var(--brand)] opacity-[0.10]" />
+            <div className="absolute inset-0 bg-gradient-to-r from-[var(--card)] via-[var(--card)] to-transparent" />
+          </div>
+          <div className="relative">
+            <span className="eyebrow">Welcome back</span>
+            <h1 className="mt-1.5 text-[28px] font-bold leading-tight tracking-tight text-[var(--text)] md:text-[30px]">
+              {greeting}, {displayName} <span className="align-middle">👋</span>
+            </h1>
+            <p className="mt-1.5 max-w-lg text-[14px] text-[var(--text-2)]">
+              Create, capture and share knowledge with AI-powered workflows.
+            </p>
+            <div className="mt-5 flex flex-wrap items-center gap-2.5">
+              <button onClick={() => open("record")} className="btn btn-primary">
+                <IconPlus width={16} height={16} /> Create content
+              </button>
+              <Link href="/library" className="btn btn-secondary">
+                Explore library
+              </Link>
+            </div>
+          </div>
         </section>
 
         {error && (
-          <p className="mt-6 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-400">
+          <p className="mt-4 rounded-lg border border-[#D9534F]/30 bg-[#D9534F]/10 px-3 py-2 text-sm text-[var(--error)]">
             {error}
           </p>
         )}
 
-        {/* feature cards */}
-        <div className="mt-12 grid gap-6 md:grid-cols-3">
-          {FEATURES.map((f, i) => (
-            <div
-              key={f.title}
-              aria-disabled={f.soon ? "true" : undefined}
-              className={`animate-fade-in group relative flex min-h-[240px] flex-col overflow-hidden rounded-[20px] border p-7 shadow-[var(--shadow-card)] transition-all duration-[250ms] ease-out ${
-                f.soon
-                  ? "cursor-not-allowed select-none"
-                  : "hover:-translate-y-1 hover:shadow-[var(--shadow-card-hover)]"
-              }`}
-              style={{ background: f.gradient, borderColor: f.border, animationDelay: `${i * 60}ms` }}
-            >
-              {f.soon && (
-                <span className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
-                  <span className="rounded-full border border-[var(--border)] bg-[var(--card)]/95 px-6 py-3 text-lg font-semibold tracking-tight text-[var(--text)] shadow-[var(--shadow-card-hover)] backdrop-blur-sm">
-                    Coming soon
+        {/* ---- create content + quick actions ------------------------------- */}
+        <div className="mt-5 grid gap-5 lg:grid-cols-3">
+          <section className="card animate-fade-in p-6 lg:col-span-2" style={{ animationDelay: "40ms" }}>
+            <SectionHead label="Create content" />
+            <h2 className="mt-1.5 text-[18px] font-semibold tracking-tight text-[var(--text)]">
+              What do you want to create?
+            </h2>
+            <div className="mt-4 grid gap-3 sm:grid-cols-3">
+              {CREATE.map((c) => (
+                <button
+                  key={c.title}
+                  onClick={c.soon ? undefined : c.onClick}
+                  disabled={c.soon}
+                  aria-disabled={c.soon ? "true" : undefined}
+                  title={c.soon ? "Coming soon" : undefined}
+                  className={`group flex flex-col items-start gap-3 rounded-lg border p-4 text-left transition-colors ${
+                    c.soon
+                      ? "cursor-not-allowed border-dashed border-[var(--border)] opacity-60"
+                      : "border-[var(--border)] hover:border-[var(--brand)] hover:bg-[var(--brand-soft)]"
+                  }`}
+                >
+                  <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-[var(--brand-soft)] text-[var(--brand)]">
+                    {c.icon}
                   </span>
-                </span>
-              )}
-              <span
-                className={`flex h-14 w-14 items-center justify-center rounded-2xl shadow-sm ${f.soon ? "opacity-45" : ""}`}
-                style={{ backgroundColor: `${f.accent}1f`, color: f.accent }}
-              >
-                {f.icon}
-              </span>
-              <h3 className={`mt-5 text-[22px] font-semibold text-[var(--text)] ${f.soon ? "opacity-45" : ""}`}>
-                {f.title}
-              </h3>
-              <p className={`mt-2 max-w-[75%] text-[15px] leading-relaxed text-[var(--text-2)] ${f.soon ? "opacity-45" : ""}`}>
-                {f.desc}
-              </p>
-              <button
-                onClick={f.soon ? undefined : f.onClick}
-                disabled={f.soon}
-                className={`mt-6 inline-flex w-fit items-center gap-1.5 rounded-xl px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition-transform duration-200 ${
-                  f.soon ? "cursor-not-allowed opacity-45" : "hover:scale-[1.03]"
-                }`}
-                style={{ backgroundColor: f.accent }}
-              >
-                {f.cta} <IconArrowRight width={15} height={15} />
-              </button>
-              {/* decorative art */}
-              <div
-                className={`pointer-events-none absolute -right-2 bottom-4 transition-transform duration-[250ms] ${
-                  f.soon ? "opacity-35" : "opacity-90 group-hover:scale-105"
-                }`}
-              >
-                {f.art}
-              </div>
+                  <span>
+                    <span className="flex items-center gap-2 text-[15px] font-semibold text-[var(--text)]">
+                      {c.title}
+                      {c.soon && <BetaPill />}
+                    </span>
+                    <span className="mt-1 block text-[13px] leading-snug text-[var(--text-2)]">{c.desc}</span>
+                  </span>
+                </button>
+              ))}
             </div>
-          ))}
+          </section>
+
+          <section className="card animate-fade-in p-6" style={{ animationDelay: "80ms" }}>
+            <SectionHead label="Quick actions" />
+            <div className="mt-4 flex flex-wrap gap-2">
+              {QUICK.map((t) => {
+                const cls = "btn btn-secondary btn-sm h-9 gap-1.5 px-3 text-[13px]";
+                if (t.soon)
+                  return (
+                    <span key={t.label} aria-disabled="true" title="Coming soon" className={`${cls} cursor-not-allowed opacity-50`}>
+                      {t.icon} {t.label} <BetaPill />
+                    </span>
+                  );
+                return t.href ? (
+                  <Link key={t.label} href={t.href} className={cls}>
+                    {t.icon} {t.label}
+                  </Link>
+                ) : (
+                  <button key={t.label} onClick={t.onClick} className={cls}>
+                    {t.icon} {t.label}
+                  </button>
+                );
+              })}
+            </div>
+            <p className="mt-4 text-[12.5px] leading-relaxed text-[var(--text-3)]">
+              Press <kbd className="rounded border border-[var(--border)] bg-[var(--hover)] px-1 text-[11px]">⌘K</kbd> to search
+              across everything you&apos;ve made.
+            </p>
+          </section>
         </div>
 
-        {/* stats */}
-        <div className="mt-12 grid grid-cols-2 gap-6 sm:grid-cols-4">
-          {STATS.map((s) => (
-            <div key={s.label} className="relative">
-              <div
-                className={`card flex items-center gap-4 p-5 ${s.soon ? "opacity-40" : ""}`}
-              >
-                <span
-                  className="flex h-12 w-12 flex-none items-center justify-center rounded-2xl"
-                  style={{ backgroundColor: `${s.color}1a`, color: s.color }}
-                >
-                  {s.icon}
-                </span>
-                <div className="min-w-0">
-                  {/* the count is meaningless while the feature is shelved */}
-                  <div className="text-2xl font-bold text-[var(--text)]">
-                    {s.soon ? "—" : s.value}
-                  </div>
-                  <div className="truncate text-sm text-[var(--text-2)]">{s.label}</div>
-                </div>
-              </div>
-              {s.soon && (
-                <span className="pointer-events-none absolute inset-0 flex items-center justify-center">
-                  <span className="rounded-full border border-[var(--border)] bg-[var(--card)]/95 px-4 py-2 text-sm font-semibold text-[var(--text)] shadow-[var(--shadow-card)] backdrop-blur-sm">
-                    Coming soon
-                  </span>
-                </span>
-              )}
+        {/* ---- overview + recent activity ---------------------------------- */}
+        <div className="mt-5 grid gap-5 lg:grid-cols-3">
+          <section className="card animate-fade-in p-6 lg:col-span-2 lg:self-start" style={{ animationDelay: "120ms" }}>
+            <SectionHead label="Content overview" href="/library" />
+            <div className="mt-4 grid grid-cols-2 gap-x-6 gap-y-5 sm:grid-cols-4">
+              {METRICS.map((m) => {
+                const body = (
+                  <>
+                    <div className="text-[26px] font-bold leading-none tracking-tight text-[var(--text)]">
+                      {m.soon ? "—" : pad2(m.value)}
+                    </div>
+                    <div className="mt-2 flex items-center gap-2 text-[13px] text-[var(--text-2)]">
+                      {m.label}
+                      {m.soon && <BetaPill />}
+                    </div>
+                    <div className={`mt-3 h-0.5 w-8 rounded-full ${m.soon ? "bg-[var(--border-strong)]" : "bg-[var(--brand)]"}`} />
+                  </>
+                );
+                return m.href && !m.soon ? (
+                  <Link key={m.label} href={m.href} className="block rounded-lg transition-colors hover:text-[var(--brand)]">
+                    {body}
+                  </Link>
+                ) : (
+                  <div key={m.label}>{body}</div>
+                );
+              })}
             </div>
-          ))}
-        </div>
 
-        {/* quick access */}
-        <div className="mt-12 flex items-center justify-between">
-          <h2 className="text-[28px] font-semibold tracking-tight text-[var(--text)]">Quick access</h2>
-          <button
-            title="Coming soon"
-            className="inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-sm font-medium text-[#7C3AED] opacity-90 transition-colors hover:bg-[#7C3AED]/10"
-          >
-            <IconSettings width={15} height={15} /> Customize
-          </button>
-        </div>
-        <div className="mt-6 grid grid-cols-1 gap-6 sm:grid-cols-3 lg:grid-cols-6">
-          {QUICK.map((t) => {
-            const inner = (
-              <div
-                className={`card flex h-full flex-col items-start gap-3 p-5 text-left ${
-                  t.soon ? "" : "card-hover"
-                }`}
-              >
-                <span className="flex h-12 w-12 flex-none items-center justify-center rounded-2xl bg-[#7C3AED]/10 text-[#7C3AED]">
-                  {t.icon}
-                </span>
-                <div className="min-w-0">
-                  <div className="text-[15px] font-semibold text-[var(--text)]">{t.title}</div>
-                  <div className="mt-0.5 text-sm leading-snug text-[var(--text-2)]">{t.desc}</div>
-                </div>
-              </div>
-            );
-            // Shelved: the card is dimmed and inert, with a legible chip on top
-            // rather than dimming the words "Coming soon" along with the card.
-            if (t.soon)
-              return (
-                <div
-                  key={t.title}
-                  aria-disabled="true"
-                  className="relative block h-full cursor-not-allowed select-none"
+            {/* continue where you left off */}
+            {resume && (
+              <div className="mt-6 border-t border-[var(--border)] pt-5">
+                <SectionHead label="Continue where you left off" />
+                <Link
+                  href={`/projects/${resume.project.id}`}
+                  className="mt-3 flex items-center gap-4 rounded-lg border border-[var(--border)] p-3 transition-colors hover:border-[var(--brand)] hover:bg-[var(--brand-soft)]"
                 >
-                  <div className="pointer-events-none h-full opacity-40">{inner}</div>
-                  <span className="pointer-events-none absolute inset-0 flex items-center justify-center">
-                    <span className="rounded-full border border-[var(--border)] bg-[var(--card)]/95 px-4 py-2 text-sm font-semibold text-[var(--text)] shadow-[var(--shadow-card)] backdrop-blur-sm">
-                      Coming soon
+                  <span className="relative flex h-14 w-24 flex-none items-center justify-center overflow-hidden rounded-md bg-[var(--navy)]">
+                    {resume.session.poster ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img src={mediaUrl(resume.session.poster)} alt="" className="h-full w-full object-cover" />
+                    ) : null}
+                    <span className="absolute flex h-7 w-7 items-center justify-center rounded-full bg-white/90 pl-0.5 text-[var(--navy)]">
+                      <IconPlay width={11} height={11} />
                     </span>
                   </span>
-                </div>
-              );
-            return t.href ? (
-              <Link key={t.title} href={t.href} className="block h-full">
-                {inner}
-              </Link>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-[15px] font-semibold text-[var(--text)]">{resume.project.name}</span>
+                    <span className="mt-0.5 block text-[13px] text-[var(--text-2)]">
+                      Video ·{" "}
+                      {STATUS_LABEL[resume.session.status] ?? resume.session.status}
+                      {resume.session.duration_ms ? ` · ${mmss(resume.session.duration_ms)}` : ""} ·{" "}
+                      {relTime(resume.session.created_at)}
+                    </span>
+                  </span>
+                  <span className="btn btn-primary btn-sm flex-none">Continue</span>
+                </Link>
+              </div>
+            )}
+          </section>
+
+          <section className="card animate-fade-in p-6" style={{ animationDelay: "160ms" }}>
+            <SectionHead label="Recent activity" href="/library" />
+            {activity.length === 0 ? (
+              <p className="mt-4 text-[13px] text-[var(--text-3)]">
+                {term ? "Nothing matches your search." : "Your first recording will show up here."}
+              </p>
             ) : (
-              <button key={t.title} onClick={t.onClick} className="block h-full text-left">
-                {inner}
-              </button>
-            );
-          })}
+              <ul className="mt-3 divide-y divide-[var(--border)]">
+                {activity.map((a) => (
+                  <li key={a.key}>
+                    <Link href={a.href} className="group flex items-start gap-3 py-2.5">
+                      <span className="mt-[7px] h-1.5 w-1.5 flex-none rounded-full bg-[var(--brand)]" />
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-[14px] font-medium text-[var(--text)] group-hover:text-[var(--brand)]">
+                          {a.title}
+                        </span>
+                        <span className="block text-[12.5px] text-[var(--text-3)]">
+                          {a.kind} · Updated {relTime(a.at)}
+                        </span>
+                      </span>
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
         </div>
 
-        {/* recent projects */}
-        <div className="mt-12 flex items-center justify-between">
-          <h2 className="text-[28px] font-semibold tracking-tight text-[var(--text)]">Recent projects</h2>
-          <div className="flex items-center gap-3">
-            <span className="inline-flex items-center gap-1.5 rounded-full border border-[var(--border)] bg-[var(--card)] px-3.5 py-1.5 text-sm text-[var(--text-2)] shadow-[var(--shadow-card)]">
-              All projects <IconChevronDown width={14} height={14} className="text-[var(--text-3)]" />
-            </span>
-            <Link href="/library" className="inline-flex items-center gap-1 text-sm font-medium text-[#7C3AED]">
-              View all <IconArrowRight width={14} height={14} />
+        {/* ---- recent projects ---------------------------------------------- */}
+        <section className="card animate-fade-in mt-5 p-6" style={{ animationDelay: "200ms" }}>
+          <SectionHead label="Recent projects" href="/library" />
+          {recentProjects.length === 0 ? (
+            <div className="mt-4">
+              <EmptyState
+                icon={<IconFolder width={26} height={26} />}
+                title={term ? "No projects match your search." : "No projects yet"}
+                hint={term ? undefined : "Start a recording or upload a video to see it here."}
+              />
+            </div>
+          ) : (
+            <ul className="mt-3 divide-y divide-[var(--border)]">
+              {recentProjects.slice(0, 6).map((p) => {
+                const mine = byProject.get(p.id) ?? [];
+                const latest = mine[0];
+                const captures = p.capture_count ?? mine.length;
+                const parts = [
+                  `${captures} ${captures === 1 ? "video" : "videos"}`,
+                  isDocProject(p) ? "1 document" : null,
+                  `Updated ${relTime(latest?.created_at ?? p.created_at)}`,
+                ].filter(Boolean);
+                return (
+                  <li key={p.id}>
+                    <Link href={`/projects/${p.id}`} className="group flex items-center gap-4 py-3">
+                      <span className="flex h-9 w-9 flex-none items-center justify-center rounded-lg bg-[var(--brand-soft)] text-[var(--brand)]">
+                        {isDocProject(p) ? <IconDoc width={16} height={16} /> : <IconVideo width={16} height={16} />}
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-[15px] font-semibold text-[var(--text)] group-hover:text-[var(--brand)]">
+                          {p.name}
+                          {p.shared_with_me && (
+                            <span className="ml-2 align-middle text-[11px] font-medium text-[var(--text-3)]">Shared with you</span>
+                          )}
+                        </span>
+                        <span className="block text-[12.5px] text-[var(--text-3)]">{parts.join(" · ")}</span>
+                      </span>
+                      <IconChevronRight width={16} height={16} className="flex-none text-[var(--text-3)] group-hover:text-[var(--brand)]" />
+                    </Link>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </section>
+
+        {/* ---- knowledge hub ------------------------------------------------ */}
+        <section
+          className="animate-fade-in relative mt-5 overflow-hidden rounded-xl px-6 py-7 text-white md:px-8"
+          style={{ animationDelay: "240ms", background: "linear-gradient(105deg, var(--navy) 0%, var(--navy-2) 55%, var(--brand) 140%)" }}
+        >
+          <div aria-hidden className="pointer-events-none absolute inset-y-0 right-0 w-1/2">
+            <div className="absolute -right-10 -top-10 h-[240%] w-32 -rotate-[28deg] bg-white opacity-[0.05]" />
+            <div className="absolute right-24 -top-10 h-[240%] w-14 -rotate-[28deg] bg-[var(--brand)] opacity-30" />
+          </div>
+          <div className="relative flex flex-col gap-6 md:flex-row md:items-end md:justify-between">
+            <div>
+              <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-white/60">Knowledge hub</span>
+              <h2 className="mt-1.5 text-[20px] font-semibold tracking-tight">Everything your team knows, in one place.</h2>
+              <div className="mt-4 flex flex-wrap gap-x-7 gap-y-2 text-[14px] text-white/80">
+                <span><strong className="font-semibold text-white">{projects.length}</strong> projects</span>
+                <span><strong className="font-semibold text-white">{sessions.length}</strong> videos</span>
+                <span><strong className="font-semibold text-white">{documentsCount}</strong> documents</span>
+              </div>
+            </div>
+            <Link href="/library" className="btn bg-white text-[var(--navy)] hover:bg-white/90">
+              Explore library <IconArrowRight width={15} height={15} />
             </Link>
           </div>
-        </div>
-
-        {filtered.length === 0 ? (
-          <div className="mt-6">
-            <EmptyState
-              icon={<IconLibrary width={28} height={28} />}
-              title={q ? "No projects match your search." : "No projects yet"}
-              hint={q ? undefined : "Start a recording or upload a video to see it here."}
-            />
-          </div>
-        ) : (
-          <div className="mt-6 grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-            {filtered.map((p, i) => {
-              const mine = sessions.filter((s) => s.project_id === p.id);
-              const latest = [...mine].sort((a, b) => (a.created_at < b.created_at ? 1 : -1))[0];
-              const isDoc = isDocProject(p); // real document, not a capture count
-              return (
-                <Link key={p.id} href={`/projects/${p.id}`} className="card card-hover group flex flex-col overflow-hidden">
-                  {/* thumbnail */}
-                  <div className="relative aspect-video overflow-hidden bg-gradient-to-br from-[#1c1c2e] to-[#2b2b45]">
-                    {latest?.poster ? (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img src={mediaUrl(latest.poster)} alt={p.name} className="h-full w-full object-cover" />
-                    ) : (
-                      <div className={`h-full w-full bg-gradient-to-br ${GRADS[i % GRADS.length]} opacity-70`} />
-                    )}
-                    <span className="absolute inset-0 flex items-center justify-center">
-                      <span className="flex h-11 w-11 items-center justify-center rounded-full bg-white/90 pl-0.5 text-[#7C3AED] shadow-lg">
-                        <IconPlay width={16} height={16} />
-                      </span>
-                    </span>
-                    {latest?.duration_ms ? (
-                      <span className="absolute bottom-2 right-2 rounded-md bg-black/70 px-1.5 py-0.5 text-[11px] font-medium text-white">
-                        {mmss(latest.duration_ms)}
-                      </span>
-                    ) : null}
-                  </div>
-
-                  {/* body */}
-                  <div className="flex flex-1 flex-col p-5">
-                    <div className="flex items-start justify-between gap-2">
-                      <h3 className="truncate text-[17px] font-semibold text-[var(--text)]">{p.name}</h3>
-                      <button
-                        title="More"
-                        onClick={(e) => e.preventDefault()}
-                        className="flex-none rounded-lg p-1 text-[var(--text-3)] opacity-0 transition-opacity hover:text-[var(--text)] group-hover:opacity-100"
-                      >
-                        <IconMoreHorizontal width={18} height={18} />
-                      </button>
-                    </div>
-                    <div className="mt-1 text-sm text-[var(--text-2)]">
-                      {fmtDateIST(p.created_at)}
-                    </div>
-                    <div className="mt-3.5 flex items-center justify-between border-t border-[var(--border)] pt-3">
-                      <span
-                        className={`badge px-2.5 py-1 ${
-                          isDoc ? "bg-emerald-500/10 text-emerald-500" : "bg-[#7C3AED]/10 text-[#7C3AED]"
-                        }`}
-                      >
-                        {isDoc ? "Document" : "Video"}
-                      </span>
-                      <span className="text-xs text-[var(--text-3)]">{relTime(latest?.created_at ?? p.created_at)}</span>
-                    </div>
-                  </div>
-                </Link>
-              );
-            })}
-          </div>
-        )}
-      </div>
-
-      {/* floating create button — visually hidden for now, logic kept wired */}
-      <div className="hidden group fixed bottom-6 right-6 z-40">
-        <span
-          aria-hidden
-          className="absolute inset-0 rounded-full bg-gradient-to-br from-[#7C3AED] to-[#8B5CF6] opacity-40 blur-xl transition-opacity duration-[250ms] group-hover:opacity-70"
-        />
-        <button
-          onClick={() => open("video")}
-          title="Create new"
-          className="relative inline-flex items-center gap-2 rounded-full bg-gradient-to-br from-[#7C3AED] to-[#8B5CF6] py-4 pl-5 pr-6 text-sm font-semibold text-white shadow-[0_8px_24px_-4px_rgba(124,58,237,0.5)] transition-transform duration-[250ms] hover:scale-105"
-        >
-          <IconPlus width={18} height={18} /> New project
-        </button>
+        </section>
       </div>
     </main>
   );

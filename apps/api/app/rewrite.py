@@ -5,9 +5,10 @@ Degrades with a clear error when no key is configured."""
 from __future__ import annotations
 
 import json
+import re
 import logging
 
-from app.config import get_settings
+from app.llm import complete, has_llm, provider_name
 from app.tracing import observe
 
 log = logging.getLogger("refract.rewrite")
@@ -97,26 +98,45 @@ def _gen_prompt(scenes: list[dict], title: str, instruction: str | None) -> str:
 
 
 def _call_claude(system: str, prompt: str, n: int) -> list[str]:
-    settings = get_settings()
-    if not settings.anthropic_api_key:
-        raise RuntimeError("no Anthropic API key configured (set REFRACT_ANTHROPIC_API_KEY in .env)")
-    import anthropic
+    if not has_llm():
+        raise RuntimeError("no AI key configured (set REFRACT_ANTHROPIC_API_KEY or REFRACT_OPENROUTER_API_KEY in .env)")
+    return _parse(complete(system, prompt, max_tokens=16000, timeout=AI_DEADLINE_S), n)
 
-    client = anthropic.Anthropic(api_key=settings.anthropic_api_key, timeout=120)
-    # Adaptive thinking spends from the same max_tokens cap as the visible
-    # output, so a budget-scaled cap starves short scripts and truncates the
-    # JSON mid-array. max_tokens is a ceiling, not a spend — keep it high.
-    msg = client.messages.create(
-        model=settings.anthropic_model,
-        max_tokens=16000,
-        thinking={"type": "adaptive"},
-        system=system,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    if msg.stop_reason == "max_tokens":
-        raise ValueError("model output was truncated (max_tokens reached) — try again")
-    text = "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
-    return _parse(text, n)
+
+# These AI calls answer an HTTP request directly, and the public path goes
+# through nginx-proxy-manager, whose default read timeout is 60s. One call over
+# a 162-scene project took well over a minute (and the browser got a 504), so
+# large inputs are split into batches that run in parallel under a deadline.
+AI_DEADLINE_S = 45
+BATCH = 30
+
+
+def _run_batches(items: list, work, *, size: int = BATCH, deadline_s: float | None = None):
+    """[(start, batch, result|None)] — result is None when that batch failed or
+    missed the deadline, so callers fall back for just those items."""
+    from concurrent.futures import ThreadPoolExecutor, wait
+
+    deadline_s = AI_DEADLINE_S if deadline_s is None else deadline_s
+    batches = [(i, items[i:i + size]) for i in range(0, len(items), size)]
+    pool = ThreadPoolExecutor(max_workers=min(8, len(batches)) or 1)
+    futures = [pool.submit(work, start, batch) for start, batch in batches]
+    done, _late = wait(futures, timeout=deadline_s)
+    out = []
+    for (start, batch), fut in zip(batches, futures):
+        if fut in done and fut.exception() is None:
+            out.append((start, batch, fut.result()))
+        else:
+            reason = fut.exception() if fut in done else f"no answer within {deadline_s:.0f}s"
+            log.warning("AI batch %d-%d failed: %s", start, start + len(batch) - 1, reason)
+            out.append((start, batch, None))
+    pool.shutdown(wait=False, cancel_futures=True)  # late calls finish in the background, ignored
+    return out
+
+
+def _part_note(start: int, batch: list, total: int) -> str:
+    if len(batch) == total:
+        return ""
+    return f"\n(These are scenes {start + 1}-{start + len(batch)} of {total}; keep the style consistent.)\n"
 
 
 @observe(name="ai-generate-script")
@@ -125,7 +145,19 @@ def generate_script(scenes: list[dict], title: str = "Product demo", instruction
     existing note as context)."""
     if not scenes:
         return []
-    return _call_claude(GEN_SYSTEM, _gen_prompt(scenes, title, instruction), len(scenes))
+    if not has_llm():
+        raise RuntimeError("no AI key configured (set REFRACT_ANTHROPIC_API_KEY or REFRACT_OPENROUTER_API_KEY in .env)")
+
+    def work(start: int, batch: list[dict]) -> list[str]:
+        return _call_claude(GEN_SYSTEM, _gen_prompt(batch, title, instruction) + _part_note(start, batch, len(scenes)), len(batch))
+
+    results = _run_batches(scenes, work)
+    if all(r is None for _, _, r in results):
+        raise RuntimeError("the AI did not answer in time — try again")
+    lines: list[str] = []
+    for _start, batch, res in results:  # a failed batch keeps its current narration
+        lines += res if res is not None else [str(sc.get("narration") or "") for sc in batch]
+    return lines
 
 
 SKILL_SYSTEM = (
@@ -156,21 +188,10 @@ SKILL_SYSTEM = (
 def generate_skill(prompt: str, target: str = "doc") -> dict:
     """Design a skill from a natural-language description, constrained to tool
     capabilities. Returns {name, description, target, settings}."""
-    settings = get_settings()
-    if not settings.anthropic_api_key:
-        raise RuntimeError("no Anthropic API key configured (set REFRACT_ANTHROPIC_API_KEY in .env)")
+    if not has_llm():
+        raise RuntimeError("no AI key configured (set REFRACT_ANTHROPIC_API_KEY or REFRACT_OPENROUTER_API_KEY in .env)")
     target = target if target in ("video", "doc") else "doc"
-    import anthropic
-
-    client = anthropic.Anthropic(api_key=settings.anthropic_api_key, timeout=120)
-    msg = client.messages.create(
-        model=settings.anthropic_model,
-        max_tokens=6000,
-        thinking={"type": "adaptive"},
-        system=SKILL_SYSTEM,
-        messages=[{"role": "user", "content": f"target={target}. Build this skill:\n{prompt}"}],
-    )
-    text = "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
+    text = complete(SKILL_SYSTEM, f"target={target}. Build this skill:\n{prompt}", max_tokens=6000)
     t = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     obj = json.loads(t)
     if not isinstance(obj, list):
@@ -199,27 +220,16 @@ def restyle_doc(steps: list[dict], instruction: str) -> list[dict]:
     Returns the steps unchanged when there's no key or on any failure."""
     if not steps:
         return steps
-    settings = get_settings()
-    if not settings.anthropic_api_key:
+    if not has_llm():
         return steps
     try:
-        import anthropic
-
-        client = anthropic.Anthropic(api_key=settings.anthropic_api_key, timeout=120)
         payload = [{"title": s.get("title", ""), "body": s.get("body", "")} for s in steps]
         prompt = (
             "Restyle each step. " + (instruction or "") + " Reply with ONLY a JSON array of "
             'objects {"title","body"}, exactly one per input step, in the same order.\n\n'
             + json.dumps(payload, ensure_ascii=False)
         )
-        msg = client.messages.create(
-            model=settings.anthropic_model,
-            max_tokens=16000,
-            thinking={"type": "adaptive"},
-            system=DOC_SYSTEM,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        text = "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
+        text = complete(DOC_SYSTEM, prompt, max_tokens=16000)
         t = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
         arr = json.loads(t)
         if not isinstance(arr, list) or len(arr) != len(steps):
@@ -239,40 +249,16 @@ def restyle_doc(steps: list[dict], instruction: str) -> list[dict]:
         return steps
 
 
-TITLE_SYSTEM = (
-    "You write a short, specific title for a screen-recording / product-demo video, "
-    "based on its narration transcript. 3 to 6 words, Title Case, no surrounding quotes, "
-    "no trailing punctuation. Reply with ONLY the title."
-)
 
 
 @observe(name="ai-title")
-def generate_title(text: str) -> str:
-    """Concise title from a transcript. Returns "" when there's nothing to title
-    (caller keeps the existing name). Falls back to a heuristic without a key."""
-    text = (text or "").strip()
-    if not text:
-        return ""
-    settings = get_settings()
-    if not settings.anthropic_api_key:
-        words = text.split()[:6]
-        return " ".join(words).strip(" .,-").title()[:80]
-    try:
-        import anthropic
+def generate_title(text: str, steps: list[dict] | None = None) -> str:
+    """Concise project title from a recording (see app.titles): an LLM given the
+    transcript + steps when a key is configured, else an offline heuristic that
+    finds the stated goal or dominant topic. "" means keep the current name."""
+    from app.titles import project_title
 
-        client = anthropic.Anthropic(api_key=settings.anthropic_api_key, timeout=60)
-        msg = client.messages.create(
-            model=settings.anthropic_model,
-            max_tokens=4000,
-            thinking={"type": "adaptive"},
-            system=TITLE_SYSTEM,
-            messages=[{"role": "user", "content": text[:4000]}],
-        )
-        out = "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
-        return out.strip().strip('"').strip().rstrip(".")[:80]
-    except Exception as e:  # pragma: no cover - env dependent
-        log.warning("title generation failed (%s); using heuristic.", e)
-        return " ".join(text.split()[:6]).strip(" .,-").title()[:80]
+    return project_title(text, steps)
 
 
 ZOOM_SYSTEM = (
@@ -285,63 +271,109 @@ ZOOM_SYSTEM = (
 )
 
 
+_ZOOM_CUE = re.compile(r"\b(click|select|choose|type|enter|press|notice|here|this button|this field|tap)\b", re.I)
+_ZOOM_SKIP = re.compile(r"\b(intro|introduction|overview|summary|welcome|recap|thank)", re.I)
+
+
+def heuristic_zooms(scenes: list[dict]) -> list[dict]:
+    """The same rules the AI prompt states, applied mechanically: zoom where the
+    scene acts on a specific element (a click/type on a named target) or the
+    narration points at one; never on intro/overview/summary scenes."""
+    out = []
+    for sc in scenes:
+        action = (sc.get("action") or "").lower()
+        target = (sc.get("target") or "").strip()
+        narration = sc.get("narration") or ""
+        specific = bool(target) and not target.lower().startswith(("silence", "the element", "screen"))
+        if _ZOOM_SKIP.search(f"{target} {narration}"):
+            out.append({"zoom": False, "scale": 1.0})
+        elif specific and action in ("click", "input", "keydown"):
+            # short targets are small on screen (a button), long ones are regions
+            out.append({"zoom": True, "scale": 1.8 if len(target) <= 18 else 1.5})
+        elif _ZOOM_CUE.search(narration):
+            out.append({"zoom": True, "scale": 1.5})
+        else:
+            out.append({"zoom": False, "scale": 1.0})
+    return out
+
+
+def _parse_zoom_picks(text: str, n: int) -> dict[int, float]:
+    """{local index: scale} from a reply listing only the scenes to zoom."""
+    t = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    i, j = t.find("["), t.rfind("]")
+    arr = json.loads(t[i:j + 1] if i >= 0 and j > i else t)
+    if not isinstance(arr, list):
+        raise ValueError("zoom reply is not a list")
+    picks: dict[int, float] = {}
+    for x in arr:
+        if isinstance(x, dict) and isinstance(x.get("i"), int) and 0 <= x["i"] < n:
+            picks[x["i"]] = max(1.2, min(2.5, float(x.get("scale", 1.5))))
+    return picks
+
+
+def _zoom_prompt(batch: list[dict]) -> str:
+    listed = [{"i": k, **{f: sc.get(f, "") for f in ("target", "action", "narration")}} for k, sc in enumerate(batch)]
+    return (
+        "Decide which scenes deserve a zoom-in. Reply with ONLY a JSON array (no prose, no "
+        'code fences) listing just those scenes: [{"i": <scene index>, "scale": <1.3 to 2.0>}] '
+        "— an empty array [] when none should zoom.\n\nScenes:\n" + json.dumps(listed, ensure_ascii=False)
+    )
+
+
 @observe(name="ai-suggest-zooms")
+def suggest_zooms_with_source(scenes: list[dict]) -> tuple[list[dict], str]:
+    """(suggestions, source). The AI picks zooms in parallel batches under a
+    deadline; any batch it misses (no key, error, too slow) gets the rule-based
+    answer for just those scenes, so the button never dead-ends or times out.
+    source: the provider, "mixed", or "rules"."""
+    if not scenes:
+        return [], "none"
+    rules = heuristic_zooms(scenes)
+    if not has_llm():
+        return rules, "rules"
+
+    def work(_start: int, batch: list[dict]) -> dict[int, float]:
+        return _parse_zoom_picks(complete(ZOOM_SYSTEM, _zoom_prompt(batch), max_tokens=6000, timeout=AI_DEADLINE_S), len(batch))
+
+    results = _run_batches(scenes, work, size=40)
+    out = list(rules)
+    answered = 0
+    for start, batch, picks in results:
+        if picks is None:
+            continue
+        answered += 1
+        for k in range(len(batch)):
+            out[start + k] = {"zoom": k in picks, "scale": picks.get(k, 1.0)}
+    if answered == 0:
+        return rules, "rules"
+    return out, provider_name() if answered == len(results) else "mixed"
+
+
 def suggest_zooms(scenes: list[dict]) -> list[dict]:
     """Return a {zoom, scale} suggestion per scene."""
-    if not scenes:
-        return []
-    settings = get_settings()
-    if not settings.anthropic_api_key:
-        raise RuntimeError("no Anthropic API key configured (set REFRACT_ANTHROPIC_API_KEY in .env)")
-    import anthropic
-
-    client = anthropic.Anthropic(api_key=settings.anthropic_api_key, timeout=120)
-    prompt = (
-        "Decide the zoom for each scene. Reply with ONLY a JSON array (no prose, no code "
-        'fences) — one object per scene, same order: {"zoom": true|false, "scale": number '
-        "between 1.3 and 2.0}.\n\nScenes:\n" + json.dumps(scenes, ensure_ascii=False)
-    )
-    msg = client.messages.create(
-        model=settings.anthropic_model,
-        max_tokens=8000,
-        thinking={"type": "adaptive"},
-        system=ZOOM_SYSTEM,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    text = "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
-    t = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-    arr = json.loads(t)
-    if not isinstance(arr, list) or len(arr) != len(scenes):
-        raise ValueError(f"expected {len(scenes)} zoom suggestions, got {len(arr) if isinstance(arr, list) else '?'}")
-    return [
-        {"zoom": bool(x.get("zoom")), "scale": max(1.0, min(2.5, float(x.get("scale", 1.5))))}
-        for x in arr
-    ]
+    return suggest_zooms_with_source(scenes)[0]
 
 
 @observe(name="ai-rewrite")
 def rewrite_lines(lines: list[str], instruction: str | None = None) -> list[str]:
     """Return a rewritten version of each line (same length/order). Empty lines pass
     through untouched; an empty rewrite falls back to the original."""
-    settings = get_settings()
-    if not settings.anthropic_api_key:
-        raise RuntimeError("no Anthropic API key configured (set REFRACT_ANTHROPIC_API_KEY in .env)")
+    if not has_llm():
+        raise RuntimeError("no AI key configured (set REFRACT_ANTHROPIC_API_KEY or REFRACT_OPENROUTER_API_KEY in .env)")
     clean = [ln.strip() for ln in lines]
     if not any(clean):
         return list(lines)
 
-    import anthropic
+    def work(start: int, batch: list[str]) -> list[str]:
+        # thinking tokens count against max_tokens — don't scale the cap to input size
+        text = complete(SYSTEM, _prompt(batch, instruction), max_tokens=16000, timeout=AI_DEADLINE_S)
+        return _parse(text, len(batch))
 
-    client = anthropic.Anthropic(api_key=settings.anthropic_api_key, timeout=120)
-    # thinking tokens count against max_tokens — don't scale the cap to input size
-    msg = client.messages.create(
-        model=settings.anthropic_model,
-        max_tokens=16000,
-        thinking={"type": "adaptive"},
-        system=SYSTEM,
-        messages=[{"role": "user", "content": _prompt(clean, instruction)}],
-    )
-    text = "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
-    out = _parse(text, len(clean))
+    results = _run_batches(clean, work)
+    if all(r is None for _, _, r in results):
+        raise RuntimeError("the AI did not answer in time — try again")
+    out: list[str] = []
+    for start, batch, res in results:  # a failed batch keeps the original lines
+        out += res if res is not None else list(lines[start:start + len(batch)])
     # keep the original where the model returned an empty string
     return [o or lines[i] for i, o in enumerate(out)]

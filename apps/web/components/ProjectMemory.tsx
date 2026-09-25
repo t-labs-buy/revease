@@ -20,7 +20,7 @@ export function ProjectMemory({ projectId }: { projectId: string }) {
   const changedSteps = mem.steps.filter((s) => s.status !== "unchanged");
 
   return (
-    <section className="card border-violet-500/30 bg-gradient-to-br from-violet-600/10 to-transparent p-5">
+    <section className="card border-[#1E8F8E]/30 bg-gradient-to-br from-[#1E8F8E]/10 to-transparent p-5">
       <div className="flex items-center justify-between">
         <div>
           <div className="label mb-1">Project memory</div>
