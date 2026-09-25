@@ -795,7 +795,7 @@ export async function generateScript(
 export async function suggestZooms(
   projectId: string,
   scenes: { target?: string; action?: string; narration?: string }[],
-): Promise<{ zoom: boolean; scale: number }[]> {
+): Promise<{ zooms: { zoom: boolean; scale: number }[]; source: string }> {
   const r = await apiFetch(`/projects/${projectId}/suggest-zooms`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -810,7 +810,8 @@ export async function suggestZooms(
     }
     throw new Error(detail);
   }
-  return (await r.json()).zooms as { zoom: boolean; scale: number }[];
+  const j = await r.json();
+  return { zooms: (j.zooms ?? []) as { zoom: boolean; scale: number }[], source: String(j.source ?? "none") };
 }
 
 // ---- skills ----

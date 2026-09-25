@@ -64,3 +64,34 @@ def test_rewrite_works_through_openrouter(monkeypatch):
     monkeypatch.setattr(rewrite, "has_llm", lambda: True)
     monkeypatch.setattr(rewrite, "complete", lambda system, prompt, max_tokens: '["Open the Settings page."]')
     assert rewrite.rewrite_lines(["um so open settings"]) == ["Open the Settings page."]
+
+
+def test_zoom_suggestions_never_dead_end(monkeypatch):
+    from app import rewrite
+
+    scenes = [
+        {"target": "Save button", "action": "click", "narration": "now save"},
+        {"target": "Welcome", "action": "custom", "narration": "welcome to the overview"},
+        {"target": "", "action": "custom", "narration": "notice the total here"},
+        {"target": "Silence — add narration", "action": "custom", "narration": ""},
+    ]
+    monkeypatch.setattr(rewrite, "has_llm", lambda: False)
+    zooms, source = rewrite.suggest_zooms_with_source(scenes)
+    assert source == "rules"
+    assert [z["zoom"] for z in zooms] == [True, False, True, False]
+    assert zooms[0]["scale"] == 1.8  # short target = small on screen
+
+    def boom(_scenes):
+        raise RuntimeError("401 API key is invalid")
+
+    monkeypatch.setattr(rewrite, "has_llm", lambda: True)
+    monkeypatch.setattr(rewrite, "suggest_zooms", boom)
+    assert rewrite.suggest_zooms_with_source(scenes)[1] == "rules"  # a failing key falls back too
+
+
+def test_zoom_route_returns_suggestions_without_a_key():
+    from tests.helpers import client
+
+    pid = client.post("/projects", json={"name": "zoom"}).json()["id"]
+    r = client.post(f"/projects/{pid}/suggest-zooms", json={"scenes": [{"target": "Save", "action": "click", "narration": ""}]})
+    assert r.status_code == 200 and r.json()["source"] == "rules" and r.json()["zooms"][0]["zoom"] is True

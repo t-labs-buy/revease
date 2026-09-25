@@ -241,6 +241,7 @@ export default function VideoEditor({
   >(null);
   const [tone, setTone] = useState<Tone>("Professional");
   const [zoomBusy, setZoomBusy] = useState(false);
+  const [zoomNote, setZoomNote] = useState<string | null>(null);
   const [activeTool, setActiveTool] = useState<null | "trim" | "crop">(null); // inline preview tools
   const [cropSel, setCropSel] = useState(0); // which crop region is being edited
   const timelineRef = useRef<HTMLElement>(null);
@@ -1094,7 +1095,12 @@ export default function VideoEditor({
         action: s.action ?? "",
         narration: eff(s),
       }));
-      const zs = await suggestZooms(id, scenes);
+      const { zooms: zs, source } = await suggestZooms(id, scenes);
+      setZoomNote(
+        source === "rules"
+          ? "Zooms suggested by rules (clicks and typing on specific elements) — no working AI key is configured."
+          : null,
+      );
       setSpec((s) => {
         if (!s) return s;
         const segs = s.segments.map((seg, i) =>
@@ -1746,15 +1752,22 @@ export default function VideoEditor({
             )}
 
             {tab === "Zoom" && (
-              <ZoomPanel
-                spec={spec}
-                mutateSeg={mutateSeg}
-                patchSpec={patchSpec}
-                seekTo={seekTo}
-                onSuggest={aiZooms}
-                suggesting={zoomBusy}
-                cur={cur}
-              />
+              <>
+                <ZoomPanel
+                  spec={spec}
+                  mutateSeg={mutateSeg}
+                  patchSpec={patchSpec}
+                  seekTo={seekTo}
+                  onSuggest={aiZooms}
+                  suggesting={zoomBusy}
+                  cur={cur}
+                />
+                {zoomNote && (
+                  <p className="mt-3 rounded-lg border border-[#D99A2B]/30 bg-[#D99A2B]/10 px-3 py-2 text-[12px] text-[var(--text-2)]">
+                    {zoomNote}
+                  </p>
+                )}
+              </>
             )}
 
             {tab === "Background" && (

@@ -5,10 +5,10 @@ Degrades with a clear error when no key is configured."""
 from __future__ import annotations
 
 import json
+import re
 import logging
 
-from app.config import get_settings
-from app.llm import complete, has_llm
+from app.llm import complete, has_llm, provider_name
 from app.tracing import observe
 
 log = logging.getLogger("refract.rewrite")
@@ -140,7 +140,6 @@ SKILL_SYSTEM = (
 def generate_skill(prompt: str, target: str = "doc") -> dict:
     """Design a skill from a natural-language description, constrained to tool
     capabilities. Returns {name, description, target, settings}."""
-    settings = get_settings()
     if not has_llm():
         raise RuntimeError("no AI key configured (set REFRACT_ANTHROPIC_API_KEY or REFRACT_OPENROUTER_API_KEY in .env)")
     target = target if target in ("video", "doc") else "doc"
@@ -224,12 +223,50 @@ ZOOM_SYSTEM = (
 )
 
 
+_ZOOM_CUE = re.compile(r"\b(click|select|choose|type|enter|press|notice|here|this button|this field|tap)\b", re.I)
+_ZOOM_SKIP = re.compile(r"\b(intro|introduction|overview|summary|welcome|recap|thank)", re.I)
+
+
+def heuristic_zooms(scenes: list[dict]) -> list[dict]:
+    """The same rules the AI prompt states, applied mechanically: zoom where the
+    scene acts on a specific element (a click/type on a named target) or the
+    narration points at one; never on intro/overview/summary scenes."""
+    out = []
+    for sc in scenes:
+        action = (sc.get("action") or "").lower()
+        target = (sc.get("target") or "").strip()
+        narration = sc.get("narration") or ""
+        specific = bool(target) and not target.lower().startswith(("silence", "the element", "screen"))
+        if _ZOOM_SKIP.search(f"{target} {narration}"):
+            out.append({"zoom": False, "scale": 1.0})
+        elif specific and action in ("click", "input", "keydown"):
+            # short targets are small on screen (a button), long ones are regions
+            out.append({"zoom": True, "scale": 1.8 if len(target) <= 18 else 1.5})
+        elif _ZOOM_CUE.search(narration):
+            out.append({"zoom": True, "scale": 1.5})
+        else:
+            out.append({"zoom": False, "scale": 1.0})
+    return out
+
+
+def suggest_zooms_with_source(scenes: list[dict]) -> tuple[list[dict], str]:
+    """(suggestions, source): the AI when one is configured and answers, else the
+    rule-based fallback — so the button never dead-ends on a key error."""
+    if not scenes:
+        return [], "none"
+    if has_llm():
+        try:
+            return suggest_zooms(scenes), provider_name()
+        except Exception as e:  # provider down, bad key, unparseable reply
+            log.warning("AI zoom suggestion failed (%s); using rule-based suggestions", e)
+    return heuristic_zooms(scenes), "rules"
+
+
 @observe(name="ai-suggest-zooms")
 def suggest_zooms(scenes: list[dict]) -> list[dict]:
     """Return a {zoom, scale} suggestion per scene."""
     if not scenes:
         return []
-    settings = get_settings()
     if not has_llm():
         raise RuntimeError("no AI key configured (set REFRACT_ANTHROPIC_API_KEY or REFRACT_OPENROUTER_API_KEY in .env)")
     prompt = (
@@ -252,7 +289,6 @@ def suggest_zooms(scenes: list[dict]) -> list[dict]:
 def rewrite_lines(lines: list[str], instruction: str | None = None) -> list[str]:
     """Return a rewritten version of each line (same length/order). Empty lines pass
     through untouched; an empty rewrite falls back to the original."""
-    settings = get_settings()
     if not has_llm():
         raise RuntimeError("no AI key configured (set REFRACT_ANTHROPIC_API_KEY or REFRACT_OPENROUTER_API_KEY in .env)")
     clean = [ln.strip() for ln in lines]
