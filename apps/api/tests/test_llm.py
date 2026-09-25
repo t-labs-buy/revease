@@ -62,7 +62,7 @@ def test_rewrite_works_through_openrouter(monkeypatch):
     from app import rewrite
 
     monkeypatch.setattr(rewrite, "has_llm", lambda: True)
-    monkeypatch.setattr(rewrite, "complete", lambda system, prompt, max_tokens: '["Open the Settings page."]')
+    monkeypatch.setattr(rewrite, "complete", lambda system, prompt, **kw: '["Open the Settings page."]')
     assert rewrite.rewrite_lines(["um so open settings"]) == ["Open the Settings page."]
 
 
@@ -81,11 +81,11 @@ def test_zoom_suggestions_never_dead_end(monkeypatch):
     assert [z["zoom"] for z in zooms] == [True, False, True, False]
     assert zooms[0]["scale"] == 1.8  # short target = small on screen
 
-    def boom(_scenes):
+    def boom(*_a, **_kw):
         raise RuntimeError("401 API key is invalid")
 
     monkeypatch.setattr(rewrite, "has_llm", lambda: True)
-    monkeypatch.setattr(rewrite, "suggest_zooms", boom)
+    monkeypatch.setattr(rewrite, "complete", boom)
     assert rewrite.suggest_zooms_with_source(scenes)[1] == "rules"  # a failing key falls back too
 
 
@@ -95,3 +95,60 @@ def test_zoom_route_returns_suggestions_without_a_key():
     pid = client.post("/projects", json={"name": "zoom"}).json()["id"]
     r = client.post(f"/projects/{pid}/suggest-zooms", json={"scenes": [{"target": "Save", "action": "click", "narration": ""}]})
     assert r.status_code == 200 and r.json()["source"] == "rules" and r.json()["zooms"][0]["zoom"] is True
+
+
+def test_zooms_are_batched_and_a_slow_batch_falls_back(monkeypatch):
+    """162 scenes in one call took >60s behind the proxy (504). Batches run in
+    parallel; the one that misses the deadline gets rules for just its scenes."""
+    import json as _json
+    import time
+
+    from app import rewrite
+
+    scenes = [{"target": "Save", "action": "click", "narration": ""} for _ in range(100)]
+
+    def fake(system, prompt, **kw):
+        listed = _json.loads(prompt.split("Scenes:\n", 1)[1])
+        if len(listed) == 20:  # the last batch (80..99) is too slow
+            time.sleep(1.0)
+        return _json.dumps([{"i": 0, "scale": 1.6}])  # only the first scene of each batch
+
+    monkeypatch.setattr(rewrite, "has_llm", lambda: True)
+    monkeypatch.setattr(rewrite, "provider_name", lambda: "openrouter")
+    monkeypatch.setattr(rewrite, "complete", fake)
+    monkeypatch.setattr(rewrite, "AI_DEADLINE_S", 0.3)
+    t0 = time.monotonic()
+    zooms, source = rewrite.suggest_zooms_with_source(scenes)
+    assert time.monotonic() - t0 < 0.9  # never waits for the slow batch
+    assert len(zooms) == 100 and source == "mixed"
+    assert zooms[0] == {"zoom": True, "scale": 1.6} and zooms[1]["zoom"] is False
+    assert zooms[40]["zoom"] is True and zooms[41]["zoom"] is False
+    assert all(z["zoom"] for z in zooms[80:])  # rules: every click zooms
+
+
+def test_script_and_rewrite_batches_keep_existing_text_on_failure(monkeypatch):
+    from app import rewrite
+
+    calls = []
+
+    def fake(system, prompt, **kw):
+        calls.append(prompt)
+        if len(calls) == 2:
+            raise RuntimeError("upstream 502")
+        return "[]"
+
+    lines = [f"line {i}" for i in range(45)]
+    monkeypatch.setattr(rewrite, "has_llm", lambda: True)
+    monkeypatch.setattr(rewrite, "_parse", lambda text, n: [f"new {k}" for k in range(n)])
+    monkeypatch.setattr(rewrite, "complete", fake)
+    out = rewrite.rewrite_lines(lines)
+    assert len(out) == 45 and len(calls) == 2
+    changed = [o.startswith("new") for o in out]
+    assert changed.count(True) in (30, 15) and changed.count(False) in (15, 30)
+    assert all(o == lines[i] for i, o in enumerate(out) if not o.startswith("new"))
+
+    scenes = [{"target": "x", "narration": f"old {i}", "seconds": 3} for i in range(45)]
+    calls.clear()
+    got = rewrite.generate_script(scenes)
+    assert len(got) == 45
+    assert all(g == f"old {i}" for i, g in enumerate(got) if not g.startswith("new"))

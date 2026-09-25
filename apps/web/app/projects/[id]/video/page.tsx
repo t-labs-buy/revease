@@ -1098,8 +1098,10 @@ export default function VideoEditor({
       const { zooms: zs, source } = await suggestZooms(id, scenes);
       setZoomNote(
         source === "rules"
-          ? "Zooms suggested by rules (clicks and typing on specific elements) — no working AI key is configured."
-          : null,
+          ? "Zooms suggested by rules (clicks and typing on specific elements) — the AI was unavailable or too slow."
+          : source === "mixed"
+            ? "Most zooms are AI-picked; a few scenes the AI didn't answer in time use rule-based picks."
+            : null,
       );
       setSpec((s) => {
         if (!s) return s;

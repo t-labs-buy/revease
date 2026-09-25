@@ -100,7 +100,43 @@ def _gen_prompt(scenes: list[dict], title: str, instruction: str | None) -> str:
 def _call_claude(system: str, prompt: str, n: int) -> list[str]:
     if not has_llm():
         raise RuntimeError("no AI key configured (set REFRACT_ANTHROPIC_API_KEY or REFRACT_OPENROUTER_API_KEY in .env)")
-    return _parse(complete(system, prompt, max_tokens=16000), n)
+    return _parse(complete(system, prompt, max_tokens=16000, timeout=AI_DEADLINE_S), n)
+
+
+# These AI calls answer an HTTP request directly, and the public path goes
+# through nginx-proxy-manager, whose default read timeout is 60s. One call over
+# a 162-scene project took well over a minute (and the browser got a 504), so
+# large inputs are split into batches that run in parallel under a deadline.
+AI_DEADLINE_S = 45
+BATCH = 30
+
+
+def _run_batches(items: list, work, *, size: int = BATCH, deadline_s: float | None = None):
+    """[(start, batch, result|None)] — result is None when that batch failed or
+    missed the deadline, so callers fall back for just those items."""
+    from concurrent.futures import ThreadPoolExecutor, wait
+
+    deadline_s = AI_DEADLINE_S if deadline_s is None else deadline_s
+    batches = [(i, items[i:i + size]) for i in range(0, len(items), size)]
+    pool = ThreadPoolExecutor(max_workers=min(8, len(batches)) or 1)
+    futures = [pool.submit(work, start, batch) for start, batch in batches]
+    done, _late = wait(futures, timeout=deadline_s)
+    out = []
+    for (start, batch), fut in zip(batches, futures):
+        if fut in done and fut.exception() is None:
+            out.append((start, batch, fut.result()))
+        else:
+            reason = fut.exception() if fut in done else f"no answer within {deadline_s:.0f}s"
+            log.warning("AI batch %d-%d failed: %s", start, start + len(batch) - 1, reason)
+            out.append((start, batch, None))
+    pool.shutdown(wait=False, cancel_futures=True)  # late calls finish in the background, ignored
+    return out
+
+
+def _part_note(start: int, batch: list, total: int) -> str:
+    if len(batch) == total:
+        return ""
+    return f"\n(These are scenes {start + 1}-{start + len(batch)} of {total}; keep the style consistent.)\n"
 
 
 @observe(name="ai-generate-script")
@@ -109,7 +145,19 @@ def generate_script(scenes: list[dict], title: str = "Product demo", instruction
     existing note as context)."""
     if not scenes:
         return []
-    return _call_claude(GEN_SYSTEM, _gen_prompt(scenes, title, instruction), len(scenes))
+    if not has_llm():
+        raise RuntimeError("no AI key configured (set REFRACT_ANTHROPIC_API_KEY or REFRACT_OPENROUTER_API_KEY in .env)")
+
+    def work(start: int, batch: list[dict]) -> list[str]:
+        return _call_claude(GEN_SYSTEM, _gen_prompt(batch, title, instruction) + _part_note(start, batch, len(scenes)), len(batch))
+
+    results = _run_batches(scenes, work)
+    if all(r is None for _, _, r in results):
+        raise RuntimeError("the AI did not answer in time — try again")
+    lines: list[str] = []
+    for _start, batch, res in results:  # a failed batch keeps its current narration
+        lines += res if res is not None else [str(sc.get("narration") or "") for sc in batch]
+    return lines
 
 
 SKILL_SYSTEM = (
@@ -249,40 +297,61 @@ def heuristic_zooms(scenes: list[dict]) -> list[dict]:
     return out
 
 
-def suggest_zooms_with_source(scenes: list[dict]) -> tuple[list[dict], str]:
-    """(suggestions, source): the AI when one is configured and answers, else the
-    rule-based fallback — so the button never dead-ends on a key error."""
-    if not scenes:
-        return [], "none"
-    if has_llm():
-        try:
-            return suggest_zooms(scenes), provider_name()
-        except Exception as e:  # provider down, bad key, unparseable reply
-            log.warning("AI zoom suggestion failed (%s); using rule-based suggestions", e)
-    return heuristic_zooms(scenes), "rules"
+def _parse_zoom_picks(text: str, n: int) -> dict[int, float]:
+    """{local index: scale} from a reply listing only the scenes to zoom."""
+    t = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    i, j = t.find("["), t.rfind("]")
+    arr = json.loads(t[i:j + 1] if i >= 0 and j > i else t)
+    if not isinstance(arr, list):
+        raise ValueError("zoom reply is not a list")
+    picks: dict[int, float] = {}
+    for x in arr:
+        if isinstance(x, dict) and isinstance(x.get("i"), int) and 0 <= x["i"] < n:
+            picks[x["i"]] = max(1.2, min(2.5, float(x.get("scale", 1.5))))
+    return picks
+
+
+def _zoom_prompt(batch: list[dict]) -> str:
+    listed = [{"i": k, **{f: sc.get(f, "") for f in ("target", "action", "narration")}} for k, sc in enumerate(batch)]
+    return (
+        "Decide which scenes deserve a zoom-in. Reply with ONLY a JSON array (no prose, no "
+        'code fences) listing just those scenes: [{"i": <scene index>, "scale": <1.3 to 2.0>}] '
+        "— an empty array [] when none should zoom.\n\nScenes:\n" + json.dumps(listed, ensure_ascii=False)
+    )
 
 
 @observe(name="ai-suggest-zooms")
+def suggest_zooms_with_source(scenes: list[dict]) -> tuple[list[dict], str]:
+    """(suggestions, source). The AI picks zooms in parallel batches under a
+    deadline; any batch it misses (no key, error, too slow) gets the rule-based
+    answer for just those scenes, so the button never dead-ends or times out.
+    source: the provider, "mixed", or "rules"."""
+    if not scenes:
+        return [], "none"
+    rules = heuristic_zooms(scenes)
+    if not has_llm():
+        return rules, "rules"
+
+    def work(_start: int, batch: list[dict]) -> dict[int, float]:
+        return _parse_zoom_picks(complete(ZOOM_SYSTEM, _zoom_prompt(batch), max_tokens=6000, timeout=AI_DEADLINE_S), len(batch))
+
+    results = _run_batches(scenes, work, size=40)
+    out = list(rules)
+    answered = 0
+    for start, batch, picks in results:
+        if picks is None:
+            continue
+        answered += 1
+        for k in range(len(batch)):
+            out[start + k] = {"zoom": k in picks, "scale": picks.get(k, 1.0)}
+    if answered == 0:
+        return rules, "rules"
+    return out, provider_name() if answered == len(results) else "mixed"
+
+
 def suggest_zooms(scenes: list[dict]) -> list[dict]:
     """Return a {zoom, scale} suggestion per scene."""
-    if not scenes:
-        return []
-    if not has_llm():
-        raise RuntimeError("no AI key configured (set REFRACT_ANTHROPIC_API_KEY or REFRACT_OPENROUTER_API_KEY in .env)")
-    prompt = (
-        "Decide the zoom for each scene. Reply with ONLY a JSON array (no prose, no code "
-        'fences) — one object per scene, same order: {"zoom": true|false, "scale": number '
-        "between 1.3 and 2.0}.\n\nScenes:\n" + json.dumps(scenes, ensure_ascii=False)
-    )
-    text = complete(ZOOM_SYSTEM, prompt, max_tokens=8000)
-    t = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-    arr = json.loads(t)
-    if not isinstance(arr, list) or len(arr) != len(scenes):
-        raise ValueError(f"expected {len(scenes)} zoom suggestions, got {len(arr) if isinstance(arr, list) else '?'}")
-    return [
-        {"zoom": bool(x.get("zoom")), "scale": max(1.0, min(2.5, float(x.get("scale", 1.5))))}
-        for x in arr
-    ]
+    return suggest_zooms_with_source(scenes)[0]
 
 
 @observe(name="ai-rewrite")
@@ -295,8 +364,16 @@ def rewrite_lines(lines: list[str], instruction: str | None = None) -> list[str]
     if not any(clean):
         return list(lines)
 
-    # thinking tokens count against max_tokens — don't scale the cap to input size
-    text = complete(SYSTEM, _prompt(clean, instruction), max_tokens=16000)
-    out = _parse(text, len(clean))
+    def work(start: int, batch: list[str]) -> list[str]:
+        # thinking tokens count against max_tokens — don't scale the cap to input size
+        text = complete(SYSTEM, _prompt(batch, instruction), max_tokens=16000, timeout=AI_DEADLINE_S)
+        return _parse(text, len(batch))
+
+    results = _run_batches(clean, work)
+    if all(r is None for _, _, r in results):
+        raise RuntimeError("the AI did not answer in time — try again")
+    out: list[str] = []
+    for start, batch, res in results:  # a failed batch keeps the original lines
+        out += res if res is not None else list(lines[start:start + len(batch)])
     # keep the original where the model returned an empty string
     return [o or lines[i] for i, o in enumerate(out)]
