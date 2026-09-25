@@ -141,7 +141,7 @@ The S3 backend is tested against moto's in-memory S3; worker tests that need ffm
 ## Troubleshooting
 - **Redis connection refused**: `make redis` (starts the Podman machine if needed).
 - **`Unrecognized option 'vsync'`**: an old worker build on ffmpeg 7+; current code uses `-fps_mode`.
-- **MinIO image pull denied**: Docker Hub no longer serves MinIO community images; compose uses `quay.io/minio/minio`.
+- **MinIO image pull denied**: MinIO stopped serving free images (Docker Hub, then quay.io). Use the team mirror `reg.ivolve.cloud/ivolve/minio` or any S3-compatible server (SeaweedFS, RustFS).
 - **Port already in use**: change `POSTGRES_PORT` / `MINIO_PORT`, or run the web dev server with `npx next dev -p 3001` and add that origin to `REFRACT_CORS_ORIGINS`.
 - **Unstyled web page after `npm run build`**: the build overwrote the dev server's `.next`; stop dev, `rm -rf apps/web/.next`, start again.
 - **Kokoro model missing**: `make kokoro-model` (resumable, fails loudly on a bad download).

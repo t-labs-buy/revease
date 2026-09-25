@@ -2,7 +2,7 @@
 
 The live deployment. Host `13.204.129.141` (`ssh ivolve_cloud`), deploy root
 `~/apps/revease`. **URL: http://13.204.129.141:8020** (see "Why one port" for who
-can reach it). Running **v3** since 2026-09-24: object storage (MinIO), Postgres,
+can reach it). Running **v4** (2026-09-25; v3 since 2026-09-24): object storage (MinIO), Postgres,
 separate media/light workers, live progress, AI documentation.
 
 This directory is the source of truth for everything except `.env` (secrets) and
@@ -25,11 +25,11 @@ This directory is the source of truth for everything except `.env` (secrets) and
 | container | image | role |
 |---|---|---|
 | `revease-edge` | nginx:1.27-alpine | the single entry point (8090 in the container, 8020 on the host) |
-| `revease-web` | `reg.ivolve.cloud/ivolve/revease:web-v3` | Next.js UI |
-| `revease-api` | `…:api-v3` | FastAPI (also `127.0.0.1:8021` for curl on the host) |
-| `revease-worker` | `…:worker-v3` | queue `media`, 1 at a time: convert, transcribe, render, auto-edit |
-| `revease-worker-light` | `…:worker-v3` | queue `default`, 3 at a time: documents, snapshots, voice previews; runs Celery beat (hourly retention) |
-| `revease-minio` | quay.io/minio/minio | media bucket `revease-media` (console on `127.0.0.1:8023`) |
+| `revease-web` | `reg.ivolve.cloud/ivolve/revease:web-v4` | Next.js UI |
+| `revease-api` | `…:api-v4` | FastAPI (also `127.0.0.1:8021` for curl on the host) |
+| `revease-worker` | `…:worker-v4` | queue `media`, 1 at a time: convert, transcribe, render, auto-edit |
+| `revease-worker-light` | `…:worker-v4` | queue `default`, 3 at a time: documents, snapshots, voice previews; runs Celery beat (hourly retention) |
+| `revease-minio` | `reg.ivolve.cloud/ivolve/minio:RELEASE.2025-09-07T16-13-09Z` (mirrored; quay.io now refuses pulls) | media bucket `revease-media` (console on `127.0.0.1:8023`) |
 | `revease-postgres` | postgres:16-alpine | the database |
 | `revease-redis` | redis:7-alpine | Celery broker |
 
@@ -125,13 +125,13 @@ Apple-silicon Mac, and Next.js segfaults under qemu) and pushed to Gitea's
 container registry `reg.ivolve.cloud` under the `ivolve` org:
 
 ```
-reg.ivolve.cloud/ivolve/revease:api-v3      582MB
-reg.ivolve.cloud/ivolve/revease:worker-v3   2.36GB   (ffmpeg + faster-whisper)
-reg.ivolve.cloud/ivolve/revease:web-v3      864MB
+reg.ivolve.cloud/ivolve/revease:api-v4
+reg.ivolve.cloud/ivolve/revease:worker-v4   (ffmpeg + faster-whisper)
+reg.ivolve.cloud/ivolve/revease:web-v4
 ```
 
 The host is `docker login`ed to `reg.ivolve.cloud` as `karthik`. `.env` sets
-`REGISTRY` and `IMAGE_NS` to `reg.ivolve.cloud/ivolve/revease` and `TAG=v3`.
+`REGISTRY` and `IMAGE_NS` to `reg.ivolve.cloud/ivolve/revease` and `TAG=v4` (v3 images stay in the registry for rollback: set `TAG=v3`, `docker compose up -d`).
 (Earlier versions used a private `registry:2` on `localhost:5000`; `v1`/`v2` images
 are still in the local Docker cache.)
 
@@ -224,10 +224,28 @@ docker compose up -d --remove-orphans && docker exec revease-edge nginx -s reloa
 - **2026-08-25 (v1)**: upload → understanding → graph → render through the edge;
   re-rendering unchanged scenes reuses all clips.
 
+## AI provider
+
+AI runs through **OpenRouter** (`REFRACT_OPENROUTER_API_KEY`, model
+`REFRACT_OPENROUTER_MODEL`, default `anthropic/claude-opus-4.1`) for step labels,
+project titles, documentation, script rewriting and zoom suggestions.
+`REFRACT_ANTHROPIC_API_KEY` is empty on purpose — set it only with a real
+Anthropic key (`sk-ant-…`); it takes precedence when present.
+
+Until v4 (2026-09-25) the OpenRouter key sat in `REFRACT_ANTHROPIC_API_KEY`:
+every call failed with 401 and each feature silently used its offline fallback
+(project names were the transcript's first words). The API now moves an `sk-or-`
+key out of the Anthropic slot automatically. Check what is in use with:
+
+```bash
+docker compose exec -T api python -c "from app.llm import provider_name; print(provider_name())"
+```
+
+Spend and limit: https://openrouter.ai/settings/keys (the admin Usage page shows
+it too once `REFRACT_OPENROUTER_MANAGEMENT_KEY` is set).
+
 ## Not configured
 
-- `REFRACT_ANTHROPIC_API_KEY` is empty, so labels, narration and documentation
-  come from the deterministic offline writer.
 - No HTTPS yet: blocked on the `revease.ivolve.cloud` DNS record (see above).
 - `DEFAULT_API_BASE` in `apps/extension/src/api.js` points at
   `http://13.204.129.141:8020/api`; switch it to the https URL once the domain

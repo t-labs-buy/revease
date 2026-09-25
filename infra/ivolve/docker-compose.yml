@@ -41,10 +41,11 @@ services:
   # is what presigned URLs are signed for; the edge proxies /s3/ to it with that
   # exact Host header (see edge/nginx.conf).
   minio:
-    # Docker Hub no longer serves MinIO community images; quay.io does. Any
-    # S3-compatible server works (SeaweedFS, RustFS, AWS S3): only the
-    # REFRACT_S3_* settings change.
-    image: quay.io/minio/minio:latest
+    # Pinned copy in our own registry: MinIO stopped serving community images
+    # (Docker Hub first, then quay.io refused pulls on 2026-09-25), so a pruned
+    # image cache could otherwise leave storage unrecoverable. Mirrored from
+    # quay.io/minio/minio at this release; any S3-compatible server also works.
+    image: reg.ivolve.cloud/ivolve/minio:RELEASE.2025-09-07T16-13-09Z
     container_name: revease-minio
     restart: unless-stopped
     command: server /data --console-address ":9001"

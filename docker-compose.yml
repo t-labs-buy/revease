@@ -14,9 +14,9 @@ services:
   # Optional, for running locally the way production scales: object storage
   # (REFRACT_STORAGE_BACKEND=s3) and Postgres. `make infra-up` starts them.
   minio:
-    # Docker Hub no longer serves MinIO community images; quay.io does. Any
-    # S3-compatible server works (SeaweedFS, RustFS, AWS S3): only the
-    # REFRACT_S3_* settings change.
+    # MinIO no longer publishes free images reliably (Docker Hub stopped; quay.io
+    # began refusing pulls 2026-09-25). If this pull fails, use any S3-compatible
+    # server (SeaweedFS, RustFS) or the team mirror reg.ivolve.cloud/ivolve/minio.
     image: quay.io/minio/minio:latest
     command: server /data --console-address ":9001"
     ports: ["${MINIO_PORT:-9000}:9000", "${MINIO_CONSOLE_PORT:-9001}:9001"]
