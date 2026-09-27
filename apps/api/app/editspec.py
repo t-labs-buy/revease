@@ -138,7 +138,14 @@ def build_edit_spec(graph_json: dict[str, Any], viewport: dict[str, int] | None)
         "pace": 1.0,
         # backdrop behind the recording (inset with padding) instead of full-bleed.
         "background": {"enabled": False, "style": "indigo"},
-        "music": {"enabled": False, "storage_key": None, "gain_db": -18},
+        "music": {"enabled": False, "storage_key": None, "gain_db": -18, "duck": True,
+                  "fade_in_ms": 1000, "fade_out_ms": 2000, "start_ms": 0},
+        # inserts: full-screen clips / images / title cards played between scenes
+        # (start = intro, end = outro). They sit OUTSIDE the scene timeline — see
+        # effective_inserts. overlays: picture-in-picture images/videos (logos)
+        # composited over the finished video, never part of a scene's hash.
+        "inserts": [],
+        "overlays": [],
         # crop: reframe the whole video to a normalized (0..1) region (legacy single).
         "crop": {"enabled": False, "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},
         # crops: multi-range reframes — each region may carry its own
@@ -171,3 +178,73 @@ def mark_dirty(old: dict[str, Any] | None, new: dict[str, Any]) -> dict[str, Any
         )
         seg["dirty"] = bool(changed)
     return new
+
+
+INSERT_TYPES = ("image", "video", "title")
+
+
+def effective_inserts(spec: dict[str, Any]) -> list[dict[str, Any]]:
+    """The full-screen clips to play around the scenes, in playback order:
+    every `start` insert, then each `after:<step_id>` insert in scene order, then
+    every `end` insert. Each returned item carries `slot`: -1 = before the first
+    scene, i = after scene i (end inserts share the last scene's slot, after its
+    own inserts).
+
+    Legacy `intro` / `outro` cards (the old Intro tab) become start / end inserts
+    while enabled, unless an insert with id "intro" / "outro" already replaced
+    them — so projects saved before the Media tab render exactly as before.
+    An `after:` step that no longer exists (reprocess renumbered, scene deleted)
+    falls to just before the end inserts instead of vanishing.
+
+    Pure: shared by the API, the worker and (ported) the web preview, so all
+    three agree on order and total duration."""
+    segs = spec.get("segments") or []
+    n = len(segs)
+    slot_of = {s.get("step_id"): i for i, s in enumerate(segs)}
+    items: list[dict[str, Any]] = [dict(x) for x in spec.get("inserts") or [] if isinstance(x, dict)]
+    ids = {x.get("id") for x in items}
+    for which, pos in (("intro", "start"), ("outro", "end")):
+        card = spec.get(which) or {}
+        if card.get("enabled") and which not in ids:
+            media = card.get("media_key")
+            legacy = {"id": which, "position": pos, "duration_ms": int(card.get("duration_ms") or 2000),
+                      "legacy": True}
+            if media:
+                legacy.update(type=card.get("media_type") or "image", media_key=media, keep_audio=True)
+            else:
+                legacy.update(type="title", title=str(card.get("title") or ""))
+            items.insert(0, legacy) if pos == "start" else items.append(legacy)
+
+    # sort key (slot, band, order): start inserts sit in slot -1; an insert after
+    # scene i in slot i; end inserts after the last scene's own inserts (band 2),
+    # orphans just before them (band 1 in the last slot).
+    keyed: list[tuple[tuple[int, int, int], dict[str, Any]]] = []
+    for order, it in enumerate(items):
+        if it.get("type") not in INSERT_TYPES:
+            continue
+        if it.get("type") != "title" and not it.get("media_key"):
+            continue
+        pos = str(it.get("position") or "end")
+        if pos == "start":
+            slot, band = -1, 0
+        elif pos.startswith("after:"):
+            slot, band = slot_of.get(pos[6:], n - 1), 1
+        else:
+            slot, band = n - 1, 2
+        keyed.append(((slot, band, order), {**it, "slot": slot}))
+    keyed.sort(key=lambda t: t[0])
+    return [it for _, it in keyed]
+
+
+def insert_duration_ms(item: dict[str, Any], media_ms: int | None = None) -> int:
+    """How long an insert plays. A video plays its trimmed length (the whole clip
+    when untrimmed and `media_ms` is known); images and title cards their
+    `duration_ms`. Never below half a second."""
+    if item.get("type") == "video":
+        t0 = int(item.get("trim_start_ms") or 0)
+        t1 = item.get("trim_end_ms")
+        if t1:
+            return max(500, int(t1) - t0)
+        if media_ms:
+            return max(500, int(media_ms) - t0)
+    return max(500, int(item.get("duration_ms") or 2000))

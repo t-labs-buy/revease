@@ -73,3 +73,18 @@ def enqueue_document_generate(
 def enqueue_document_snapshot(project_id: str, step_id: str, t_seconds: float) -> None:
     """Re-grab one doc step's snapshot at a different moment of the recording."""
     _send("refract.document.snapshot", [project_id, step_id, float(t_seconds)])
+
+
+def enqueue_library_process(asset_id: str) -> None:
+    """Normalize a freshly uploaded library file (probe, transcode, poster)."""
+    _send("refract.library.process", [asset_id])
+
+
+def enqueue_library_remove_bg(asset_id: str) -> None:
+    """Cut the background out of a library image (logo) into `nobg.png`."""
+    _send("refract.library.remove_bg", [asset_id])
+
+
+def enqueue_library_import(asset_id: str) -> None:
+    """Copy a recording from another project into the library."""
+    _send("refract.library.import", [asset_id])

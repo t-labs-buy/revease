@@ -24,10 +24,11 @@ from typing import Any
 from sqlalchemy import select
 
 from app.db import SessionLocal
-from app.editspec import effective_script
+from app.editspec import effective_inserts, effective_script
 from app.usage import record_event
 from app.models import MediaAsset, Project, RenderJob, VideoProject, WorkflowGraphRow
 from app.storage import store
+from worker.pipeline.placement import Placed, enable_expr, insert_slots, overlay_box, overlay_windows
 from worker.pipeline.smoothzoom import apply_zoom
 from worker.pipeline.timeline import StepInput, build_timeline
 from worker.pipeline.tts import _probe_duration_ms, _silent_wav, synth_step
@@ -695,30 +696,49 @@ def _has_audio(path: Path) -> bool:
     return proc.returncode == 0 and bool(proc.stdout.strip())
 
 
-def _render_media_card(media_key: str, media_type: str, duration_ms: int, dims: tuple[int, int], work: Path, tag: str) -> tuple[Path, int]:
-    """Normalize an uploaded intro/outro image or video to a concat-ready clip."""
+def _render_media_card(media_key: str, media_type: str, duration_ms: int, dims: tuple[int, int], work: Path,
+                       tag: str, *, trim_start_ms: int = 0, trim_end_ms: int | None = None,
+                       keep_audio: bool = True, fit: str = "cover") -> tuple[Path, int]:
+    """Normalize an inserted image or video (intro/outro/between scenes) to a
+    concat-ready clip. A video plays its trimmed window with its own sound
+    (unless muted); an image holds for `duration_ms`. fit="contain" letterboxes
+    onto the dark card colour instead of cropping — for cut-out logos and
+    portrait media, where a cover crop would cut the subject off."""
     source = store.fetch(media_key)
     if source is None:
-        raise RuntimeError(f"intro/outro media missing: {media_key}")
-    actual_ms = _probe_duration_ms(source) if media_type == "video" else None
-    dur_ms = max(500, actual_ms or duration_ms)
+        raise FileNotFoundError(f"inserted media missing: {media_key}")
+    t0 = max(0, int(trim_start_ms or 0)) if media_type == "video" else 0
+    if media_type == "video":
+        actual_ms = _probe_duration_ms(source) or duration_ms
+        end_ms = min(int(trim_end_ms), actual_ms) if trim_end_ms else actual_ms
+        dur_ms = max(500, end_ms - t0)
+    else:
+        dur_ms = max(500, int(duration_ms))
     w, h = dims
-    # A video card keeps its own soundtrack; an image (or a silent video) gets
-    # a silent track so the concat always sees an audio stream.
-    keep_audio = media_type == "video" and _has_audio(source)
-    chash = _sha("v2", tag, media_key, media_type, dur_ms, dims, keep_audio)
+    # A video card keeps its own soundtrack; an image (or a silent/muted video)
+    # gets a silent track so the concat always sees an audio stream.
+    keep_audio = bool(keep_audio) and media_type == "video" and _has_audio(source)
+    chash = _sha("v3", tag, media_key, media_type, dur_ms, t0, dims, keep_audio, fit)
     clip = work / f"{tag}_{chash}.mp4"
     if clip.exists():
         return clip, dur_ms
-    cover = f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},fps={FPS},setsar=1"
-    inputs = (["-loop", "1", "-i", str(source)] if media_type == "image" else ["-i", str(source)])
+    seek = ["-ss", f"{t0 / 1000:.3f}"] if t0 else []
+    inputs = (["-loop", "1", "-i", str(source)] if media_type == "image" else [*seek, "-i", str(source)])
     if keep_audio:
         audio_map = ["-map", "0:a:0"]
     else:
         inputs += ["-f", "lavfi", "-i", "anullsrc=r=24000:cl=stereo"]
         audio_map = ["-map", "1:a:0"]
+    if fit == "contain":
+        inputs += ["-f", "lavfi", "-i", f"color=c=0x0b0f1a:s={w}x{h}:r={FPS}"]
+        bg_idx = 2 if not keep_audio else 1
+        graph = (f"[0:v]scale={w}:{h}:force_original_aspect_ratio=decrease,format=rgba[fg];"
+                 f"[{bg_idx}:v][fg]overlay=(W-w)/2:(H-h)/2:shortest=1,fps={FPS},setsar=1,format=yuv420p[v]")
+    else:
+        graph = (f"[0:v]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},"
+                 f"fps={FPS},setsar=1,format=yuv420p[v]")
     ok = _run([
-        "ffmpeg", "-y", *inputs, "-vf", cover, "-map", "0:v:0", *audio_map,
+        "ffmpeg", "-y", *inputs, "-filter_complex", graph, "-map", "[v]", *audio_map,
         "-c:v", "libx264", "-preset", "veryfast", "-crf", CRF, "-pix_fmt", "yuv420p",
         "-video_track_timescale", str(MP4_TIMESCALE),
         "-c:a", "aac", "-ar", "24000", "-ac", "2", "-t", f"{dur_ms / 1000:.3f}", str(clip),
@@ -726,6 +746,104 @@ def _render_media_card(media_key: str, media_type: str, duration_ms: int, dims: 
     if not ok:
         raise RuntimeError(f"media card render failed: {media_key}")
     return clip, dur_ms
+
+
+def _render_insert(item: dict, dims: tuple[int, int], font: str | None, work: Path,
+                   brand: dict | None, logo: Path | None) -> tuple[Path, int] | None:
+    """One inserted clip (editspec.effective_inserts item) -> (clip, duration).
+    Missing media (a deleted library asset) is skipped with a warning instead
+    of failing the whole export."""
+    tag = f"ins_{_sha(item.get('id'))[:8]}"
+    if item.get("type") == "title":
+        dur = max(500, int(item.get("duration_ms") or 2000))
+        return _render_titlecard(str(item.get("title") or ""), dur, dims, font, work, tag,
+                                 brand=brand, logo=logo), dur
+    try:
+        return _render_media_card(
+            str(item["media_key"]), str(item.get("type") or "image"), int(item.get("duration_ms") or 2000),
+            dims, work, tag, trim_start_ms=int(item.get("trim_start_ms") or 0),
+            trim_end_ms=int(item["trim_end_ms"]) if item.get("trim_end_ms") else None,
+            keep_audio=item.get("keep_audio", True) is not False,
+            fit="contain" if item.get("fit") == "contain" or item.get("nobg") else "cover",
+        )
+    except FileNotFoundError as e:
+        log.warning("%s — skipping that insert", e)
+        return None
+
+
+def _overlay_graph(overlays: list[dict], placed: list[Placed], dims: tuple[int, int]) -> tuple[list[str], str]:
+    """Extra ffmpeg inputs + a filter graph ending in [vout] that composites the
+    Media-tab overlays (logos, picture-in-picture) over the concatenated video,
+    each only inside its output windows. ("", "") when there is nothing to draw.
+    Input 0 is the concat; overlays are inputs 1..n in list order."""
+    inputs: list[str] = []
+    steps: list[str] = []
+    last = "0:v"
+    n = 0
+    for ov in overlays:
+        wins = overlay_windows(placed, ov.get("range", "all"))
+        if not wins:
+            continue
+        src = store.fetch(str(ov["media_key"]))
+        if src is None:
+            log.warning("overlay media missing: %s — skipped", ov.get("media_key"))
+            continue
+        is_video = ov.get("type") == "video"
+        if is_video:
+            inputs += (["-stream_loop", "-1"] if ov.get("loop", True) else []) + ["-i", str(src)]
+        else:
+            inputs += ["-loop", "1", "-i", str(src)]
+        n += 1
+        x, y, bw, bh = overlay_box(ov, dims)
+        try:
+            op = min(1.0, max(0.05, float(ov.get("opacity", 1.0))))
+        except (TypeError, ValueError):
+            op = 1.0
+        start = wins[0][0] / 1000
+        chain = f"[{n}:v]"
+        if is_video:  # start playing where it first appears, not at t=0
+            chain += f"setpts=PTS-STARTPTS+{start:.3f}/TB,"
+        chain += (f"scale={bw}:{bh}:force_original_aspect_ratio=decrease,format=rgba,"
+                  f"colorchannelmixer=aa={op:.2f}[ov{n}]")
+        steps.append(chain)
+        out = f"v{n}"
+        steps.append(f"[{last}][ov{n}]overlay=x={x}+({bw}-w)/2:y={y}+({bh}-h)/2:"
+                     f"enable='{enable_expr(wins)}':eof_action=pass:shortest=0[{out}]")
+        last = out
+    if not n:
+        return [], ""
+    steps.append(f"[{last}]format=yuv420p[vout]")
+    return inputs, ";".join(steps)
+
+
+def _music_mix_cmd(video: Path, music_src: Path, music: dict, total_ms: int, out: Path) -> list[str]:
+    """ffmpeg command mixing a looped music bed under the narration: gain, a
+    start offset into the track, fade in/out, and (by default) ducking — the
+    music dips while someone is speaking (sidechain on the narration) and comes
+    back up in the pauses, so a loud track never buries the voice."""
+    gain = float(music.get("gain_db") if music.get("gain_db") is not None else -18)
+    fi = max(0, int(music.get("fade_in_ms") if music.get("fade_in_ms") is not None else 1000)) / 1000
+    fo = max(0, int(music.get("fade_out_ms") if music.get("fade_out_ms") is not None else 2000)) / 1000
+    offset = max(0, int(music.get("start_ms") or 0)) / 1000
+    total = max(0.5, total_ms / 1000)
+    fo = min(fo, total / 2)
+    bed = f"[1:a]volume={gain:.1f}dB"
+    if fi:
+        bed += f",afade=t=in:d={fi:.2f}"
+    if fo:
+        bed += f",afade=t=out:st={max(0.0, total - fo):.2f}:d={fo:.2f}"
+    if music.get("duck", True):
+        graph = (f"[0:a]asplit=2[voice][sc];{bed}[bed];"
+                 f"[bed][sc]sidechaincompress=threshold=0.02:ratio=6:attack=15:release=450[duck];"
+                 f"[voice][duck]amix=inputs=2:duration=first:normalize=0:dropout_transition=3,"
+                 f"alimiter=limit=0.95[a]")
+    else:
+        graph = (f"{bed}[bed];[0:a][bed]amix=inputs=2:duration=first:normalize=0:dropout_transition=3,"
+                 f"alimiter=limit=0.95[a]")
+    return ["ffmpeg", "-y", "-i", str(video), "-stream_loop", "-1",
+            *(["-ss", f"{offset:.3f}"] if offset else []), "-i", str(music_src),
+            "-filter_complex", graph, "-map", "0:v", "-map", "[a]", "-c:v", "copy", "-c:a", "aac",
+            "-ar", "24000", "-shortest", str(out)]
 
 
 def _music_source(music: dict | None, work: Path) -> Path | None:
@@ -981,17 +1099,29 @@ def run_render(render_job_id: str) -> dict:
 
         clips: list[Path] = []
         rendered = reused = 0
-        intro = spec.get("intro", {})
-        if intro.get("enabled"):
-            if intro.get("media_key"):
-                intro_clip, _ = _render_media_card(
-                    intro["media_key"], intro.get("media_type") or "image",
-                    intro.get("duration_ms", 2000), dims, work, "intro",
-                )
-                clips.append(intro_clip)
-            else:
-                clips.append(_render_titlecard(intro.get("title", ""), intro.get("duration_ms", 2000),
-                                               dims, font, work, "intro", brand=brand, logo=logo))
+        # Media tab: full-screen inserts spliced between scene clips (outside the
+        # scene timeline — see placement.py) and overlays composited at concat.
+        all_ids = [str(x.get("step_id")) for x in spec.get("segments", [])]
+        slots = insert_slots(effective_inserts(spec), all_ids, [str(x.get("step_id")) for x in segs])
+        placed: list[Placed] = []
+        clock = 0
+        inserts_done = 0
+
+        def add_inserts(slot: int) -> None:
+            nonlocal clock, inserts_done
+            for sl, item in slots:
+                if sl != slot:
+                    continue
+                got = _render_insert(item, dims, font, work, brand, logo)
+                if got is None:
+                    continue
+                clip_path, dur = got
+                clips.append(clip_path)
+                placed.append(Placed("insert", clock, clock + dur))
+                clock += dur
+                inserts_done += 1
+
+        add_inserts(-1)
         n_segs = max(1, len(segs))
         for i, (s, seg_tl) in enumerate(zip(segs, timeline.segments)):
             report(0.15 + 0.7 * i / n_segs, f"Rendering scene {i + 1} of {len(segs)}…")
@@ -999,49 +1129,43 @@ def run_render(render_job_id: str) -> dict:
                                         crops=crops, elements=elements, logo=logo, logo_pos=logo_pos,
                                         background=spec.get("background"), zooms=tl_zooms)
             clips.append(clip)
+            placed.append(Placed("scene", clock, clock + seg_tl.out_duration_ms,
+                                 int(s.get("source_start_ms", 0)), int(s.get("source_end_ms", 0))))
+            clock += seg_tl.out_duration_ms
             rendered += int(did)
             reused += int(not did)
-        outro = spec.get("outro", {})
-        if outro.get("enabled"):
-            if outro.get("media_key"):
-                outro_clip, _ = _render_media_card(
-                    outro["media_key"], outro.get("media_type") or "image",
-                    outro.get("duration_ms", 1500), dims, work, "outro",
-                )
-                clips.append(outro_clip)
-            else:
-                clips.append(_render_titlecard(outro.get("title", ""), outro.get("duration_ms", 1500),
-                                               dims, font, work, "outro", brand=brand, logo=logo))
+            add_inserts(i)
+        if not segs:
+            add_inserts(0)
 
-        # concat (re-encode for safe, uniform output)
+        # concat (re-encode for safe, uniform output); overlays ride the same encode
         report(0.87, "Joining scenes into the final video…")
         list_file = work / "concat.txt"
         list_file.write_text("".join(f"file '{c}'\n" for c in clips))
-        music_src = _music_source(spec.get("music"), work)
-        overall = _sha([c.name for c in clips], spec.get("music") or {})
+        music = spec.get("music") or {}
+        music_src = _music_source(music, work)
+        overlays = [o for o in spec.get("overlays") or [] if isinstance(o, dict) and o.get("media_key")]
+        overall = _sha([c.name for c in clips], music, overlays)
         out_key = f"renders/{vp.id}/final_{overall}.mp4"
         out_path = store.local_path(out_key)
-        ok = _run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file),
-                   "-c:v", "libx264", "-preset", "veryfast", "-crf", CRF, "-pix_fmt", "yuv420p",
-                   "-c:a", "aac", str(out_path)])
+        ov_inputs, ov_graph = _overlay_graph(overlays, placed, dims)
+        video_args = (["-filter_complex", ov_graph, "-map", "[vout]", "-map", "0:a"] if ov_graph else [])
+        ok = _run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file), *ov_inputs,
+                   *video_args, "-c:v", "libx264", "-preset", "veryfast", "-crf", CRF, "-pix_fmt", "yuv420p",
+                   "-c:a", "aac", "-t", f"{clock / 1000:.3f}", str(out_path)])
+        if not ok and ov_graph:
+            log.warning("overlay pass failed; exporting without overlays")
+            ok = _run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file),
+                       "-c:v", "libx264", "-preset", "veryfast", "-crf", CRF, "-pix_fmt", "yuv420p",
+                       "-c:a", "aac", str(out_path)])
         if not ok:
             raise RuntimeError("concat failed")
 
-        # background music: loop the track under the narration at gain_db (video
-        # stream copied — only the audio is remixed). Best-effort: a mix failure
-        # still delivers the video, just without music.
+        # background music under the narration (video stream copied — only the
+        # audio is remixed). Best-effort: a mix failure still delivers the video.
         if music_src is not None:
-            gain = float((spec.get("music") or {}).get("gain_db") or -18)
             mixed = work / f"final_{overall}_music.mp4"
-            ok = _run([
-                "ffmpeg", "-y", "-i", str(out_path), "-stream_loop", "-1", "-i", str(music_src),
-                "-filter_complex",
-                f"[1:a]volume={gain:.1f}dB[bg];"
-                f"[0:a][bg]amix=inputs=2:duration=first:normalize=0:dropout_transition=3,"
-                f"alimiter=limit=0.95[a]",
-                "-map", "0:v", "-map", "[a]", "-c:v", "copy", "-c:a", "aac", "-ar", "24000",
-                "-shortest", str(mixed),
-            ])
+            ok = _run(_music_mix_cmd(out_path, music_src, music, clock, mixed))
             if ok and mixed.exists():
                 mixed.replace(out_path)
             else:
@@ -1059,6 +1183,8 @@ def run_render(render_job_id: str) -> dict:
             "zoom_motion": zoomed_motion,
             "zoom_thinned": zoomed_thinned,
             "music": music_src is not None,
+            "inserts": inserts_done,
+            "overlays": len(overlays),
             "aspect": spec.get("aspect"),
         }
         report(0.96, "Saving the video…")

@@ -30,7 +30,7 @@ from sqlalchemy import select
 
 from app.config import get_settings
 from app.db import SessionLocal
-from app.models import CaptureSession, MediaAsset, RenderJob, Upload
+from app.models import CaptureSession, LibraryAsset, MediaAsset, RenderJob, Upload
 from app.storage import prune_cache, store
 
 log = logging.getLogger("refract.retention")
@@ -124,6 +124,17 @@ def run_retention(*, dry_run: bool = False, now: datetime | None = None) -> dict
                     if not dry_run:
                         store.mp_abort(up.storage_key, up.backend_upload_id)
                         up.status = "aborted"
+            # library uploads the browser never finished: drop the row + its files
+            for a in db.scalars(select(LibraryAsset).where(LibraryAsset.status == "uploading")):
+                if _utc(a.updated_at) < cutoff:
+                    rep.add("stale_uploads", a.size)
+                    if not dry_run:
+                        if a.upload_id:
+                            store.mp_abort(a.storage_key, a.upload_id)
+                        store.delete_prefix(f"library/{a.id}/")
+                        db.delete(a)
+                elif a.upload_id:
+                    known.add(a.upload_id)
             if store.backend == "s3":
                 for key, upload_id, initiated in store.list_multipart_uploads():
                     if upload_id not in known and _utc(initiated) < cutoff:

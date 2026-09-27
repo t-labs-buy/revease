@@ -13,6 +13,7 @@ The product is **RevEase**; the code, packages and `REFRACT_` settings say **Ref
 | **Video** | Studio editor: script, voiceover (Kokoro TTS), click-zooms, captions, crops, brand kit; renders only changed scenes |
 | **Documentation** | AI-written guide (overview, prerequisites, steps with tips) + a snapshot per step grabbed at the click and highlighted; inline editing; export **Word / PDF / Markdown**; share links |
 | **Visibility** | Live progress with ETA for every long job (processing, document writing, rendering) and a header activity indicator |
+| **Media** | Per-user library of logos, images, clips and music (any format; reuse recordings from other projects). Insert full-screen between scenes (intro/outro/title cards), overlay logos or picture-in-picture anywhere, AI background removal, background music ducked under the voice |
 | **Downloads** | Original recording or processed MP4, straight from storage |
 
 ## Layout
@@ -70,7 +71,7 @@ sudo apt-get update && sudo apt-get install -y ffmpeg podman podman-compose   # 
 ### 2. Configure and install
 ```bash
 git clone https://github.com/t-labs-buy/revease.git && cd revease
-make install      # creates .env from .env.example, npm + uv envs (+Whisper), Kokoro TTS model (~350 MB)
+make install      # creates .env from .env.example, npm + uv envs (+Whisper), Kokoro TTS (~350 MB) + background-removal (~170 MB) models
 ```
 Defaults work with no keys. Add `REFRACT_ANTHROPIC_API_KEY` for Claude-written labels, narration and documentation.
 
@@ -145,4 +146,5 @@ The S3 backend is tested against moto's in-memory S3; worker tests that need ffm
 - **Port already in use**: change `POSTGRES_PORT` / `MINIO_PORT`, or run the web dev server with `npx next dev -p 3001` and add that origin to `REFRACT_CORS_ORIGINS`.
 - **Unstyled web page after `npm run build`**: the build overwrote the dev server's `.next`; stop dev, `rm -rf apps/web/.next`, start again.
 - **Kokoro model missing**: `make kokoro-model` (resumable, fails loudly on a bad download).
+- **"Remove BG" only clears flat backgrounds**: the ISNet model is missing — `make bg-model` (~170 MB; the worker container fetches it on first start).
 - **A recording seems stuck**: the header activity menu shows its stage; "No update for a few minutes" means the media worker is busy with another long job.

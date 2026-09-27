@@ -579,3 +579,59 @@ class PartDoneIn(BaseModel):
 
 class UploadCompleteIn(BaseModel):
     parts: list[PartDoneIn] = Field(min_length=1, max_length=10000)
+
+
+# ---- media library (editor Media tab) ----
+LibraryKind = Literal["image", "video", "audio"]
+
+
+class LibraryCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    ext: str = Field(pattern=r"^[a-z0-9]{1,5}$")
+    size: int = Field(gt=0, le=20 * 1024**3)  # 20 GB ceiling for a clip or track
+
+
+class LibraryAssetOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    kind: str
+    name: str
+    ext: str
+    source: str
+    storage_key: str
+    normalized_key: str | None = None
+    poster_key: str | None = None
+    nobg_key: str | None = None
+    size: int
+    width: int | None = None
+    height: int | None = None
+    duration_ms: int | None = None
+    has_audio: bool = False
+    status: str
+    bg_status: str
+    error: str | None = None
+    created_at: datetime
+    # upload handshake (only on create)
+    put_url: str | None = None
+    upload_id: str | None = None
+    part_size: int = 0
+    part_count: int = 0
+
+
+class LibraryRename(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+
+
+class LibraryImportIn(BaseModel):
+    session_id: str
+
+
+class ReusableRecording(BaseModel):
+    session_id: str
+    project_id: str
+    project_name: str
+    created_at: datetime
+    duration_ms: int | None = None
+    poster: str | None = None
+    storage_key: str

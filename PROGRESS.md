@@ -93,6 +93,17 @@ Release-gate checklist (§5) all satisfied except the two provider-key items (Wh
 - **Raw video download**: `GET /sessions/{id}/download?variant=original|processed` -> signed attachment link; falls back to the processed MP4 once retention removed the original. Menu on the prepare page and capture cards.
 - **Gotcha**: Docker Hub stopped serving MinIO community images; compose uses `quay.io/minio/minio`.
 
+## Media tab: library, inserts, overlays, background removal, music (2026-09-27)
+
+- **Replaces the Intro tab.** Old intro/outro cards fold into inserts (`editspec.effective_inserts`), so existing projects render the same.
+- **Library** (`LibraryAsset`, `routers/library.py`): per-user, any format in; the worker normalizes to PNG / H.264 MP4 / playable audio (animated GIF becomes a clip, HEIC via pillow-heif, SVG rasterized in the browser). Single PUT up to 32 MB, resumable parts above. "Reuse a recording" copies another project's processed video into the library.
+- **Inserts**: full-screen image / clip (trim, own sound) / title card at the start, after any scene, or the end.
+- **Overlays**: logo or picture-in-picture, dragged on the preview, for the whole video, the recording only, or a custom range (timeline Media row).
+- **Background removal**: ISNet ONNX (`make bg-model`), with a flat-colour fallback; the original is kept.
+- **Music**: library track, volume, ducking under the voice (sidechain), fades, start offset.
+- **Render**: inserts are spliced between scene clips and overlays are composited in the concat encode, so moving a logo or changing the music re-renders 0 scenes (asserted in `test_render.py`). A spec may only reference this project's media or the editor's own library (422 otherwise).
+- **Tests**: `test_library.py`, `test_placement.py`, `test_bgremove.py` (real ISNet when the model is present), `test_library_job.py`, the render test and a retention test.
+
 ## Deployed to ivolve as v3 (2026-09-24)
 
 - Images `reg.ivolve.cloud/ivolve/revease:{api,worker,web}-v3`, built natively on the host.

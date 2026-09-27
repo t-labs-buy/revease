@@ -22,7 +22,7 @@ export PATH := /opt/homebrew/opt/ffmpeg-full/bin:$(HOME)/.local/bin:$(PATH)
 CONTAINER_ENGINE ?= $(shell command -v podman >/dev/null 2>&1 && echo podman || echo docker)
 COMPOSE := $(CONTAINER_ENGINE) compose
 
-.PHONY: infra-up infra-down retention retention-dry db-copy storage-migrate help doctor install uv env redis redis-stop dev api worker web test test-py test-js lint typecheck fmt purge-legacy purge-legacy-force clean
+.PHONY: bg-model kokoro-model infra-up infra-down retention retention-dry db-copy storage-migrate help doctor install uv env redis redis-stop dev api worker web test test-py test-js lint typecheck fmt purge-legacy purge-legacy-force clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -42,6 +42,7 @@ install: uv env ## Install all deps (npm workspaces + uv envs; workers include W
 	cd $(API_DIR) && uv sync
 	cd $(WORKERS_DIR) && uv sync --extra whisper
 	$(MAKE) kokoro-model
+	$(MAKE) bg-model
 	@command -v ffmpeg >/dev/null || echo "WARNING: ffmpeg not found — media and render stages will degrade. brew install ffmpeg"
 
 uv: ## Install uv (Python package manager) into ~/.local/bin if missing
@@ -57,6 +58,13 @@ kokoro-model: ## Download the Kokoro TTS model into data/kokoro (~350MB, once)
 	[ -f data/kokoro/kokoro-v1.0.onnx ] || fetch kokoro-v1.0.onnx; \
 	[ -f data/kokoro/voices-v1.0.bin ] || fetch voices-v1.0.bin; \
 	echo "Kokoro model ready in data/kokoro"
+
+bg-model: ## Download the ISNet background-removal model into data/models (~170MB, once)
+	@mkdir -p data/models
+	@set -e; f=data/models/isnet-general-use.onnx; \
+	[ -f $$f ] || { curl -fL --retry 5 --retry-all-errors --speed-limit 10240 --speed-time 60 -C - \
+	  https://github.com/danielgatis/rembg/releases/download/v0.0.0/isnet-general-use.onnx -o $$f.part && mv $$f.part $$f; }; \
+	echo "Background-removal model ready in data/models"
 
 redis: ## Start Redis (podman or docker compose; starts the podman VM if needed)
 	@if [ "$(CONTAINER_ENGINE)" = podman ]; then \

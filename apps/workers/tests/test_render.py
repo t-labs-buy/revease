@@ -105,3 +105,78 @@ def test_render_is_drift_free_and_regenerate_touches_only_changed():
         assert stats2["segments_reused"] == 2, stats2
     finally:
         db.close()
+
+
+def _png(key: str, color=(255, 255, 255, 0), size=(200, 100)) -> str:
+    from PIL import Image
+
+    out = store.local_path(key)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    im = Image.new("RGBA", size, color)
+    im.paste((30, 143, 142, 255), (40, 20, 160, 80))
+    im.save(out)
+    return key
+
+
+def _mean_volume(key: str, start: float, dur: float) -> float:
+    err = subprocess.run(
+        ["ffmpeg", "-ss", f"{start}", "-t", f"{dur}", "-i", str(store.local_path(key)),
+         "-af", "volumedetect", "-f", "null", "-"], capture_output=True, text=True,
+    ).stderr
+    line = next(ln for ln in err.splitlines() if "mean_volume" in ln)
+    return float(line.split("mean_volume:")[1].split()[0])
+
+
+def test_media_inserts_overlays_and_music_never_rerender_scenes():
+    """Media tab: a title card at the start, an image after scene 1, a logo
+    overlay and a music bed. Total = inserts + body (inserts sit outside the
+    scene timeline), and moving the logo or changing the music re-renders zero
+    scenes — overlays and music live in the concat/mix passes only."""
+    db = SessionLocal()
+    try:
+        vp = _setup(db)
+        spec = {**vp.edit_spec_json}
+        spec["intro"] = {**spec["intro"], "enabled": False}
+        spec["outro"] = {**spec["outro"], "enabled": False}
+        logo = _png(f"projects/{vp.project_id}/logo.png")
+        still = _png(f"projects/{vp.project_id}/still.png", color=(200, 30, 30, 255))
+        tone = f"projects/{vp.project_id}/music.wav"
+        subprocess.run(["ffmpeg", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=4",
+                        str(store.local_path(tone))], capture_output=True, check=True)
+        spec["inserts"] = [
+            {"id": "t1", "type": "title", "title": "Welcome", "position": "start", "duration_ms": 1000},
+            {"id": "i1", "type": "image", "media_key": still, "position": "after:s1", "duration_ms": 800},
+            {"id": "gone", "type": "image", "media_key": "projects/x/missing.png", "position": "end",
+             "duration_ms": 900},  # a deleted asset is skipped, not fatal
+        ]
+        spec["overlays"] = [{"id": "o1", "type": "image", "media_key": logo, "x": 0.8, "y": 0.05,
+                             "w": 0.15, "h": 0.1, "range": "all", "opacity": 0.9}]
+        spec["music"] = {"enabled": True, "storage_key": tone, "gain_db": -12, "duck": True}
+        vp.edit_spec_json = spec
+        db.commit()
+
+        job1 = RenderJob(video_project_id=vp.id, status="pending")
+        db.add(job1)
+        db.commit()
+        stats1 = run_render(job1.id)
+        assert stats1["inserts"] == 2 and stats1["overlays"] == 1 and stats1["music"]
+        db.refresh(job1)
+        expected = (1000 + 800 + stats1["expected_body_ms"]) / 1000
+        assert abs(_probe_s(job1.output_key) - expected) < 0.7
+        assert _mean_volume(job1.output_key, 0.1, 0.8) > -50  # the music bed is audible
+
+        # move the logo + turn the music down: every scene comes from cache
+        spec2 = {**vp.edit_spec_json}
+        spec2["overlays"] = [{**spec2["overlays"][0], "x": 0.05, "range": {"start_ms": 0, "end_ms": 1500}}]
+        spec2["music"] = {**spec2["music"], "gain_db": -24}
+        vp.edit_spec_json = mark_dirty(vp.edit_spec_json, spec2)
+        db.commit()
+        job2 = RenderJob(video_project_id=vp.id, status="pending")
+        db.add(job2)
+        db.commit()
+        stats2 = run_render(job2.id)
+        assert stats2["segments_rendered"] == 0 and stats2["segments_reused"] == 3, stats2
+        db.refresh(job2)
+        assert job2.output_key != job1.output_key
+    finally:
+        db.close()

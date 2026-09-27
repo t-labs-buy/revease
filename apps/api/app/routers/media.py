@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 from app.auth import CurrentUser
 from app.config import get_settings
 from app.db import get_session
-from app.models import BrandPackage, User
+from app.models import BrandPackage, LibraryAsset, User
 from app.ownership import owned_project, owned_row, owned_session
 from app.storage import _attachment, store
 
@@ -39,6 +39,11 @@ def _authorize_write(db: Session, user: User, storage_key: str) -> None:
         return
     if len(parts) >= 2 and parts[0] == "projects":
         owned_project(db, user, parts[1])
+        return
+    if len(parts) >= 3 and parts[0] == "library":
+        asset = owned_row(db, user, LibraryAsset, parts[1], "asset")
+        if storage_key != asset.storage_key:  # only the original, only while uploading
+            raise HTTPException(status_code=403, detail="cannot upload to this storage key")
         return
     raise HTTPException(status_code=403, detail="cannot upload to this storage key")
 
