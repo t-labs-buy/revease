@@ -175,6 +175,12 @@ function segmentAtOutMs(outMs: number, tl: PreviewTimeline) {
 
 const mmss = (t: number) =>
   `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
+/** Size a textarea to its content so the whole text is visible without scrolling. */
+function fitTextarea(el: HTMLTextAreaElement | null) {
+  if (!el) return;
+  el.style.height = "auto";
+  el.style.height = `${el.scrollHeight + 2}px`;
+}
 
 // Voice-track polls at 1.5s. Local CPU TTS runs near real-time, so this ceiling
 // (~20 min) covers even a very long narration's first build; every later build
@@ -1211,10 +1217,19 @@ export default function VideoEditor({
     }
   }
 
+  // A seek that arrived while the video was still landing the previous one:
+  // applied from onSeeked. Assigning currentTime mid-seek restarts the decode
+  // (keyframes are seconds apart), so a fast drag would otherwise stutter.
+  const seekPending = useRef<number | null>(null);
   function seekTo(seconds: number) {
     const v = videoRef.current;
     const target = Math.max(0, Math.min(seconds, dur || seconds));
-    if (v) v.currentTime = target;
+    // the playhead / seek bar follow the pointer at once; the picture catches up
+    setCur(target);
+    if (v) {
+      if (v.seeking) seekPending.current = target;
+      else v.currentTime = target;
+    }
     // Move audio in the same call (not via the 'seeked' event, whose timing vs.
     // the conductor's next tick isn't guaranteed) so a mid-playback scrub lands
     // exactly where the user dragged instead of the conductor snapping video
@@ -1378,6 +1393,14 @@ export default function VideoEditor({
     (dur ? dur * 1000 : 0) ||
     spec.segments.reduce((m, s) => Math.max(m, s.source_end_ms || 0), 0) ||
     1;
+  // The transport (clock + seek bar) spans the KEPT recording: up to the end of
+  // the last un-skipped scene, not the raw file, which runs on past whatever
+  // was trimmed off the tail. Playback already stops there (see onTimeUpdate).
+  const keptEndMs = spec.segments.reduce(
+    (m, s) => (s.skipped ? m : Math.max(m, s.source_end_ms || 0)),
+    0,
+  );
+  const editEnd = keptEndMs > 0 ? Math.min(dur || keptEndMs / 1000, keptEndMs / 1000) : dur;
   const query = q.trim().toLowerCase();
 
   const CHIPS: {
@@ -1670,12 +1693,19 @@ export default function VideoEditor({
                         <textarea
                           autoFocus
                           defaultValue={text}
+                          // grows to fit the whole narration — no inner scrollbar
+                          ref={fitTextarea}
+                          onInput={(e) => fitTextarea(e.currentTarget)}
                           onBlur={(e) => {
                             setSegText(i, e.target.value);
                             setEditIdx(null);
                           }}
                           placeholder="Type the narration…"
-                          className="input min-h-[64px] w-full resize-y text-sm leading-relaxed"
+                          // styled like the read view (same font, line height,
+                          // edge offset and gap between words) so every word
+                          // wraps onto the same line while editing
+                          style={{ wordSpacing: "4px" }}
+                          className="min-h-[64px] w-full resize-none overflow-hidden rounded border-0 bg-transparent px-0.5 py-0 text-[15px] leading-relaxed text-[var(--text)] outline-none placeholder:text-[var(--text-3)] focus:ring-2 focus:ring-[#1E8F8E]/15"
                         />
                       ) : seg.words.length ? (
                         <p className="text-[15px] leading-relaxed text-[var(--text)]">
@@ -1902,6 +1932,10 @@ export default function VideoEditor({
                           }}
                           onTimeUpdate={(e) => {
                             const v = e.currentTarget;
+                            // mid-drag the pointer is ahead of the picture: keep the
+                            // playhead where the user put it, not on the frame that
+                            // just landed (seekTo sets cur; it catches up on seeked)
+                            if (v.seeking || seekPending.current !== null) return;
                             setCur(v.currentTime);
                             if (v.paused) return; // free scrubbing while paused
                             // Clip-range trim always applies, conductor or not: the
@@ -1988,6 +2022,13 @@ export default function VideoEditor({
                             audioRef.current?.pause();
                           }}
                           onSeeked={(e) => {
+                            // a newer drag position arrived during this seek — go there
+                            if (seekPending.current !== null) {
+                              const t = seekPending.current;
+                              seekPending.current = null;
+                              e.currentTarget.currentTime = t;
+                              return;
+                            }
                             // While the conductor is running it owns video's position
                             // (derived FROM audio) — seekTo() already moves audio in
                             // the same call for user-initiated seeks, so resyncing
@@ -2062,14 +2103,14 @@ export default function VideoEditor({
                   className="font-mono text-xs text-[var(--text-2)]"
                   title="Original video time — the final rendered video's timing may differ once pace & cuts are applied"
                 >
-                  {clock(cur)} / {clock(dur)}
+                  {clock(cur)} / {clock(editEnd)}
                 </span>
                 <input
                   type="range"
                   min={0}
-                  max={dur || 1}
+                  max={editEnd || 1}
                   step="any"
-                  value={Math.min(dur, cur)}
+                  value={Math.min(editEnd, cur)}
                   onChange={(e) => seekTo(Number(e.target.value))}
                   className="flex-1 accent-[#1E8F8E]"
                 />
@@ -3707,6 +3748,7 @@ function TimelineToolbar({
   onDelete,
   tlZoom,
   setTlZoom,
+  onFit,
   trailing,
 }: {
   onUndo: () => void;
@@ -3720,6 +3762,7 @@ function TimelineToolbar({
   onDelete: () => void;
   tlZoom: number;
   setTlZoom: (n: number) => void;
+  onFit?: () => void;
   trailing?: React.ReactNode;
 }) {
   return (
@@ -3776,14 +3819,18 @@ function TimelineToolbar({
         <span className="text-xs text-[var(--text-3)]">Zoom</span>
         <input
           type="range"
-          min={1}
-          max={4}
-          step={0.5}
+          min={0.25}
+          max={8}
+          step={0.25}
           value={tlZoom}
           onChange={(e) => setTlZoom(Number(e.target.value))}
           className="w-28 accent-[#1E8F8E]"
         />
-        <button onClick={() => setTlZoom(1)} className="btn btn-ghost btn-sm">
+        <button
+          onClick={() => (onFit ? onFit() : setTlZoom(1))}
+          className="btn btn-ghost btn-sm"
+          title="Zoom out until the whole recording fits the page"
+        >
           Fit
         </button>
         {trailing}
@@ -3803,6 +3850,10 @@ type TrimLayoutItem = {
   end: number;
   d: number;
 };
+// Trim track scale at zoom 1: the track is at least this wide per second of
+// footage and scrolls sideways, instead of squeezing the whole recording into
+// the page width (unreadable on a long recording). The Zoom slider multiplies it.
+const TRIM_PX_PER_SEC = 24;
 
 function TrimTrack({
   sectionRef,
@@ -3919,6 +3970,37 @@ function TrimTrack({
     (sourceToEff(cur * 1000) / layout.total) * 100,
   );
 
+  // Sideways-scrolling track: never narrower than the page, and never squeezed
+  // below TRIM_PX_PER_SEC × zoom per second of footage.
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const totalSec = layout.total / 1000;
+  const trackWidth = `max(100%, ${Math.round(totalSec * TRIM_PX_PER_SEC * tlZoom)}px)`;
+  // ruler labels spaced at least ~64px apart at the current scale
+  const pxPerSec = TRIM_PX_PER_SEC * tlZoom;
+  const tickEvery =
+    [1, 2, 5, 10, 15, 30, 60, 120, 300].find((s) => s * pxPerSec >= 64) ?? 300;
+  const ticks: number[] = [];
+  for (let t = 0; t <= totalSec; t += tickEvery) ticks.push(t);
+  // "Fit" = the zoom at which the whole recording just fills the visible width
+  const fitZoom = () => {
+    const sc = scrollRef.current;
+    if (!sc || totalSec <= 0) return 1;
+    const z = sc.clientWidth / (totalSec * TRIM_PX_PER_SEC);
+    return Math.max(0.25, Math.min(8, Math.floor(z * 4) / 4));
+  };
+  // keep the playhead in view as it moves (playing or seeking), but never
+  // fight a drag-scrub, whose pointer maths is relative to the track itself
+  useEffect(() => {
+    const sc = scrollRef.current;
+    const tr = trackRef.current;
+    if (!sc || !tr || scrubbing.current) return;
+    const x = (playheadPct / 100) * tr.offsetWidth;
+    const margin = 40;
+    if (x < sc.scrollLeft + margin || x > sc.scrollLeft + sc.clientWidth - margin) {
+      sc.scrollTo({ left: Math.max(0, x - sc.clientWidth * 0.3) });
+    }
+  }, [playheadPct]);
+
   return (
     <section
       ref={sectionRef}
@@ -3936,6 +4018,7 @@ function TrimTrack({
         onDelete={onDelete}
         tlZoom={tlZoom}
         setTlZoom={setTlZoom}
+        onFit={() => setTlZoom(fitZoom())}
         trailing={
           <button
             onClick={onDone}
@@ -3984,26 +4067,35 @@ function TrimTrack({
         </span>
       </div>
 
-      {/* ruler */}
-      <div className="relative mt-2 h-5 text-[10px] text-[var(--text-3)]">
-        {Array.from({ length: 10 }).map((_, i) => (
-          <span
-            key={i}
-            style={{ left: `${(i / 9) * 100}%` }}
-            className="absolute -translate-x-1/2"
-          >
-            {mmss(((layout.total / 1000) * i) / 9)}
-          </span>
-        ))}
-      </div>
+      {/* ruler + track scroll together sideways; the track is never squeezed
+          to fit the page (see TRIM_PX_PER_SEC) */}
+      <div ref={scrollRef} className="mt-2 overflow-x-auto pb-2">
+        <div style={{ width: trackWidth }}>
+        {/* the ruler seeks too: click or drag along it */}
+        <div
+          className="relative h-5 cursor-ew-resize touch-none select-none text-[10px] text-[var(--text-3)]"
+          onPointerDown={(e) => {
+            scrubbing.current = true;
+            trackRef.current?.setPointerCapture(e.pointerId);
+            seekTo(effToSource(effAtClientX(e.clientX)) / 1000);
+          }}
+        >
+          {ticks.map((t) => (
+            <span
+              key={t}
+              style={{ left: `${(t / totalSec) * 100}%` }}
+              className="absolute -translate-x-1/2"
+            >
+              {mmss(t)}
+            </span>
+          ))}
+        </div>
 
-      {/* single track — clips packed with no gaps, real footage + waveform baked into each one */}
-      <div className="overflow-x-auto pb-2">
+        {/* single track — clips packed with no gaps, real footage + waveform baked into each one */}
         <div
           ref={trackRef}
           data-track
-          className="relative h-32 touch-none select-none rounded-lg bg-white ring-1 ring-inset ring-[var(--border)]"
-          style={{ width: `${tlZoom * 100}%`, minWidth: "100%" }}
+          className="relative h-32 w-full touch-none select-none rounded-lg bg-white ring-1 ring-inset ring-[var(--border)]"
           onPointerDown={onTrackDown}
           onPointerMove={onTrackMove}
           onPointerUp={onTrackUp}
@@ -4037,15 +4129,27 @@ function TrimTrack({
               analyzing audio…
             </span>
           )}
-          {/* draggable playhead */}
+          {/* draggable playhead: the clips cover the whole track, so a drag that
+              starts on the knob must scrub instead of reaching the clip under it */}
           {dur > 0 && (
             <span
               style={{ left: `${playheadPct}%` }}
               className="pointer-events-none absolute -top-1 bottom-0 w-0.5 -translate-x-1/2 bg-[#111827]"
             >
-              <span className="absolute -top-1.5 left-1/2 h-3.5 w-3.5 -translate-x-1/2 rounded-full border-2 border-white bg-[#1E8F8E] shadow" />
+              <span
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                  scrubbing.current = true;
+                  // capture on the track so its move/up handlers finish the drag
+                  trackRef.current?.setPointerCapture(e.pointerId);
+                  seekTo(effToSource(effAtClientX(e.clientX)) / 1000);
+                }}
+                title="Drag to seek"
+                className="pointer-events-auto absolute -top-2.5 left-1/2 h-6 w-6 -translate-x-1/2 cursor-ew-resize rounded-full before:absolute before:left-1/2 before:top-1/2 before:h-3.5 before:w-3.5 before:-translate-x-1/2 before:-translate-y-1/2 before:rounded-full before:border-2 before:border-white before:bg-[#1E8F8E] before:shadow before:content-['']"
+              />
             </span>
           )}
+        </div>
         </div>
       </div>
       <p className="mt-1 text-[11px] text-[var(--text-3)]">
