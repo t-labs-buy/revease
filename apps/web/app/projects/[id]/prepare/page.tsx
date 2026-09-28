@@ -3,6 +3,7 @@
 import { Suspense, use, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
+import { recordingStoppedNote } from "@/lib/limits";
 import {
   activeCrop,
   generateDocument,
@@ -43,6 +44,8 @@ function PrepareInner({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const sid = useSearchParams().get("sid") ?? "";
   const wantDoc = useSearchParams().get("intent") === "doc"; // "New doc" flow → open the guide
+  // the recorder stopped itself at the 500 MB / 30 min limit
+  const limitHit = useSearchParams().get("limit") as "size" | "time" | null;
   const router = useRouter();
 
   const [detail, setDetail] = useState<SessionDetail | null>(null);
@@ -185,6 +188,11 @@ function PrepareInner({ params }: { params: Promise<{ id: string }> }) {
           </span>
         </div>
       </div>
+      {(limitHit === "size" || limitHit === "time") && (
+        <div className="border-b border-amber-500/30 bg-amber-500/10 px-6 py-2.5 text-sm text-amber-700 dark:text-amber-300">
+          {recordingStoppedNote(limitHit)}
+        </div>
+      )}
 
       <div className="mx-auto flex max-w-[1400px] flex-col gap-6 p-6 lg:flex-row">
         {/* left — player + tools + filename */}

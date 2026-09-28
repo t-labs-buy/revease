@@ -228,7 +228,7 @@ export function MediaPanel({
         >
           <IconUpload className="h-5 w-5 text-[#1E8F8E]" />
           <span className="text-sm font-medium">Upload logo, image, video or music</span>
-          <span className="text-[11px] text-[var(--text-3)]">Any format — PNG, JPG, SVG, HEIC, MP4, MOV, WebM, MP3, WAV…</span>
+          <span className="text-[11px] text-[var(--text-3)]">Any format — PNG, JPG, SVG, HEIC, MP4, MOV, WebM, MP3, WAV… · videos up to 500 MB / 30 min</span>
           <input
             ref={fileRef}
             type="file"

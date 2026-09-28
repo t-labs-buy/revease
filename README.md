@@ -8,7 +8,7 @@ The product is **RevEase**; the code, packages and `REFRACT_` settings say **Ref
 
 | | |
 |---|---|
-| **Capture** | Screen recorder, file upload (MP4/MOV/WebM, up to 50 GB, resumable), MV3 extension, or AI-driven "Auto Record" |
+| **Capture** | Screen recorder, file upload (MP4/MOV/WebM, resumable), MV3 extension, or AI-driven "Auto Record" — **up to 500 MB and 30 minutes per video**; recordings stop and save themselves at the limit, longer files are split into parts |
 | **Understand** | Converts the recording, transcribes speech (Whisper), detects steps, labels them with Claude → a **Workflow Graph** |
 | **Video** | Studio editor: script, voiceover (Kokoro TTS), click-zooms, captions, crops, brand kit; renders only changed scenes |
 | **Documentation** | AI-written guide (overview, prerequisites, steps with tips) + a snapshot per step grabbed at the click and highlighted; inline editing; export **Word / PDF / Markdown**; share links |
@@ -108,6 +108,7 @@ All settings are `REFRACT_`-prefixed and documented in [.env.example](.env.examp
 | Storage | `REFRACT_S3_PUBLIC_URL` | empty | what browsers use in presigned URLs (e.g. `/s3` behind the edge proxy) |
 | Database | `REFRACT_DATABASE_URL` | SQLite in `data/` | `postgresql+psycopg://…` for Postgres |
 | Uploads | `REFRACT_UPLOAD_PART_MB` | 16 | resumable upload part size |
+| Uploads | `REFRACT_MAX_VIDEO_MB` / `_MAX_VIDEO_MINUTES` | 500 / 30 | per recording or upload (the web app's `lib/limits.ts` must match) |
 | Processing | `REFRACT_MEDIA_THREADS` / `_NORMALIZE_FPS` | 4 / 30 | caps per ffmpeg job |
 | Processing | `REFRACT_CELERY_VISIBILITY_TIMEOUT_S` | 43200 | must exceed the longest job |
 | Retention | `REFRACT_RETENTION_*` | 7 d originals, 2 d audio, 7 d old renders, 30 d TTS, 24 h uploads | `0` disables a rule |

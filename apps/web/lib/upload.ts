@@ -68,10 +68,23 @@ async function json<T>(r: Response, what: string): Promise<T> {
   return r.json() as Promise<T>;
 }
 
-/** PUT one part with upload progress (fetch has no upload progress events). */
-export function putPart(url: string, body: Blob, onLoaded: (n: number) => void, signal?: AbortSignal): Promise<string> {
+/** PUT one part with upload progress (fetch has no upload progress events).
+ *
+ * `viaApi`: true for an API route (local-backend part, `/media/…` single PUT),
+ * which needs API_BASE + our token; false for a presigned object-store URL,
+ * which must go out as-is and WITHOUT the token. Never infer this from the
+ * URL's shape: behind the single-origin proxy the presigned URL is relative
+ * too (`/s3/…`), and prefixing it with API_BASE sent every part to `/api/s3/…`
+ * — a 404 that broke all uploads on the S3 deploy. The sign endpoints say
+ * which it is (`direct`). */
+export function putPart(
+  url: string,
+  body: Blob,
+  onLoaded: (n: number) => void,
+  signal?: AbortSignal,
+  viaApi: boolean = true,
+): Promise<string> {
   return new Promise((resolve, reject) => {
-    const viaApi = url.startsWith("/"); // API route (local backend) vs presigned store URL
     const xhr = new XMLHttpRequest();
     xhr.open("PUT", viaApi ? `${API_BASE}${url}` : url);
     if (viaApi) {
@@ -121,16 +134,21 @@ export async function sendParts<T>(
   const etags = new Map<number, string>(up.parts.map((p) => [p.number, p.etag]));
   const doneBytes = new Map<number, number>(up.parts.map((p) => [p.number, p.size]));
   const inflight = new Map<number, number>();
+  // Shown progress never goes backwards: a retried part restarts from zero,
+  // which made the bar jump 60% -> 10% and the MB count bounce. The bar holds
+  // its high-water mark until real progress passes it again.
+  let shown = 0;
   const report = () => {
     let loaded = 0;
     doneBytes.forEach((v) => (loaded += v));
     inflight.forEach((v) => (loaded += v));
-    opts.onProgress?.({ loaded: Math.min(loaded, blob.size), total: blob.size });
+    shown = Math.max(shown, Math.min(loaded, blob.size));
+    opts.onProgress?.({ loaded: shown, total: blob.size });
   };
   report();
 
   const pending = Array.from({ length: up.part_count }, (_, i) => i + 1).filter((n) => !etags.has(n));
-  const urls = new Map<number, string>();
+  const urls = new Map<number, { url: string; direct: boolean }>();
   // One signing request in flight at a time: the parallel part workers all
   // start with no URLs and would otherwise each sign the same batch.
   let signing: Promise<void> | null = null;
@@ -140,7 +158,7 @@ export async function sendParts<T>(
     const batch = pending.filter((x) => x >= n && !urls.has(x)).slice(0, SIGN_BATCH);
     if (!batch.includes(n)) batch.unshift(n);
     signing = (async () => {
-      const r = await json<{ parts: { number: number; url: string }[] }>(
+      const r = await json<{ parts: { number: number; url: string; direct?: boolean }[] }>(
         await apiFetch(signPath, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -148,7 +166,7 @@ export async function sendParts<T>(
         }),
         "signParts",
       );
-      r.parts.forEach((p) => urls.set(p.number, p.url));
+      r.parts.forEach((p) => urls.set(p.number, { url: p.url, direct: !!p.direct }));
     })();
     try {
       await signing;
@@ -167,10 +185,11 @@ export async function sendParts<T>(
         if (opts.signal?.aborted) throw new DOMException("aborted", "AbortError");
         try {
           if (!urls.has(n)) await signUpTo(n);
-          const etag = await putPart(urls.get(n)!, body, (l) => {
+          const target = urls.get(n)!;
+          const etag = await putPart(target.url, body, (l) => {
             inflight.set(n, l);
             report();
-          }, opts.signal);
+          }, opts.signal, !target.direct);
           inflight.delete(n);
           etags.set(n, etag);
           doneBytes.set(n, body.size);

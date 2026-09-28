@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import CurrentUser
 from app.db import get_session
+from app.limits import check_size
 from app.models import CaptureSession, LibraryAsset, MediaAsset, Project
 from app.ownership import owned_row, owned_session, project_ids_for
 from app.queue import enqueue_library_import, enqueue_library_process, enqueue_library_remove_bg
@@ -87,6 +88,7 @@ def create_asset(payload: LibraryCreate, user: CurrentUser,
     kind = kind_for_ext(payload.ext)
     if kind is None:
         raise HTTPException(status_code=422, detail=f"unsupported file type .{payload.ext}")
+    check_size(payload.size)
     a = LibraryAsset(user_id=user.id, kind=kind, name=payload.name.strip()[:200], ext=payload.ext.lower(),
                      storage_key="", size=payload.size)
     db.add(a)

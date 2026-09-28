@@ -64,6 +64,11 @@ class Settings(BaseSettings):
     media_cache_max_gb: float = 20.0
     # Direct multipart uploads: part size (S3 minimum is 5 MB except the last).
     upload_part_mb: int = 16
+    # Per-video limits for recordings and uploads (the web app says the same
+    # and its recorders stop themselves just under them). Longer captures tie up
+    # the media worker and extract worse; users split them into parts.
+    max_video_mb: int = 500
+    max_video_minutes: int = 30
 
     # --- Retention (hourly sweep; 0 disables a rule) ---
     retention_enabled: bool = True
