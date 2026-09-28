@@ -14,7 +14,16 @@ import { IconDoc, IconPlus, IconUpload, IconVideo } from "@/components/icons";
 import type { UploadProgress } from "@/lib/upload";
 import { fmtBytes } from "@/lib/upload";
 import { Spinner } from "@/components/ui";
-import { readDurationMs } from "@/components/Uploader";
+import {
+  checkVideoFile,
+  clockOf,
+  LIMIT_LABEL,
+  MAX_VIDEO_MIN,
+  RECORD_WARN_BYTES,
+  RECORD_WARN_MS,
+  recordingLimitHit,
+  recordingStoppedNote,
+} from "@/lib/limits";
 
 /** "Uploading 42% · 1.2 GB of 2.9 GB" — large recordings take a while. */
 function uploadLabel(p: UploadProgress | null): string {
@@ -25,9 +34,8 @@ function uploadLabel(p: UploadProgress | null): string {
 
 export type CaptureIntent = "record" | "upload" | "video" | "doc";
 
-// Uploads go in resumable parts straight to storage, so size is bounded by
-// patience, not by a single request. Matches the server's 50 GB ceiling.
-const MAX_BYTES = 50 * 1024 * 1024 * 1024; // 50 GB
+// Size / length limits (500 MB, 30 min) live in lib/limits — the server
+// enforces the same numbers.
 const MIN_BYTES = 50 * 1024; // 50 KB
 const ACCEPT = "video/mp4,video/quicktime,.mp4,.mov";
 
@@ -77,8 +85,10 @@ export function CaptureModal({
 
   // carry the intent so the session page auto-opens the editor/doc when ready
   // land on the pre-generate review page (trim/crop/voice + pick outputs & video skill)
-  const goToSession = (pid: string, sid: string) =>
-    router.push(`/projects/${pid}/prepare?sid=${sid}${intent === "doc" ? "&intent=doc" : ""}`);
+  const goToSession = (pid: string, sid: string, limit?: "size" | "time" | null) =>
+    router.push(
+      `/projects/${pid}/prepare?sid=${sid}${intent === "doc" ? "&intent=doc" : ""}${limit ? `&limit=${limit}` : ""}`,
+    );
 
   // ---- recording ----
   const [recPhase, setRecPhase] = useState<"idle" | "recording" | "saving" | "saveError">("idle");
@@ -96,6 +106,10 @@ export function CaptureModal({
   const stoppingRef = useRef(false);
   const savedRef = useRef<{ blob: Blob; durationMs: number } | null>(null);
   const displayRef = useRef<MediaStream | null>(null);
+  // bytes recorded so far — the recording stops itself just under 500 MB / 30 min
+  const bytesRef = useRef(0);
+  const [recBytes, setRecBytes] = useState(0);
+  const limitRef = useRef<"size" | "time" | null>(null);
   const micRef = useRef<MediaStream | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
 
@@ -155,7 +169,15 @@ export function CaptureModal({
           MediaRecorder.isTypeSupported(m),
         ) || "video/webm";
       const rec = new MediaRecorder(stream, { mimeType: mime });
-      rec.ondataavailable = (ev) => ev.data.size > 0 && chunksRef.current.push(ev.data);
+      bytesRef.current = 0;
+      limitRef.current = null;
+      setRecBytes(0);
+      rec.ondataavailable = (ev) => {
+        if (ev.data.size > 0) {
+          chunksRef.current.push(ev.data);
+          bytesRef.current += ev.data.size;
+        }
+      };
       display.getVideoTracks()[0].addEventListener("ended", () => void stopRecording());
       recRef.current = rec;
       startTsRef.current = performance.now();
@@ -163,10 +185,17 @@ export function CaptureModal({
       // Note: we do NOT log page clicks here — they'd be clicks on the Refract UI,
       // not the recorded surface. The script comes from the spoken transcript.
       setElapsed(0);
-      timerRef.current = setInterval(
-        () => setElapsed(Math.round((performance.now() - startTsRef.current) / 1000)),
-        250,
-      );
+      timerRef.current = setInterval(() => {
+        const ms = performance.now() - startTsRef.current;
+        setElapsed(Math.round(ms / 1000));
+        setRecBytes(bytesRef.current);
+        // hit the size or time limit: stop and save what we have (never lose it)
+        const hit = recordingLimitHit(bytesRef.current, ms);
+        if (hit && !limitRef.current) {
+          limitRef.current = hit;
+          void stopRecording();
+        }
+      }, 250);
       setRecPhase("recording");
     } catch (e) {
       setError(String(e));
@@ -180,7 +209,7 @@ export function CaptureModal({
     await registerAndUpload(ids.sid, "raw_video", "webm", blob, setUploadProg);
     await postEvents(ids.sid, eventsRef.current);
     await completeSession(ids.sid, durationMs);
-    goToSession(ids.pid, ids.sid);
+    goToSession(ids.pid, ids.sid, limitRef.current);
   }
 
   // Called by the modal Stop button AND the browser's native "Stop sharing".
@@ -235,12 +264,20 @@ export function CaptureModal({
   const [file, setFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
 
-  function pickFile(f: File) {
+  const [checking, setChecking] = useState(false);
+  const durationRef = useRef<number | undefined>(undefined);
+
+  async function pickFile(f: File) {
     setError(null);
+    setFile(null);
     const okType = /\.(mp4|mov)$/i.test(f.name) || ["video/mp4", "video/quicktime"].includes(f.type);
     if (!okType) return setError("Please choose an MP4 or MOV file.");
-    if (f.size > MAX_BYTES) return setError(`File is ${fmtSize(f.size)} — the limit is 50 GB.`);
     if (f.size < MIN_BYTES) return setError("File looks too small / empty.");
+    setChecking(true);
+    const { error: limitErr, durationMs } = await checkVideoFile(f);
+    setChecking(false);
+    if (limitErr) return setError(limitErr);
+    durationRef.current = durationMs;
     setFile(f);
   }
 
@@ -250,7 +287,7 @@ export function CaptureModal({
     setError(null);
     try {
       const ext = /\.mov$/i.test(file.name) ? "mov" : "mp4";
-      const durationMs = await readDurationMs(file);
+      const durationMs = durationRef.current;
       const project = await createProject(prettyName(file.name));
       const session = await createSession(project.id, "upload");
       await registerAndUpload(session.id, "raw_video", ext, file, setUploadProg);
@@ -338,6 +375,9 @@ export function CaptureModal({
                   <strong> “Share tab audio”</strong> in the picker, and allow your microphone when
                   prompted.
                 </div>
+                <p className="mt-2 text-xs text-[var(--text-3)]">
+                  Each recording can be {LIMIT_LABEL}; it stops and saves by itself at the limit.
+                </p>
                 <button onClick={startRecording} className="btn btn-primary mt-4">
                   <IconPlus width={16} height={16} /> Start recording
                 </button>
@@ -355,9 +395,16 @@ export function CaptureModal({
               <div className="flex flex-col items-center gap-4 py-4">
                 <div className="flex items-center gap-2 font-mono text-lg text-red-400">
                   <span className="h-3 w-3 animate-pulse rounded-full bg-red-500" />
-                  {String(Math.floor(elapsed / 60)).padStart(2, "0")}:
-                  {String(elapsed % 60).padStart(2, "0")}
+                  {clockOf(elapsed)}
+                  <span className="text-sm text-[var(--text-3)]">/ {clockOf(MAX_VIDEO_MIN * 60)}</span>
                 </div>
+                <p className="-mt-2 font-mono text-[11px] text-[var(--text-3)]">{fmtBytes(recBytes)} of 500 MB</p>
+                {(elapsed * 1000 >= RECORD_WARN_MS || recBytes >= RECORD_WARN_BYTES) && (
+                  <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-center text-xs text-amber-600 dark:text-amber-300">
+                    Almost at the limit ({LIMIT_LABEL}). The recording will stop and save by itself — start a
+                    new recording afterwards for the next part.
+                  </div>
+                )}
                 {hasAudio === false ? (
                   <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-center text-xs text-red-200">
                     ⚠ No audio is being captured — the transcript &amp; AI voiceover need audio.
@@ -377,8 +424,15 @@ export function CaptureModal({
               </div>
             )}
             {recPhase === "saving" && (
-              <div className="flex items-center justify-center gap-2 py-8 text-sm text-[var(--text-2)]">
-                <Spinner /> {uploadProg ? uploadLabel(uploadProg) : "Saving & processing…"}
+              <div className="py-6">
+                {limitRef.current && (
+                  <p className="mb-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-center text-xs text-amber-600 dark:text-amber-300">
+                    {recordingStoppedNote(limitRef.current)}
+                  </p>
+                )}
+                <div className="flex items-center justify-center gap-2 text-sm text-[var(--text-2)]">
+                  <Spinner /> {uploadProg ? uploadLabel(uploadProg) : "Saving & processing…"}
+                </div>
               </div>
             )}
             {recPhase === "saveError" && (
@@ -403,7 +457,7 @@ export function CaptureModal({
               onDrop={(e) => {
                 e.preventDefault();
                 const f = e.dataTransfer.files[0];
-                if (f) pickFile(f);
+                if (f) void pickFile(f);
               }}
               className="flex flex-col items-center rounded-2xl border border-dashed border-[var(--border-strong)] bg-[var(--input-bg)] p-8 text-center"
             >
@@ -431,11 +485,14 @@ export function CaptureModal({
                 className="hidden"
                 onChange={(e) => {
                   const f = e.target.files?.[0];
-                  if (f) pickFile(f);
+                  if (f) void pickFile(f);
+                  e.target.value = "";
                 }}
               />
             </div>
-            <p className="mt-2 text-center text-xs text-[var(--text-3)]">MP4 or MOV · up to 50 GB</p>
+            <p className="mt-2 text-center text-xs text-[var(--text-3)]">
+              {checking ? "Checking the video…" : `MP4 or MOV · ${LIMIT_LABEL} — split longer videos into parts`}
+            </p>
             <div className="mt-4 flex justify-end gap-2">
               {(intent === "video" || intent === "doc") && (
                 <button onClick={() => setMode("choose")} className="btn btn-ghost btn-sm">

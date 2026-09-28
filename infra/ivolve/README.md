@@ -2,7 +2,7 @@
 
 The live deployment. Host `13.204.129.141` (`ssh ivolve_cloud`), deploy root
 `~/apps/revease`. **URL: http://13.204.129.141:8020** (see "Why one port" for who
-can reach it). Running **v7** (2026-09-27; v3 since 2026-09-24): object storage (MinIO), Postgres,
+can reach it). Running **v8** (2026-09-28; v3 since 2026-09-24): object storage (MinIO), Postgres,
 separate media/light workers, live progress, AI documentation.
 
 This directory is the source of truth for everything except `.env` (secrets) and
@@ -25,10 +25,10 @@ This directory is the source of truth for everything except `.env` (secrets) and
 | container | image | role |
 |---|---|---|
 | `revease-edge` | nginx:1.27-alpine | the single entry point (8090 in the container, 8020 on the host) |
-| `revease-web` | `reg.ivolve.cloud/ivolve/revease:web-v7` | Next.js UI |
-| `revease-api` | `…:api-v7` | FastAPI (also `127.0.0.1:8021` for curl on the host) |
-| `revease-worker` | `…:worker-v7` | queue `media`, 1 at a time: convert, transcribe, render, auto-edit, library normalize |
-| `revease-worker-light` | `…:worker-v7` | queue `default`, 3 at a time: documents, snapshots, voice previews, background removal, recording import; runs Celery beat (hourly retention) |
+| `revease-web` | `reg.ivolve.cloud/ivolve/revease:web-v8` | Next.js UI |
+| `revease-api` | `…:api-v8` | FastAPI (also `127.0.0.1:8021` for curl on the host) |
+| `revease-worker` | `…:worker-v8` | queue `media`, 1 at a time: convert, transcribe, render, auto-edit, library normalize |
+| `revease-worker-light` | `…:worker-v8` | queue `default`, 3 at a time: documents, snapshots, voice previews, background removal, recording import; runs Celery beat (hourly retention) |
 | `revease-minio` | `reg.ivolve.cloud/ivolve/minio:RELEASE.2025-09-07T16-13-09Z` (mirrored; quay.io now refuses pulls) | media bucket `revease-media` (console on `127.0.0.1:8023`) |
 | `revease-postgres` | postgres:16-alpine | the database |
 | `revease-redis` | redis:7-alpine | Celery broker |
@@ -130,13 +130,13 @@ Apple-silicon Mac, and Next.js segfaults under qemu) and pushed to Gitea's
 container registry `reg.ivolve.cloud` under the `ivolve` org:
 
 ```
-reg.ivolve.cloud/ivolve/revease:api-v7
-reg.ivolve.cloud/ivolve/revease:worker-v7   (ffmpeg + faster-whisper)
-reg.ivolve.cloud/ivolve/revease:web-v7
+reg.ivolve.cloud/ivolve/revease:api-v8
+reg.ivolve.cloud/ivolve/revease:worker-v8   (ffmpeg + faster-whisper)
+reg.ivolve.cloud/ivolve/revease:web-v8
 ```
 
 The host is `docker login`ed to `reg.ivolve.cloud` as `karthik`. `.env` sets
-`REGISTRY` and `IMAGE_NS` to `reg.ivolve.cloud/ivolve/revease` and `TAG=v7` (earlier tags stay in the registry for rollback: set `TAG=v6`, `docker compose up -d`).
+`REGISTRY` and `IMAGE_NS` to `reg.ivolve.cloud/ivolve/revease` and `TAG=v8` (earlier tags stay in the registry for rollback: set `TAG=v7`, `docker compose up -d`).
 (Earlier versions used a private `registry:2` on `localhost:5000`; `v1`/`v2` images
 are still in the local Docker cache.)
 

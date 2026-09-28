@@ -11,6 +11,24 @@ let chunks = [];
 let stream = null;
 let ctx = null; // recording context: { apiBase, sessionId }
 
+// Same limits as the web app (500 MB / 30 min per recording): stop the encoder
+// just under them and keep what was recorded; the run's later steps are simply
+// not on video. Keeps an Auto Record run from producing an upload the server
+// refuses.
+const STOP_BYTES = (500 - 12) * 1024 * 1024;
+const STOP_MS = 30 * 60 * 1000 - 2000;
+let bytes = 0;
+let startedAt = 0;
+let limitHit = null; // "size" | "time" | null
+let limitTimer = null;
+
+function capRecording(reason) {
+  if (limitHit || !recorder || recorder.state === "inactive") return;
+  limitHit = reason;
+  recorder.stop();
+  chrome.runtime.sendMessage({ target: "background", kind: "recorder-limit", reason });
+}
+
 function pickMime() {
   const cands = [
     "video/webm;codecs=vp9",
@@ -35,21 +53,36 @@ async function start({ streamId, apiBase, sessionId }) {
   });
   const mimeType = pickMime();
   recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+  bytes = 0;
+  limitHit = null;
   recorder.ondataavailable = (e) => {
-    if (e.data && e.data.size) chunks.push(e.data);
+    if (e.data && e.data.size) {
+      chunks.push(e.data);
+      bytes += e.data.size;
+      if (bytes >= STOP_BYTES) capRecording("size");
+    }
   };
   recorder.onstart = () => {
     // Clock zero for all telemetry — measured from the actual encoder start.
     chrome.runtime.sendMessage({ target: "background", kind: "recorder-started" });
   };
   recorder.start(1000); // 1s timeslice so a crash still leaves recoverable data
+  startedAt = Date.now();
+  limitTimer = setInterval(() => {
+    if (Date.now() - startedAt >= STOP_MS) capRecording("time");
+  }, 1000);
 }
 
 async function stop() {
   if (!recorder) return;
-  const done = new Promise((resolve) => (recorder.onstop = resolve));
-  recorder.stop();
-  await done;
+  clearInterval(limitTimer);
+  if (recorder.state !== "inactive") {
+    const done = new Promise((resolve) => (recorder.onstop = resolve));
+    recorder.stop();
+    await done;
+  } else {
+    await new Promise((r) => setTimeout(r, 300)); // let the final dataavailable land
+  }
   for (const t of stream ? stream.getTracks() : []) t.stop();
 
   const type = recorder.mimeType || "video/webm";
@@ -69,6 +102,7 @@ async function stop() {
     kind: "recorder-uploaded",
     storageKey,
     bytes: blob.size,
+    limit: limitHit,
     error,
   });
 }

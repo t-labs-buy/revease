@@ -16,6 +16,7 @@ import {
   uploadToLibrary,
   type LibraryAsset,
 } from "@/lib/api";
+import { checkVideoFile, videoSizeError } from "@/lib/limits";
 
 export interface PendingUpload {
   key: string;
@@ -79,6 +80,13 @@ export function useLibrary() {
         list.map(async (file) => {
           const key = `${file.name}:${file.size}:${file.lastModified}:${Math.random()}`;
           setUploads((u) => [...u, { key, name: file.name, loaded: 0, total: file.size }]);
+          // same 500 MB / 30 min rule as recordings; say so before uploading
+          const isVideo = file.type.startsWith("video/") || /\.(mp4|mov|webm|mkv|avi|m4v|mpe?g|wmv|flv|3gp|ts|ogv)$/i.test(file.name);
+          const limitErr = isVideo ? (await checkVideoFile(file)).error : videoSizeError(file.size);
+          if (limitErr) {
+            setUploads((u) => u.map((x) => (x.key === key ? { ...x, error: limitErr } : x)));
+            return;
+          }
           try {
             const asset = await uploadToLibrary(file, {
               onProgress: (p) =>

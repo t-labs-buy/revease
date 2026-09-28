@@ -2,29 +2,11 @@
 
 import { useRef, useState } from "react";
 import { completeSession, createSession, registerAndUpload } from "@/lib/api";
+import { checkVideoFile, LIMIT_LABEL } from "@/lib/limits";
 
 const ACCEPT = ["video/mp4", "video/webm"];
 
-/** Read a video file's real length before uploading. The recorder knows how long
- *  it ran, but an upload has no such context — without this the capture is stored
- *  with duration 0 and shows no length anywhere in the UI. Never rejects: on
- *  unreadable metadata it resolves undefined and the upload proceeds without a
- *  duration. (Also used by CaptureModal's upload path.) */
-export function readDurationMs(file: File): Promise<number | undefined> {
-  return new Promise((resolve) => {
-    const url = URL.createObjectURL(file);
-    const probe = document.createElement("video");
-    const done = (ms?: number) => {
-      URL.revokeObjectURL(url);
-      resolve(ms);
-    };
-    probe.preload = "metadata";
-    probe.onloadedmetadata = () =>
-      done(Number.isFinite(probe.duration) ? Math.round(probe.duration * 1000) : undefined);
-    probe.onerror = () => done(undefined); // unreadable metadata — upload anyway
-    probe.src = url;
-  });
-}
+export { readDurationMs } from "@/lib/limits";
 
 export function Uploader({ projectId, onDone }: { projectId: string; onDone: () => void }) {
   const [drag, setDrag] = useState(false);
@@ -41,8 +23,12 @@ export function Uploader({ projectId, onDone }: { projectId: string; onDone: () 
     }
     setBusy(true);
     try {
+      const { error: limitErr, durationMs } = await checkVideoFile(file);
+      if (limitErr) {
+        setError(limitErr);
+        return;
+      }
       const ext = /\.webm$/i.test(file.name) ? "webm" : "mp4";
-      const durationMs = await readDurationMs(file);
       const session = await createSession(projectId, "upload");
       await registerAndUpload(session.id, "raw_video", ext, file, (pr) =>
         setPct(pr.total ? Math.floor((pr.loaded / pr.total) * 100) : null),
@@ -77,7 +63,7 @@ export function Uploader({ projectId, onDone }: { projectId: string; onDone: () 
       }`}
     >
       <p className="text-sm text-[var(--text-2)]">
-        {busy ? `Uploading${pct != null ? ` ${pct}%` : "…"}` : "Drag & drop an mp4 / webm"}
+        {busy ? `Uploading${pct != null ? ` ${pct}%` : "…"}` : `Drag & drop an mp4 / webm · ${LIMIT_LABEL}`}
       </p>
       {!busy && (
         <button

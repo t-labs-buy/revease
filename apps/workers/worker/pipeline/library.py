@@ -30,6 +30,7 @@ from PIL import Image, ImageOps
 
 from app.config import get_settings
 from app.db import SessionLocal
+from app.limits import duration_error
 from app.models import LibraryAsset
 from app.storage import store
 from worker.pipeline import bgremove
@@ -147,6 +148,9 @@ def normalize_video(a: LibraryAsset, src: Path, work: Path) -> None:
     info = probe(src)
     if not info["has_video"]:
         raise ValueError("no video track in this file")
+    too_long = duration_error(info["duration_ms"])
+    if too_long:  # the web app checks first; this catches files it couldn't measure
+        raise ValueError(too_long)
     reuse = (info["vcodec"] == "h264" and ("mp4" in info["format"] or "mov" in info["format"])
              and (info["height"] or 0) <= MAX_VIDEO_H and info["duration_ms"])
     if reuse:

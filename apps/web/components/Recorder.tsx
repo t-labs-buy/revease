@@ -8,6 +8,7 @@ import {
   registerAndUpload,
   type CaptureEvent,
 } from "@/lib/api";
+import { MAX_VIDEO_MIN, recordingLimitHit, recordingStoppedNote } from "@/lib/limits";
 
 type Phase = "idle" | "countdown" | "recording" | "paused" | "uploading" | "error";
 
@@ -61,6 +62,9 @@ export function Recorder({ projectId, onDone }: { projectId: string; onDone: () 
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const now = () => performance.now() - startTsRef.current - pausedMsRef.current;
+  const bytesRef = useRef(0);
+  const limitRef = useRef<"size" | "time" | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const onClick = useCallback((e: MouseEvent) => {
     const el = e.target as Element | null;
@@ -98,7 +102,15 @@ export function Recorder({ projectId, onDone }: { projectId: string; onDone: () 
   }
 
   function startTimer() {
-    timerRef.current = setInterval(() => setElapsed(Math.round(now() / 1000)), 250);
+    timerRef.current = setInterval(() => {
+      setElapsed(Math.round(now() / 1000));
+      // 500 MB / 30 min: stop and save what was recorded, then say why
+      const hit = recordingLimitHit(bytesRef.current, now());
+      if (hit && !limitRef.current) {
+        limitRef.current = hit;
+        void stop();
+      }
+    }, 250);
   }
   function stopTimer() {
     if (timerRef.current) clearInterval(timerRef.current);
@@ -143,7 +155,15 @@ export function Recorder({ projectId, onDone }: { projectId: string; onDone: () 
           MediaRecorder.isTypeSupported(m),
         ) || "video/webm";
       const rec = new MediaRecorder(combined, { mimeType: mime });
-      rec.ondataavailable = (ev) => ev.data.size > 0 && chunksRef.current.push(ev.data);
+      bytesRef.current = 0;
+      limitRef.current = null;
+      setNotice(null);
+      rec.ondataavailable = (ev) => {
+        if (ev.data.size > 0) {
+          chunksRef.current.push(ev.data);
+          bytesRef.current += ev.data.size;
+        }
+      };
       // If the user stops sharing via the browser chrome, finalize.
       display.getVideoTracks()[0].addEventListener("ended", () => {
         if (recorderRef.current && recorderRef.current.state !== "inactive") stop();
@@ -216,6 +236,7 @@ export function Recorder({ projectId, onDone }: { projectId: string; onDone: () 
       await completeSession(session.id, durationMs);
       recorderRef.current = null;
       setPhase("idle");
+      if (limitRef.current) setNotice(recordingStoppedNote(limitRef.current));
       onDone();
     } catch (e) {
       setError(String(e));
@@ -229,7 +250,7 @@ export function Recorder({ projectId, onDone }: { projectId: string; onDone: () 
     <div>
       {(phase === "recording" || phase === "paused") && (
         <div className="mb-3 flex items-center gap-2 font-mono text-sm text-red-400">
-          <span className="h-2 w-2 animate-pulse rounded-full bg-red-500" /> {mmss(elapsed)}
+          <span className="h-2 w-2 animate-pulse rounded-full bg-red-500" /> {mmss(elapsed)} / {mmss(MAX_VIDEO_MIN * 60)}
         </div>
       )}
 
@@ -279,6 +300,11 @@ export function Recorder({ projectId, onDone }: { projectId: string; onDone: () 
 
       {phase === "uploading" && (
         <p className="text-sm text-[var(--text-2)]">Uploading{uploadPct != null ? ` ${uploadPct}%` : "…"}</p>
+      )}
+      {notice && (
+        <p className="mt-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-600 dark:text-amber-300">
+          {notice}
+        </p>
       )}
       {phase === "error" && (
         <p className="mt-3 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-400">

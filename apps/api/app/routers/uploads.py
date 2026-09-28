@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 from app.auth import CurrentUser
 from app.config import get_settings
 from app.db import get_session
+from app.limits import check_size
 from app.models import MediaAsset, Upload
 from app.ownership import owned_session
 from app.schemas import PartSignIn, UploadCompleteIn, UploadCreate, UploadOut
@@ -58,6 +59,7 @@ def _out(up: Upload, with_parts: bool = False) -> UploadOut:
 def create_upload(session_id: str, payload: UploadCreate, user: CurrentUser,
                   db: Session = Depends(get_session)) -> UploadOut:
     sess = owned_session(db, user, session_id)
+    check_size(payload.size)
     up = Upload(session_id=sess.id, kind=payload.kind, storage_key="", backend_upload_id="",
                 size=payload.size, part_size=_part_size(payload.size))
     db.add(up)

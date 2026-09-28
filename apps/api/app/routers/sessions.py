@@ -17,6 +17,7 @@ from app.config import get_settings
 from app.progress import summarize
 from app.auth import CurrentUser
 from app.db import get_session
+from app.limits import check_duration
 from app.models import CaptureSession, Event, Job, MediaAsset, Project
 from app.ownership import owned_project, owned_session, project_ids_for
 from app.queue import enqueue_understanding
@@ -124,6 +125,7 @@ def complete_session(
     session_id: str, payload: SessionComplete, user: CurrentUser, db: Session = Depends(get_session)
 ) -> CaptureSession:
     sess = owned_session(db, user, session_id)
+    check_duration(payload.duration_ms)
     event_count = db.scalar(
         select(func.count()).select_from(Event).where(Event.session_id == sess.id)
     )

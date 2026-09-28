@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 from app.auth import CurrentUser
 from app.config import get_settings
 from app.db import get_session
+from app.limits import check_size, max_bytes
 from app.models import BrandPackage, LibraryAsset, User
 from app.ownership import owned_project, owned_row, owned_session
 from app.storage import _attachment, store
@@ -63,11 +64,17 @@ async def put_media(
     path.parent.mkdir(parents=True, exist_ok=True)
 
     total = 0
+    cap = max_bytes()
     with path.open("wb") as f:
         async for chunk in request.stream():  # stream to disk, never buffer in memory
             if chunk:
                 f.write(chunk)
                 total += len(chunk)
+                if total > cap:  # a single PUT never exceeds the per-video limit
+                    break
+    if total > cap:
+        path.unlink(missing_ok=True)
+        check_size(total)
     if total == 0:
         path.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail="empty body")
