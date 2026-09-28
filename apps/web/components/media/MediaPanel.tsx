@@ -11,8 +11,8 @@
  *       overlays = logos / picture-in-picture over the video, dragged into
  *                  place on the preview, shown for the whole video, the scenes
  *                  only, or a custom time range
- *  3. Music — a library track (or the built-in pad) under the narration,
- *     ducked while someone speaks.
+ *  3. Music — a library track under the narration, ducked while someone
+ *     speaks. No track chosen = no music (the old synthesized pad is gone).
  *
  * Everything here only edits the spec; the renderer places inserts between
  * scene clips and composites overlays at concat, so none of it re-renders a
@@ -319,7 +319,7 @@ export function MediaPanel({
             Nothing inserted. Use <b>Full screen</b> on a file to play it before, between or after scenes.
           </p>
         ) : (
-          <ul className="space-y-2">
+          <ul className="space-y-5">
             {ordered.map((it) => (
               <InsertRow
                 key={it.id}
@@ -418,7 +418,11 @@ function AssetCard({
 }) {
   const thumb = assetThumb(a);
   const ready = a.status === "ready";
-  const act = "rounded-md px-1.5 py-1 text-[11px] font-medium text-[var(--text-2)] hover:bg-[var(--hover)] hover:text-[var(--text)] disabled:opacity-40";
+  // The card's actions are small bold pills in the brand colour — as plain grey
+  // text they read as captions, and nobody realised "Full screen" was a button.
+  const act =
+    "rounded-md border border-[#1E8F8E]/30 bg-[#1E8F8E]/5 px-2 py-1 text-[11px] font-semibold text-[#1E8F8E] " +
+    "hover:border-[#1E8F8E] hover:bg-[#1E8F8E]/15 disabled:opacity-40 disabled:hover:border-[#1E8F8E]/30 disabled:hover:bg-[#1E8F8E]/5";
   return (
     <div className="group overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--card)]">
       <div
@@ -461,7 +465,7 @@ function AssetCard({
         {a.status === "error" ? (
           <p className="text-[10px] text-red-500">{a.error || "Couldn't process this file"}</p>
         ) : (
-          <div className="-mx-1 mt-0.5 flex flex-wrap">
+          <div className="mt-1.5 flex flex-wrap gap-1">
             {a.kind === "image" && (
               <>
                 <button disabled={!ready} onClick={onOverlay} className={act}>Overlay</button>
@@ -514,48 +518,69 @@ function InsertRow({
   const mediaMs = it.media_ms ?? asset?.duration_ms ?? undefined;
   const icon = it.type === "title" ? "T" : it.type === "video" ? "▶" : "▣";
   const posValid = it.position === "start" || it.position === "end" || segments.some((s) => `after:${s.step_id}` === it.position);
+  // A settings card, not a form row: thumbnail + name + a plain-words line
+  // saying what this is, then every setting on its own labelled line with a
+  // fixed label column. Two earlier layouts (a bare label/field grid, then
+  // everything inline on two lines) both read as a wall of controls.
+  const thumb = asset ? assetThumb(asset) : null;
+  const kindLine =
+    it.type === "title"
+      ? "Title card · full screen"
+      : it.type === "video"
+        ? "Video clip · plays full screen, the recording pauses"
+        : "Image · shows full screen, the recording pauses";
+  const row = "grid grid-cols-[6.5rem_1fr] items-center gap-x-3";
+  const lbl = "text-xs text-[var(--text-3)]";
   return (
-    <li className="rounded-xl border border-[var(--border)] p-2.5">
-      <div className="flex items-center gap-2">
-        <span className="flex h-6 w-6 flex-none items-center justify-center rounded-md bg-[#1E8F8E]/10 text-[11px] font-semibold text-[#1E8F8E]">
-          {icon}
+    <li className="rounded-xl border-2 border-[#1E8F8E]/35 bg-[var(--card)] p-4 shadow-sm">
+      <div className="flex items-start gap-3">
+        <span className="flex h-11 w-[4.5rem] flex-none items-center justify-center overflow-hidden rounded-md bg-[var(--bg)] text-sm font-semibold text-[#1E8F8E]">
+          {thumb ? <img src={mediaUrl(thumb)} alt="" className="h-full w-full object-cover" draggable={false} /> : icon}
         </span>
-        {it.type === "title" ? (
-          <input
-            value={it.title ?? ""}
-            onChange={(e) => onPatch({ title: e.target.value })}
-            placeholder="Title text"
-            className="input h-7 min-w-0 flex-1 text-xs"
-          />
-        ) : (
-          <span className="min-w-0 flex-1 truncate text-xs font-medium" title={it.name}>
-            {it.name || (it.type === "video" ? "Video clip" : "Image")}
-          </span>
-        )}
-        <span className="font-mono text-[10px] text-[var(--text-3)]">{secs(insertDurationMs({ ...it, media_ms: mediaMs }))}</span>
-        <button onClick={onRemove} aria-label="Remove insert" className="rounded-md p-1 text-[var(--text-3)] hover:bg-[var(--hover)] hover:text-red-500">
-          <IconTrash className="h-3.5 w-3.5" />
+        <div className="min-w-0 flex-1">
+          {it.type === "title" ? (
+            <input
+              value={it.title ?? ""}
+              onChange={(e) => onPatch({ title: e.target.value })}
+              placeholder="Title text"
+              className="input h-8 w-full text-sm"
+            />
+          ) : (
+            <p className="truncate text-sm font-medium" title={it.name}>
+              {it.name || (it.type === "video" ? "Video clip" : "Image")}
+            </p>
+          )}
+          <p className="mt-0.5 text-xs text-[var(--text-3)]">
+            {kindLine} · {secs(insertDurationMs({ ...it, media_ms: mediaMs }))}
+          </p>
+        </div>
+        <button onClick={onRemove} aria-label="Remove insert" className="-mr-1 -mt-1 rounded-md p-1.5 text-[var(--text-3)] hover:bg-[var(--hover)] hover:text-red-500">
+          <IconTrash className="h-4 w-4" />
         </button>
       </div>
-      <div className="mt-2 grid grid-cols-[auto_1fr] items-center gap-x-2 gap-y-1.5 text-[11px] text-[var(--text-2)]">
-        <span>Plays</span>
-        <select
-          value={posValid ? it.position : "end"}
-          onChange={(e) => onPatch({ position: e.target.value as InsertPosition })}
-          className="input h-7 text-xs"
-        >
-          <option value="start">At the start (intro)</option>
-          {segments.map((s, i) => (
-            <option key={s.step_id} value={`after:${s.step_id}`}>
-              After {sceneLabel(s, i)}
-            </option>
-          ))}
-          <option value="end">At the end (outro)</option>
-        </select>
+
+      <div className="mt-3.5 space-y-2.5 border-t border-[var(--border)] pt-3">
+        <div className={row}>
+          <span className={lbl}>Plays</span>
+          <select
+            value={posValid ? it.position : "end"}
+            onChange={(e) => onPatch({ position: e.target.value as InsertPosition })}
+            className="input h-8 min-w-0 text-xs"
+          >
+            <option value="start">At the start (intro)</option>
+            {segments.map((s, i) => (
+              <option key={s.step_id} value={`after:${s.step_id}`}>
+                After scene {sceneLabel(s, i)}
+              </option>
+            ))}
+            <option value="end">At the end (outro)</option>
+          </select>
+        </div>
+
         {it.type !== "video" ? (
-          <>
-            <span>Length</span>
-            <span className="flex items-center gap-2">
+          <div className={row}>
+            <span className={lbl}>Shows for</span>
+            <span className="flex items-center gap-3">
               <input
                 type="range"
                 min={500}
@@ -563,45 +588,54 @@ function InsertRow({
                 step={250}
                 value={it.duration_ms || 2000}
                 onChange={(e) => onPatch({ duration_ms: Number(e.target.value) })}
-                className="flex-1 accent-[#1E8F8E]"
+                className="min-w-0 flex-1 accent-[#1E8F8E]"
               />
-              <span className="w-9 text-right font-mono">{((it.duration_ms || 2000) / 1000).toFixed(1)}s</span>
+              <span className="w-12 text-right font-mono text-xs">{((it.duration_ms || 2000) / 1000).toFixed(1)} s</span>
             </span>
-          </>
+          </div>
         ) : (
           <>
-            <span>Trim</span>
-            <span className="flex items-center gap-1">
-              <SecInput value={it.trim_start_ms ?? 0} max={mediaMs} onChange={(ms) => onPatch({ trim_start_ms: ms })} />
-              <span>to</span>
-              <SecInput
-                value={it.trim_end_ms ?? mediaMs ?? 0}
-                max={mediaMs}
-                onChange={(ms) => onPatch({ trim_end_ms: ms >= (mediaMs ?? Infinity) ? undefined : ms })}
-              />
-              <span className="text-[var(--text-3)]">of {secs(mediaMs)}</span>
-            </span>
-            <span />
-            <label className="flex items-center gap-1.5">
-              <input
-                type="checkbox"
-                checked={it.keep_audio !== false}
-                disabled={asset ? !asset.has_audio : false}
-                onChange={(e) => onPatch({ keep_audio: e.target.checked })}
-                className="accent-[#1E8F8E]"
-              />
-              Play the clip&apos;s own sound
-            </label>
+            <div className={row}>
+              <span className={lbl}>Use clip from</span>
+              <span className="flex items-center gap-2 text-xs">
+                <SecInput value={it.trim_start_ms ?? 0} max={mediaMs} onChange={(ms) => onPatch({ trim_start_ms: ms })} />
+                <span className="text-[var(--text-3)]">to</span>
+                <SecInput
+                  value={it.trim_end_ms ?? mediaMs ?? 0}
+                  max={mediaMs}
+                  onChange={(ms) => onPatch({ trim_end_ms: ms >= (mediaMs ?? Infinity) ? undefined : ms })}
+                />
+                <span className="text-[var(--text-3)]">seconds, of {secs(mediaMs)}</span>
+              </span>
+            </div>
+            <div className={row}>
+              <span className={lbl}>Sound</span>
+              <label className="flex items-center gap-2 text-xs">
+                <input
+                  type="checkbox"
+                  checked={it.keep_audio !== false}
+                  disabled={asset ? !asset.has_audio : false}
+                  onChange={(e) => onPatch({ keep_audio: e.target.checked })}
+                  className="accent-[#1E8F8E]"
+                />
+                {asset && !asset.has_audio ? "This clip has no sound" : "Play the clip's own audio"}
+              </label>
+            </div>
           </>
         )}
+
         {it.type === "image" && (
-          <>
-            <span>Fit</span>
-            <select value={it.fit ?? "contain"} onChange={(e) => onPatch({ fit: e.target.value as "cover" | "contain" })} className="input h-7 text-xs">
+          <div className={row}>
+            <span className={lbl}>Image fit</span>
+            <select
+              value={it.fit ?? "contain"}
+              onChange={(e) => onPatch({ fit: e.target.value as "cover" | "contain" })}
+              className="input h-8 min-w-0 text-xs"
+            >
               <option value="contain">Whole image on a dark card</option>
               <option value="cover">Fill the frame (crop edges)</option>
             </select>
-          </>
+          </div>
         )}
       </div>
     </li>
@@ -609,17 +643,32 @@ function InsertRow({
 }
 
 function SecInput({ value, max, onChange }: { value: number; max?: number; onChange: (ms: number) => void }) {
+  // While focused the field shows what the user typed, not the stored value
+  // re-formatted on every keystroke — that snapped a cleared field straight
+  // back to "0.0", so replacing "1.0" meant caret-surgery around the point.
+  // Only a parseable number is pushed up; the draft is dropped on blur.
+  const [draft, setDraft] = useState<string | null>(null);
+  const shown = draft ?? (value / 1000).toFixed(1);
   return (
     <input
       type="number"
       min={0}
       max={max ? max / 1000 : undefined}
       step={0.1}
-      value={(value / 1000).toFixed(1)}
+      value={shown}
+      onFocus={(e) => {
+        setDraft((value / 1000).toFixed(1));
+        e.currentTarget.select();
+      }}
       onChange={(e) => {
-        const ms = Math.max(0, Math.round(Number(e.target.value) * 1000));
+        const raw = e.target.value;
+        setDraft(raw);
+        const n = Number(raw);
+        if (raw.trim() === "" || !Number.isFinite(n)) return;
+        const ms = Math.max(0, Math.round(n * 1000));
         onChange(max ? Math.min(ms, max) : ms);
       }}
+      onBlur={() => setDraft(null)}
       className="input h-7 w-16 px-1.5 text-xs"
     />
   );
@@ -819,7 +868,9 @@ function MusicSection({
           <span className="mt-0.5 block text-xs text-[var(--text-3)]">
             {music.storage_key
               ? `${music.name || asset?.name || "Your track"} — loops under the narration.`
-              : "A soft built-in ambient pad, or pick “Use as music” on an audio file above."}
+              : music.enabled
+                ? "No track chosen yet — pick “Use as music” on an audio file above, or nothing will play."
+                : "Pick “Use as music” on an audio file above."}
           </span>
         </span>
         <input
@@ -871,7 +922,7 @@ function MusicSection({
                   onClick={() => set({ storage_key: null, asset_id: null, name: null, start_ms: 0 })}
                   className="ml-auto text-[#1E8F8E] hover:underline"
                 >
-                  Use built-in pad
+                  Remove track
                 </button>
               </span>
             </>

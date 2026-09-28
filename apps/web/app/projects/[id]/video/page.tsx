@@ -255,6 +255,52 @@ export default function VideoEditor({
   const [cropSel, setCropSel] = useState(0); // which crop region is being edited
   const timelineRef = useRef<HTMLElement>(null);
 
+  // Overview timeline height. It used to be a fixed cap with an inner
+  // scrollbar, which hid the last rows on a small screen. A grip on the top
+  // edge of the tool-chip row drags it: up for more rows, down to give the
+  // preview more room. Persisted per browser as a convenience (guarded reads
+  // and writes — storage can be blocked).
+  const TL_DEFAULT = 224;
+  const TL_MIN = 0; // all the way down: the tracks fold away, the chip row stays
+  const [tlHeight, setTlHeight] = useState<number>(() => {
+    try {
+      const raw = localStorage.getItem("tl.height");
+      const v = raw === null ? NaN : Number(raw);
+      return Number.isFinite(v) && v >= TL_MIN ? v : TL_DEFAULT;
+    } catch {
+      return TL_DEFAULT;
+    }
+  });
+  const tlDrag = useRef<{ y0: number; h0: number } | null>(null);
+  const onTlHandleDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    tlDrag.current = { y0: e.clientY, h0: tlHeight };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+  const onTlHandleMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const d = tlDrag.current;
+    if (!d) return;
+    // the grip is above the tracks, so dragging UP makes the panel taller
+    const max = Math.max(TL_MIN, Math.round(window.innerHeight * 0.7));
+    setTlHeight(Math.max(TL_MIN, Math.min(max, d.h0 + (d.y0 - e.clientY))));
+  };
+  const onTlHandleUp = () => {
+    if (!tlDrag.current) return;
+    tlDrag.current = null;
+    try {
+      localStorage.setItem("tl.height", String(tlHeight));
+    } catch {
+      /* private window / storage blocked — the size just won't persist */
+    }
+  };
+  const resetTlHeight = () => {
+    setTlHeight(TL_DEFAULT);
+    try {
+      localStorage.removeItem("tl.height");
+    } catch {
+      /* ignore */
+    }
+  };
+
   // undo / redo history (coalesced snapshots of the whole edit-spec)
   const past = useRef<EditSpec[]>([]);
   const future = useRef<EditSpec[]>([]);
@@ -2205,8 +2251,22 @@ export default function VideoEditor({
         </main>
       </div>
 
-      {/* tool chips — above the timeline */}
-      <div className="flex flex-wrap items-center gap-2 border-t border-[var(--border)] bg-[var(--card)] px-6 py-2.5">
+      {/* tool chips — above the timeline. The grip on this row's top edge
+          resizes the overview timeline below (Trim/Crop views size themselves). */}
+      <div className="relative flex flex-wrap items-center gap-2 border-t border-[var(--border)] bg-[var(--card)] px-6 py-2.5">
+        {activeTool === null && (
+          <div
+            onPointerDown={onTlHandleDown}
+            onPointerMove={onTlHandleMove}
+            onPointerUp={onTlHandleUp}
+            onPointerCancel={onTlHandleUp}
+            onDoubleClick={resetTlHeight}
+            title="Drag to resize the timeline. Double-click to reset."
+            className="group absolute inset-x-0 -top-1.5 z-20 flex h-3 cursor-ns-resize touch-none items-center justify-center"
+          >
+            <span className="h-1 w-12 rounded-full bg-[var(--border)] transition-colors group-hover:bg-[#1E8F8E]" />
+          </div>
+        )}
         {CHIPS.map((c, i) => {
           const active =
             (c.key === "Elements" && tab === "Elements") ||
@@ -2335,6 +2395,7 @@ export default function VideoEditor({
           activeIdx={activeIdx}
           useOriginal={!!useOriginal}
           tlZoom={tlZoom}
+          height={tlHeight}
           seekTo={seekTo}
           onMove={moveSegment}
           onResize={resizeSegment}
@@ -2974,7 +3035,7 @@ function BackgroundPanel({
       </div>
 
       <p className="border-t border-[var(--border)] pt-4 text-xs text-[var(--text-3)]">
-        Background music is in the <b>Media</b> tab — use the built-in pad or your own track.
+        Background music is in the <b>Media</b> tab — pick a track from your library.
       </p>
     </div>
   );
@@ -3260,6 +3321,7 @@ function TimelineTracks({
   activeIdx,
   useOriginal,
   tlZoom,
+  height,
   seekTo,
   onMove,
   onResize,
@@ -3277,6 +3339,7 @@ function TimelineTracks({
   activeIdx: number;
   useOriginal: boolean;
   tlZoom: number;
+  height: number; // max height of the tracks area, in px
   seekTo: (s: number) => void;
   onMove: (i: number, startMs: number) => void;
   onResize: (i: number, endMs: number) => void;
@@ -3427,12 +3490,15 @@ function TimelineTracks({
   return (
     <section
       ref={sectionRef}
-      className="border-t border-[var(--border)] bg-[var(--card)] px-6 py-3"
+      className={`border-t border-[var(--border)] bg-[var(--card)] px-6 ${height > 0 ? "py-3" : "py-0"}`}
     >
       {/* Undo/Redo/Split/Skip/Duplicate/Delete/Zoom live in Trim mode only — this
           overview timeline is drag-to-move/resize plus click-to-seek. */}
-      {/* ruler */}
-      <div className="relative ml-20 h-4 overflow-hidden text-[10px] text-[var(--text-3)]">
+      {/* ruler — folds away with the tracks when the panel is dragged shut */}
+      <div
+        className="relative ml-20 overflow-hidden text-[10px] text-[var(--text-3)]"
+        style={{ height: height > 0 ? 16 : 0 }}
+      >
         {Array.from({ length: 11 }).map((_, i) => (
           <span
             key={i}
@@ -3445,7 +3511,11 @@ function TimelineTracks({
       </div>
 
       {/* tracks */}
-      <div className="max-h-56 space-y-1.5 overflow-y-auto pt-1">
+      {/* height comes from the grip above the tool chips (see tlHeight in VideoEditor) */}
+      <div
+        className={`space-y-1.5 overflow-y-auto ${height > 0 ? "pt-1" : "pt-0"}`}
+        style={{ maxHeight: height }}
+      >
         {ROWS.map((row) => (
           <div key={row.label} className="flex items-stretch gap-2">
             <div className="flex w-[72px] flex-none items-center text-xs font-medium text-[var(--text-2)]">
