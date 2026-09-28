@@ -1589,46 +1589,49 @@ export default function VideoEditor({
           </nav>
 
           <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
+            {/* Discard / Keep changes on every tab — edits from Media, Zoom,
+                Background… used to sit unsaved with no way to save them
+                short of switching to Script, and a refresh dropped them. */}
+            {dirty && (
+              <div className="sticky top-0 z-10 -mx-4 -mt-4 mb-3 flex items-center gap-2 border-b border-[var(--border)] bg-[var(--card)] px-4 py-2.5">
+                <span className="text-xs font-medium text-amber-500">
+                  Unsaved edits
+                </span>
+                <div className="ml-auto flex items-center gap-2">
+                  <button
+                    onClick={discard}
+                    disabled={saving}
+                    className="btn btn-ghost btn-sm"
+                  >
+                    Discard
+                  </button>
+                  <button
+                    onClick={save}
+                    disabled={saving}
+                    className="btn btn-secondary btn-sm"
+                  >
+                    {saving ? "Saving…" : "Keep changes"}
+                  </button>
+                  {tab === "Script" && !useOriginal && voiceStale && (
+                    <button
+                      onClick={refreshVoice}
+                      disabled={saving || voiceLoading}
+                      className="btn btn-primary btn-sm"
+                    >
+                      {voiceLoading ? (
+                        <>
+                          <Spinner /> Voice…
+                        </>
+                      ) : (
+                        "↻ Refresh voice"
+                      )}
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
             {tab === "Script" && (
               <>
-                {dirty && (
-                  <div className="sticky top-0 z-10 -mx-4 -mt-4 mb-3 flex items-center gap-2 border-b border-[var(--border)] bg-[var(--card)] px-4 py-2.5">
-                    <span className="text-xs font-medium text-amber-500">
-                      Unsaved edits
-                    </span>
-                    <div className="ml-auto flex items-center gap-2">
-                      <button
-                        onClick={discard}
-                        disabled={saving}
-                        className="btn btn-ghost btn-sm"
-                      >
-                        Discard
-                      </button>
-                      <button
-                        onClick={save}
-                        disabled={saving}
-                        className="btn btn-secondary btn-sm"
-                      >
-                        {saving ? "Saving…" : "Keep changes"}
-                      </button>
-                      {!useOriginal && voiceStale && (
-                        <button
-                          onClick={refreshVoice}
-                          disabled={saving || voiceLoading}
-                          className="btn btn-primary btn-sm"
-                        >
-                          {voiceLoading ? (
-                            <>
-                              <Spinner /> Voice…
-                            </>
-                          ) : (
-                            "↻ Refresh voice"
-                          )}
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                )}
                 <div className="space-y-2">
                   <div className="relative">
                     <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--text-3)]">

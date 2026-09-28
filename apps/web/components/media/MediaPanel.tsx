@@ -45,6 +45,9 @@ import { assetKey, assetThumb, useLibrary } from "@/components/media/useLibrary"
 type Filter = "all" | "image" | "video" | "audio";
 
 const ASPECT: Record<string, number> = { "16:9": 16 / 9, "9:16": 9 / 16, "1:1": 1 };
+// Section headings: the shared `eyebrow` (11px, muted grey) got lost between
+// the cards on this tab, so these are a step bigger, bold and full-contrast.
+const heading = "text-xs font-bold uppercase tracking-[0.08em] text-[var(--text)]";
 const ACCEPT = "image/*,video/*,audio/*,.heic,.heif,.avif,.svg,.mkv,.flac,.opus";
 
 const secs = (ms: number | null | undefined) => {
@@ -207,7 +210,7 @@ export function MediaPanel({
       {/* ---------------- library ---------------- */}
       <section>
         <div className="mb-2 flex items-center justify-between">
-          <h3 className="eyebrow">My media</h3>
+          <h3 className={heading}>My media</h3>
           <button onClick={() => setPicking(true)} className="text-xs font-medium text-[#1E8F8E] hover:underline">
             Reuse a recording
           </button>
@@ -309,7 +312,7 @@ export function MediaPanel({
       {/* ---------------- in this video ---------------- */}
       <section>
         <div className="mb-2 flex items-center justify-between">
-          <h3 className="eyebrow">Between scenes</h3>
+          <h3 className={heading}>Between scenes</h3>
           <button onClick={addTitleCard} className="text-xs font-medium text-[#1E8F8E] hover:underline">
             + Title card
           </button>
@@ -338,7 +341,7 @@ export function MediaPanel({
       </section>
 
       <section>
-        <h3 className="eyebrow mb-2">On top of the video</h3>
+        <h3 className={`${heading} mb-2`}>On top of the video</h3>
         {overlays.length === 0 ? (
           <p className="text-xs text-[var(--text-3)]">
             No overlays. Use <b>Overlay</b> on a logo or <b>Picture-in-picture</b> on a clip.
@@ -813,8 +816,8 @@ function OverlayRow({
               <span>Background</span>
               {asset!.bg_status === "ready" ? (
                 <label className="flex items-center gap-1.5">
+                  Removed
                   <input type="checkbox" checked={!!ov.nobg} onChange={(e) => setNobg(e.target.checked)} className="accent-[#1E8F8E]" />
-                  Removed (transparent)
                 </label>
               ) : asset!.bg_status === "running" ? (
                 <span className="flex items-center gap-1.5">
