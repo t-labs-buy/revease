@@ -132,10 +132,29 @@ function PipVideo({ ov, curMs, playing }: { ov: MediaOverlay; curMs: number; pla
 /** Background music in the preview: plays the chosen track (not the built-in
  * pad, which exists only at render time) at its gain, following play/pause and
  * seeks on the preview clock. Ducking/fades are render-only. */
+/** Fired by the Media tab's volume slider: the preview plays the track for a
+ * moment even while the video is paused, so you hear the level you're setting. */
+export const MUSIC_AUDITION_EVENT = "refract:music-audition";
+const AUDITION_MS = 1500;
+
 export function MusicPreview({ spec, curMs, playing }: { spec: EditSpec; curMs: number; playing: boolean }) {
   const ref = useRef<HTMLAudioElement>(null);
   const m = spec.music;
   const src = m?.enabled && m.storage_key ? mediaUrl(m.storage_key) : null;
+  const [audition, setAudition] = useState(false);
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const on = () => {
+      setAudition(true);
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => setAudition(false), AUDITION_MS);
+    };
+    window.addEventListener(MUSIC_AUDITION_EVENT, on);
+    return () => {
+      window.removeEventListener(MUSIC_AUDITION_EVENT, on);
+      if (timer) clearTimeout(timer);
+    };
+  }, []);
   useEffect(() => {
     const a = ref.current;
     if (!a) return;
@@ -150,9 +169,9 @@ export function MusicPreview({ spec, curMs, playing }: { spec: EditSpec; curMs: 
   useEffect(() => {
     const a = ref.current;
     if (!a || !src) return;
-    if (playing) void a.play().catch(() => {});
+    if (playing || audition) void a.play().catch(() => {});
     else a.pause();
-  }, [playing, src]);
+  }, [playing, audition, src]);
   if (!src) return null;
   return <audio ref={ref} src={src} loop preload="auto" />;
 }

@@ -41,6 +41,7 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ModalShell } from "@/components/EditModals";
 import { IconTrash, IconUpload } from "@/components/icons";
 import { assetKey, assetThumb, useLibrary } from "@/components/media/useLibrary";
+import { MUSIC_AUDITION_EVENT } from "@/components/media/MediaOverlayLayer";
 
 type Filter = "all" | "image" | "video" | "audio";
 
@@ -369,7 +370,11 @@ export function MediaPanel({
         )}
       </section>
 
-      <MusicSection music={music} asset={music.asset_id ? byId.get(music.asset_id) : undefined} patchSpec={patchSpec} />
+      {/* the whole section waits for a track: "Use as music" on an audio file
+          above is what brings it in (that sets the track and turns music on) */}
+      {music.storage_key && (
+        <MusicSection music={music} asset={music.asset_id ? byId.get(music.asset_id) : undefined} patchSpec={patchSpec} />
+      )}
 
       {picking && (
         <RecordingPicker
@@ -883,7 +888,8 @@ function MusicSection({
           className="h-4 w-8 accent-[#1E8F8E]"
         />
       </label>
-      {music.enabled && (
+      {/* volume / ducking / fades only mean something once a track is chosen */}
+      {music.enabled && music.storage_key && (
         <div className="mt-3 grid grid-cols-[auto_1fr] items-center gap-x-3 gap-y-2 text-xs text-[var(--text-2)]">
           <span>Volume</span>
           <span className="flex items-center gap-2">
@@ -893,7 +899,11 @@ function MusicSection({
               max={-4}
               step={1}
               value={music.gain_db ?? -18}
-              onChange={(e) => set({ gain_db: Number(e.target.value) })}
+              onChange={(e) => {
+                set({ gain_db: Number(e.target.value) });
+                // let the preview play the track for a moment so the level is audible
+                window.dispatchEvent(new Event(MUSIC_AUDITION_EVENT));
+              }}
               className="flex-1 accent-[#1E8F8E]"
             />
             <span className="w-12 text-right font-mono">{music.gain_db ?? -18} dB</span>
