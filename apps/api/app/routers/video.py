@@ -13,7 +13,7 @@ from app.auth import CurrentUser
 from app.db import get_session
 from app.diff import migrate_edit_spec
 from app.editspec import build_edit_spec, mark_dirty, voice_timeline_key, voice_track_key
-from app.models import CaptureSession, MediaAsset, RenderJob, VideoProject, WorkflowGraphRow
+from app.models import CaptureSession, LibraryAsset, MediaAsset, RenderJob, VideoProject, WorkflowGraphRow
 from app.ownership import owned_project, owned_render_job
 from app.queue import enqueue_render, enqueue_voice_track
 from app.schemas import EditSpecPatch, RenderJobOut, VideoSpecOut
@@ -113,6 +113,38 @@ def _latest_render(db: Session, vp: VideoProject) -> RenderJobOut | None:
     return _render_out(job) if job else None
 
 
+def _media_keys(spec: dict) -> set[str]:
+    """Every storage key the Media tab placed in a spec (inserts, overlays, music)."""
+    keys: set[str] = set()
+    for it in [*(spec.get("inserts") or []), *(spec.get("overlays") or [])]:
+        if isinstance(it, dict):
+            keys.update(str(it[k]) for k in ("media_key", "nobg_key") if it.get(k))
+    music = spec.get("music") or {}
+    if isinstance(music, dict) and music.get("storage_key"):
+        keys.add(str(music["storage_key"]))
+    return keys
+
+
+def _check_media_keys(db: Session, user, project_id: str, old: dict, new: dict) -> None:
+    """The renderer fetches whatever key a spec names, so a spec may only point at
+    this project's own uploads or the editor's library assets. Keys already in the
+    saved spec stay valid (a collaborator can edit a project that places the
+    owner's logo); only newly added keys are checked. 422, never a silent drop."""
+    for key in _media_keys(new) - _media_keys(old):
+        parts = key.split("/")
+        if key.startswith(f"projects/{project_id}/"):
+            continue
+        if parts[0] == "sessions" and len(parts) > 1:
+            sess = db.get(CaptureSession, parts[1])
+            if sess is not None and sess.project_id == project_id:
+                continue
+        if parts[0] == "library" and len(parts) > 2:
+            asset = db.get(LibraryAsset, parts[1])
+            if asset is not None and (asset.user_id == user.id or user.is_admin):
+                continue
+        raise HTTPException(status_code=422, detail=f"media not available to this project: {key}")
+
+
 @router.get("/projects/{project_id}/video", response_model=VideoSpecOut)
 def get_video(
     project_id: str, user: CurrentUser, db: Session = Depends(get_session)
@@ -134,6 +166,7 @@ def patch_video(
     project_id: str, payload: EditSpecPatch, user: CurrentUser, db: Session = Depends(get_session)
 ) -> VideoSpecOut:
     vp = _get_or_build(db, user, project_id)
+    _check_media_keys(db, user, project_id, vp.edit_spec_json or {}, payload.edit_spec)
     new_spec = mark_dirty(vp.edit_spec_json, payload.edit_spec)
     vp.edit_spec_json = new_spec
     db.commit()

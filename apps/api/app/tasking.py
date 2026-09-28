@@ -23,6 +23,8 @@ TASK_ROUTES = {
     "refract.pipeline.run": {"queue": MEDIA_QUEUE},
     "refract.render.run": {"queue": MEDIA_QUEUE},
     "refract.autoedit.run": {"queue": MEDIA_QUEUE},
+    # a library video may need a full transcode — keep it off the quick queue
+    "refract.library.process": {"queue": MEDIA_QUEUE},
     # everything else (document, snapshot, TTS preview, voice track, ping) -> default
 }
 

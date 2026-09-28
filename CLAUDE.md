@@ -60,10 +60,11 @@ packages/workflow-graph  JSON Schema (draft 2020-12) + Python & TS validators
 
 - **`build_timeline` is pure and must never drift.** [apps/workers/worker/pipeline/timeline.py](apps/workers/worker/pipeline/timeline.py) builds the output clock *entirely* from per-step TTS durations, so `sum(seg.out_duration_ms) == total` by construction. Original click timestamps are only ever mapped *into* those slots as source windows. No I/O in this module; [tests/test_timeline.py](apps/workers/tests/test_timeline.py) is the exhaustive edge-case suite and is the gate on any change here.
 - **Regenerate re-renders only what changed.** Per-clip content hash + TTS cache keyed `(text_hash, voice_id, speed, provider)`. A render returns stats proving it (`rendered N / reused M`). Anything that perturbs a hash for an unrelated edit silently kills the feature — the render tests assert the reuse counts.
+- **Media-tab items stay out of both.** Inserts (full-screen clips / title cards; legacy intro/outro fold in via `editspec.effective_inserts`, shared by API, worker and a TS port in `lib/api.ts`) are spliced *between* scene clips at concat, outside `build_timeline`. Overlays (logos, picture-in-picture) are composited in the concat encode, mapped from the source clock by the pure [placement.py](apps/workers/worker/pipeline/placement.py). Neither may enter `_render_segment`'s hash — the render test asserts a logo move or music change re-renders 0 scenes.
 
 ### Long-running work: queues, duplicates, progress
 
-- Two Celery queues ([apps/api/app/tasking.py](apps/api/app/tasking.py)): `media` (pipeline, render, auto-edit) and `default` (documents, snapshots, TTS previews). Production runs one worker per queue (`-Q media -c 1`, `-Q default -c 3`) so a long encode never blocks quick jobs.
+- Two Celery queues ([apps/api/app/tasking.py](apps/api/app/tasking.py)): `media` (pipeline, render, auto-edit, library normalize) and `default` (documents, snapshots, TTS previews, background removal, recording import). Production runs one worker per queue (`-Q media -c 1`, `-Q default -c 3`) so a long encode never blocks quick jobs.
 - Redis `visibility_timeout` is raised to 12h (`REFRACT_CELERY_VISIBILITY_TIMEOUT_S`). At Celery's 1h default a long normalize was redelivered to a second slot and two ffmpegs wrote the same file.
 - A running stage heartbeats `Job.updated_at` every ~20s ([worker/pipeline/progress.py](apps/workers/worker/pipeline/progress.py)). `run_pipeline` drops a redelivered copy (same `pipeline_token`) while a stage is live, defers a genuinely new request until the live run ends, and takes over a stale one. The API refuses `reprocess` with 409 while live.
 - ffmpeg normalize is bounded: `-r 30` constant frame rate (browser WebM reports 1000 fps), `-threads`, a timeout, and a write to `source.part.mp4` renamed on success.
@@ -79,12 +80,13 @@ Every external dependency sits behind an adapter that works with no key and no G
 | STT | faster-whisper (`whisper` extra) | empty transcript |
 | TTS | Kokoro (local, keyless, default) | Piper → OpenAI → silent clip of estimated duration |
 | Tracing | Langfuse + OTel Anthropic auto-instrumentation | no-op when unconfigured |
+| Background removal | ISNet ONNX via onnxruntime (`make bg-model`) | key out the border-connected flat colour |
 
 `init_tracing()` must run **before** any Anthropic client is constructed — it's called in the API lifespan and in the Celery `worker_process_init` signal.
 
 ### Auth & ownership
 
-JWT bearer, stateless HS256. Only four models carry `user_id`: `Project`, `Skill`, `KbArticle`, `BrandPackage`. Everything else hangs off a Project, and [apps/api/app/ownership.py](apps/api/app/ownership.py) is the single place an id becomes a row you may touch.
+JWT bearer, stateless HS256. Only five models carry `user_id`: `Project`, `Skill`, `KbArticle`, `BrandPackage`, `LibraryAsset` (the per-user media library under `library/{id}/`, reusable across projects). Everything else hangs off a Project, and [apps/api/app/ownership.py](apps/api/app/ownership.py) is the single place an id becomes a row you may touch.
 
 - **A row you don't own returns 404, never 403** — a 403 would confirm the id exists.
 - New routes go through `owned_*` helpers + `CurrentUser`. Public by design: `/auth/*`, `/healthz`, `/voices*`, `GET /media/{key}` (a `<video src>` can't send a header; keys embed UUIDs), `GET /shares/{token}`.

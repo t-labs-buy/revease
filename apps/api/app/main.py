@@ -20,6 +20,7 @@ from app.routers import (
     documents,
     graphs,
     kb,
+    library,
     media,
     packages,
     projects,
@@ -75,6 +76,7 @@ app.include_router(kb.router)
 app.include_router(packages.router)
 app.include_router(activity.router)
 app.include_router(uploads.router)
+app.include_router(library.router)
 
 
 @app.get("/healthz", response_model=HealthOut)

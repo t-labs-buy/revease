@@ -71,3 +71,29 @@ def test_retention_rules():
     assert db.get(Upload, stale_id).status == "aborted"
     assert not db.query(MediaAsset).filter(MediaAsset.storage_key == audio).count()
     db.close()
+
+
+def test_library_media_is_never_swept_but_abandoned_uploads_are():
+    from app.models import LibraryAsset
+
+    db = SessionLocal()
+    kept = LibraryAsset(kind="image", name="logo", ext="png", storage_key="", status="ready")
+    stale = LibraryAsset(kind="video", name="half", ext="mp4", storage_key="", status="uploading")
+    db.add_all([kept, stale])
+    db.flush()
+    kept.storage_key = _put(f"library/{kept.id}/original.png")  # 40 days old, still kept
+    stale.storage_key = _put(f"library/{stale.id}/original.mp4")
+    stale_id = stale.id
+    db.commit()
+    from sqlalchemy import update
+
+    db.execute(update(LibraryAsset).where(LibraryAsset.id == stale_id)
+               .values(updated_at=datetime.now(timezone.utc) - timedelta(days=40)))
+    db.commit()
+    db.close()
+
+    run_retention()
+    assert store.exists(kept.storage_key)
+    assert not store.exists(f"library/{stale_id}/original.mp4")
+    with SessionLocal() as db2:
+        assert db2.get(LibraryAsset, stale_id) is None

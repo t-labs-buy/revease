@@ -92,6 +92,14 @@ class Settings(BaseSettings):
     media_normalize_preset: str = "veryfast"
     media_normalize_timeout_s: int = 6 * 3600
 
+    # --- Media library (editor Media tab) ---
+    # ISNet background-removal model (ONNX, ~170 MB). Empty = data_dir/models/
+    # isnet-general-use.onnx, fetched by `make bg-model` / the worker entrypoint.
+    # Without it, "remove background" keys out the flat border colour instead.
+    bg_model_path: str = ""
+    # stills larger than this (px, longest side) are scaled down on import
+    library_max_image_px: int = 4096
+
     # --- Documentation (AI-written guide + per-step snapshots) ---
     # Snapshots are grabbed this long after a click so the pressed/hover state is
     # visible and the MediaRecorder start-up skew (~100-300ms) is absorbed.

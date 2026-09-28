@@ -34,6 +34,9 @@ import { Spinner } from "@/components/ui";
 import { VoicePanel } from "@/components/VoicePanel";
 import { ProjectAccess } from "@/components/ProjectAccess";
 import { PreviewOverlay } from "@/components/PreviewOverlay";
+import { MediaPanel } from "@/components/media/MediaPanel";
+import { MediaOverlayLayer, MusicPreview } from "@/components/media/MediaOverlayLayer";
+import { TlMediaTrack } from "@/components/media/TlMediaTrack";
 import { resolveDuration } from "@/components/EditModals";
 import {
   Filmstrip,
@@ -69,12 +72,12 @@ type Tab =
   | "AI Voice"
   | "Zoom"
   | "Background"
-  | "Intro"
+  | "Media"
   | "Trim"
   | "Crop"
   | "Elements"
   | "Captions";
-const SIDE_TABS: Tab[] = ["Script", "AI Voice", "Zoom", "Background", "Intro"];
+const SIDE_TABS: Tab[] = ["Script", "AI Voice", "Zoom", "Background", "Media"];
 const TOOL_TABS: Tab[] = ["Elements"];
 
 // Backdrop presets shared with the renderer (same ids in worker render.py).
@@ -301,6 +304,7 @@ export default function VideoEditor({
   const [voiceSegId, setVoiceSegId] = useState<string | null>(null);
   const [dur, setDur] = useState(0);
   const [playing, setPlaying] = useState(false);
+  const [selOverlay, setSelOverlay] = useState<string | null>(null);
   const [showRender, setShowRender] = useState(false);
   const [voiceUrl, setVoiceUrl] = useState<string | null>(null);
   const [voiceLoading, setVoiceLoading] = useState(false);
@@ -1436,7 +1440,7 @@ export default function VideoEditor({
               <input
                 value={spec.title}
                 onChange={(e) => setSpec({ ...spec, title: e.target.value })}
-                title="Video title — also used as the Intro card text"
+                title="Video title — also the default text for a new title card (Media tab)"
                 className="min-w-0 flex-1 truncate rounded px-1 -mx-1 text-[17px] font-semibold tracking-tight text-[var(--text)] hover:bg-[var(--hover)] focus:bg-[var(--hover)] focus:outline-none"
               />
               <Link
@@ -1806,8 +1810,15 @@ export default function VideoEditor({
               <BackgroundPanel spec={spec} patchSpec={patchSpec} />
             )}
 
-            {tab === "Intro" && (
-              <IntroOutroPanel spec={spec} patchSpec={patchSpec} projectId={id} />
+            {tab === "Media" && (
+              <MediaPanel
+                spec={spec}
+                patchSpec={patchSpec}
+                curMs={cur * 1000}
+                totalMs={totalMs}
+                selOverlay={selOverlay}
+                setSelOverlay={setSelOverlay}
+              />
             )}
 
             {tab === "Elements" && (
@@ -2061,6 +2072,18 @@ export default function VideoEditor({
                         curMs={cur * 1000}
                       />
                     </div>
+                    {/* Media-tab overlays sit over the WHOLE output frame (backdrop
+                        included), exactly where the renderer composites them */}
+                    <MediaOverlayLayer
+                      spec={spec}
+                      setSpec={setSpec}
+                      editing={tab === "Media"}
+                      curMs={cur * 1000}
+                      playing={playing}
+                      selId={selOverlay}
+                      setSelId={setSelOverlay}
+                    />
+                    <MusicPreview spec={spec} curMs={cur * 1000} playing={playing} />
                     <audio
                       ref={audioRef}
                       src={voiceUrl ?? undefined}
@@ -2316,6 +2339,17 @@ export default function VideoEditor({
           onMove={moveSegment}
           onResize={resizeSegment}
           onResizeStart={resizeSegmentStart}
+          onOverlayRange={(oid, startMs, endMs) =>
+            patchSpec({
+              overlays: (spec.overlays ?? []).map((o) =>
+                o.id === oid ? { ...o, range: { start_ms: Math.round(startMs), end_ms: Math.round(endMs) } } : o,
+              ),
+            })
+          }
+          onOverlaySelect={(oid) => {
+            setSelOverlay(oid);
+            setTab("Media");
+          }}
           onZoomMove={(zid, startMs) =>
             patchSpec({
               zooms: (spec.zooms ?? []).map((z) =>
@@ -2897,11 +2931,6 @@ function BackgroundPanel({
   patchSpec: (p: Partial<EditSpec>) => void;
 }) {
   const cur = spec.background?.enabled ? spec.background.style : "none";
-  const music = spec.music ?? {
-    enabled: false,
-    storage_key: null,
-    gain_db: -18,
-  };
   const pick = (id: string) =>
     patchSpec({
       background:
@@ -2944,315 +2973,9 @@ function BackgroundPanel({
         ))}
       </div>
 
-      {/* background music — soft ambient pad mixed under the narration */}
-      <div className="border-t border-[var(--border)] pt-4">
-        <label className="flex cursor-pointer items-center justify-between">
-          <span>
-            <span className="text-sm font-medium">Background music</span>
-            <span className="mt-0.5 block text-xs text-[var(--text-3)]">
-              A smooth, slow ambient pad under the narration. Mixed into the
-              generated video.
-            </span>
-          </span>
-          <input
-            type="checkbox"
-            checked={music.enabled}
-            onChange={(e) =>
-              patchSpec({ music: { ...music, enabled: e.target.checked } })
-            }
-            className="h-4 w-8 accent-[#1E8F8E]"
-          />
-        </label>
-        {music.enabled && (
-          <div className="mt-3 flex items-center gap-3 text-xs">
-            <span className="text-[var(--text-3)]">Quiet</span>
-            <input
-              type="range"
-              min={-30}
-              max={-8}
-              step={1}
-              value={music.gain_db ?? -18}
-              onChange={(e) =>
-                patchSpec({
-                  music: { ...music, gain_db: Number(e.target.value) },
-                })
-              }
-              className="flex-1 accent-[#1E8F8E]"
-            />
-            <span className="text-[var(--text-3)]">Loud</span>
-            <span className="w-12 text-right font-mono text-[var(--text-2)]">
-              {music.gain_db ?? -18} dB
-            </span>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function getVideoDurationMs(file: File): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const video = document.createElement("video");
-    video.preload = "metadata";
-    const url = URL.createObjectURL(file);
-    video.src = url;
-    video.onloadedmetadata = () => {
-      URL.revokeObjectURL(url);
-      if (Number.isFinite(video.duration) && video.duration > 0) {
-        resolve(Math.round(video.duration * 1000));
-      } else {
-        reject(new Error("Invalid duration"));
-      }
-    };
-    video.onerror = () => {
-      URL.revokeObjectURL(url);
-      reject(new Error("Failed to load video metadata"));
-    };
-  });
-}
-
-function IntroOutroPanel({
-  spec,
-  patchSpec,
-  projectId,
-}: {
-  spec: EditSpec;
-  patchSpec: (p: Partial<EditSpec>) => void;
-  projectId: string;
-}) {
-  const intro = spec.intro ?? {
-    enabled: false,
-    title: spec.title,
-    duration_ms: 2000,
-  };
-  const outro = spec.outro ?? {
-    enabled: false,
-    title: "Thanks for watching",
-    duration_ms: 1500,
-  };
-
-  const [uploading, setUploading] = useState<
-    null | "intro_video" | "intro_image" | "outro_video" | "outro_image"
-  >(null);
-  const [uploadError, setUploadError] = useState<string | null>(null);
-
-  async function handleUpload(
-    which: "intro" | "outro",
-    mediaType: "video" | "image",
-    file: File,
-  ) {
-    const key = `${which}_${mediaType}` as typeof uploading;
-    setUploading(key);
-    setUploadError(null);
-    try {
-      let durationMs: number | undefined;
-      if (mediaType === "video") {
-        try {
-          durationMs = await getVideoDurationMs(file);
-        } catch {
-          // ignore probe error
-        }
-      }
-      const ext = file.name.split(".").pop() || (mediaType === "video" ? "mp4" : "png");
-      const storageKey = await uploadMedia(
-        `projects/${projectId}/${which}_${mediaType}_${Date.now()}.${ext}`,
-        file,
-      );
-      const card = which === "intro" ? intro : outro;
-      const patch = {
-        ...card,
-        media_key: storageKey,
-        media_type: mediaType,
-        ...(durationMs ? { duration_ms: durationMs } : {}),
-      };
-      patchSpec(which === "intro" ? { intro: patch } : { outro: patch });
-    } catch (e) {
-      setUploadError(String(e));
-    } finally {
-      setUploading(null);
-    }
-  }
-
-  function removeMedia(which: "intro" | "outro") {
-    const card = which === "intro" ? intro : outro;
-    const patch = {
-      ...card,
-      media_key: undefined,
-      media_type: undefined,
-      duration_ms: Math.min(5000, Math.max(500, card.duration_ms || 2000)),
-    };
-    patchSpec(which === "intro" ? { intro: patch } : { outro: patch });
-  }
-
-  return (
-    <div className="space-y-5">
-      <p className="text-xs text-[var(--text-3)]">
-        Title cards shown before and after the recording. Turn either off to
-        skip it entirely. Optionally attach a short video clip or image to play
-        instead of the plain title card.
+      <p className="border-t border-[var(--border)] pt-4 text-xs text-[var(--text-3)]">
+        Background music is in the <b>Media</b> tab — use the built-in pad or your own track.
       </p>
-
-      {(["intro", "outro"] as const).map((which) => {
-        const card = (which === "intro" ? intro : outro) as EditSpec["intro"];
-        const set = (p: Partial<EditSpec["intro"]>) =>
-          patchSpec(which === "intro" ? { intro: { ...intro, ...p } } : { outro: { ...outro, ...p } });
-        const minMs = 500;
-        const maxMs = 5000;
-        const label = which === "intro" ? "Intro" : "Outro";
-        const isUploadingVideo = uploading === `${which}_video`;
-        const isUploadingImage = uploading === `${which}_image`;
-        return (
-          <div key={which} className="rounded-xl border border-[var(--border)] p-3">
-            <label className="flex cursor-pointer items-center justify-between">
-              <span className="text-sm font-medium">{label}</span>
-              <input
-                type="checkbox"
-                checked={card.enabled}
-                onChange={(e) => set({ enabled: e.target.checked })}
-                className="h-4 w-8 accent-[#1E8F8E]"
-              />
-            </label>
-            {card.enabled && (
-              <div className="mt-3 space-y-3">
-                {/* Title text */}
-                {!card.media_key && (
-                  <input
-                    value={card.title}
-                    onChange={(e) => set({ title: e.target.value })}
-                    placeholder={`${label} text`}
-                    className="input"
-                  />
-                )}
-                {/* Duration slider */}
-                {card.media_type !== "video" && (
-                  <div className="flex items-center gap-3 text-xs">
-                    <span className="text-[var(--text-3)]">Short</span>
-                    <input
-                      type="range"
-                      min={minMs}
-                      max={maxMs}
-                      step={100}
-                      value={card.duration_ms}
-                      onChange={(e) => set({ duration_ms: Number(e.target.value) })}
-                      className="flex-1 accent-[#1E8F8E]"
-                    />
-                    <span className="text-[var(--text-3)]">Long</span>
-                    <span className="w-14 text-right font-mono text-[var(--text-2)]">
-                      {(card.duration_ms / 1000).toFixed(1)}s
-                    </span>
-                  </div>
-                )}
-                {card.media_key && card.media_type === "video" && card.duration_ms > 0 && (
-                  <div className="flex items-center justify-between text-xs text-[var(--text-3)]">
-                    <span>Clip duration</span>
-                    <span className="font-mono text-[var(--text-2)]">
-                      {(card.duration_ms / 1000).toFixed(1)}s
-                    </span>
-                  </div>
-                )}
-
-                {/* Upload controls */}
-                <div className="space-y-2">
-                  <p className="text-[11px] text-[var(--text-3)]">
-                    Attach media — replaces the plain title card:
-                  </p>
-                  <div className="flex flex-wrap gap-2">
-                    {/* Upload Video */}
-                    <label
-                      className={`btn btn-secondary btn-sm flex cursor-pointer items-center gap-1.5 ${isUploadingVideo ? "opacity-60 pointer-events-none" : ""}`}
-                    >
-                      {isUploadingVideo ? (
-                        <Spinner />
-                      ) : (
-                        <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-                          <path d="M15 10l4.553-2.276A1 1 0 0121 8.723v6.554a1 1 0 01-1.447.894L15 14M3 8a2 2 0 012-2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8z" />
-                        </svg>
-                      )}
-                      {card.media_key && card.media_type === "video" ? "Replace video" : "+ Video"}
-                      <input
-                        type="file"
-                        accept="video/mp4,video/quicktime,video/webm"
-                        className="sr-only"
-                        onChange={(e) => {
-                          const f = e.target.files?.[0];
-                          if (f) handleUpload(which, "video", f);
-                          e.target.value = "";
-                        }}
-                      />
-                    </label>
-
-                    {/* Upload Image */}
-                    <label
-                      className={`btn btn-secondary btn-sm flex cursor-pointer items-center gap-1.5 ${isUploadingImage ? "opacity-60 pointer-events-none" : ""}`}
-                    >
-                      {isUploadingImage ? (
-                        <Spinner />
-                      ) : (
-                        <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-                          <rect x="3" y="3" width="18" height="18" rx="2" />
-                          <circle cx="8.5" cy="8.5" r="1.5" />
-                          <path d="M21 15l-5-5L5 21" />
-                        </svg>
-                      )}
-                      {card.media_key && card.media_type === "image" ? "Replace image" : "+ Image"}
-                      <input
-                        type="file"
-                        accept="image/*"
-                        className="sr-only"
-                        onChange={(e) => {
-                          const f = e.target.files?.[0];
-                          if (f) handleUpload(which, "image", f);
-                          e.target.value = "";
-                        }}
-                      />
-                    </label>
-
-                    {/* Remove media */}
-                    {card.media_key && (
-                      <button
-                        onClick={() => removeMedia(which)}
-                        className="btn btn-ghost btn-sm text-red-400"
-                      >
-                        Remove media
-                      </button>
-                    )}
-                  </div>
-
-                  {/* Media preview */}
-                  {card.media_key && card.media_type === "video" && (
-                    <video
-                      src={mediaUrl(card.media_key)}
-                      controls
-                      className="mt-2 w-full rounded-lg bg-black"
-                      onLoadedMetadata={(e) => {
-                        const dur = (e.currentTarget as HTMLVideoElement).duration;
-                        if (Number.isFinite(dur) && dur > 0) {
-                          const ms = Math.round(dur * 1000);
-                          if (card.duration_ms !== ms) {
-                            set({ duration_ms: ms });
-                          }
-                        }
-                      }}
-                    />
-                  )}
-                  {card.media_key && card.media_type === "image" && (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img
-                      src={mediaUrl(card.media_key)}
-                      alt={`${label} media`}
-                      className="mt-2 w-full rounded-lg object-cover"
-                    />
-                  )}
-                </div>
-              </div>
-            )}
-          </div>
-        );
-      })}
-
-      {uploadError && (
-        <p className="text-xs text-red-400">{uploadError}</p>
-      )}
     </div>
   );
 }
@@ -3542,6 +3265,8 @@ function TimelineTracks({
   onResize,
   onResizeStart,
   onZoomMove,
+  onOverlayRange,
+  onOverlaySelect,
 }: {
   sectionRef?: React.RefObject<HTMLElement>;
   spec: EditSpec;
@@ -3557,6 +3282,8 @@ function TimelineTracks({
   onResize: (i: number, endMs: number) => void;
   onResizeStart: (i: number, startMs: number) => void;
   onZoomMove: (id: string, startMs: number) => void;
+  onOverlayRange: (id: string, startMs: number, endMs: number) => void;
+  onOverlaySelect: (id: string) => void;
 }) {
   const frames = useFilmstrip(source, 24);
   const peaks = useWaveform(source, 400);
@@ -3632,6 +3359,19 @@ function TimelineTracks({
             />
           ))
           : null,
+    },
+    {
+      label: "Media",
+      render: () => (
+        <TlMediaTrack
+          spec={spec}
+          totalMs={totalMs}
+          curMs={cur * 1000}
+          seekTo={seekTo}
+          onRange={onOverlayRange}
+          onSelect={onOverlaySelect}
+        />
+      ),
     },
     {
       label: "Zoom",

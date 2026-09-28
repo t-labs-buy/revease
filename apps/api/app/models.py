@@ -1,7 +1,7 @@
 """SQLAlchemy models.
 
-Every user gets their own private space: the four top-level entities a user can
-create (Project, Skill, KbArticle, BrandPackage) carry a `user_id` owner, and
+Every user gets their own private space: the five top-level entities a user can
+create (Project, Skill, KbArticle, BrandPackage, LibraryAsset) carry a `user_id` owner, and
 everything else hangs off a Project, so ownership is reachable for any row.
 
 `user_id` is nullable at the DB level only because SQLite's ADD COLUMN cannot add
@@ -407,3 +407,40 @@ class BrandPackage(Base):
     name: Mapped[str] = mapped_column(String, nullable=False)
     settings_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class LibraryAsset(Base):
+    """A file in a user's media library — logo, image, video clip or music track —
+    reusable in any of their projects (editor Media tab). Stored under
+    `library/{id}/`: `original.<ext>` as uploaded, `normalized.*` in a format the
+    renderer always accepts, `poster.jpg`, and `nobg.png` once the background is
+    removed. Owned by the user, not a project, so deleting a project never breaks
+    another project that placed the same logo."""
+
+    __tablename__ = "library_assets"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), index=True, nullable=True)
+    kind: Mapped[str] = mapped_column(String, nullable=False)  # image | video | audio
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    ext: Mapped[str] = mapped_column(String, default="")
+    source: Mapped[str] = mapped_column(String, default="upload")  # upload | recording
+    source_session_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    storage_key: Mapped[str] = mapped_column(String, nullable=False)
+    normalized_key: Mapped[str | None] = mapped_column(String, nullable=True)
+    poster_key: Mapped[str | None] = mapped_column(String, nullable=True)
+    nobg_key: Mapped[str | None] = mapped_column(String, nullable=True)
+    size: Mapped[int] = mapped_column(Integer, default=0)
+    width: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    has_audio: Mapped[int] = mapped_column(Integer, default=0)
+    # uploading -> processing -> ready | error
+    status: Mapped[str] = mapped_column(String, default="uploading")
+    bg_status: Mapped[str] = mapped_column(String, default="none")  # none | running | ready | error
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # resumable multipart state (large files); empty for a single PUT
+    upload_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    part_size: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)

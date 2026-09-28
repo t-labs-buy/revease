@@ -126,6 +126,30 @@ def document_snapshot_task(self, project_id: str, step_id: str, t_seconds: float
         raise self.retry(exc=exc)
 
 
+@app.task(name="refract.library.process", bind=True, max_retries=1, default_retry_delay=5, acks_late=True)
+def library_process_task(self, asset_id: str):  # noqa: ANN001
+    """Normalize an uploaded library file (media queue: may transcode a clip)."""
+    from worker.pipeline.library import process_asset
+
+    return process_asset(asset_id)
+
+
+@app.task(name="refract.library.import", bind=True, max_retries=1, default_retry_delay=5)
+def library_import_task(self, asset_id: str):  # noqa: ANN001
+    """Copy a recording from another project into the user's library."""
+    from worker.pipeline.library import import_recording
+
+    return import_recording(asset_id)
+
+
+@app.task(name="refract.library.remove_bg", bind=True, max_retries=1, default_retry_delay=3)
+def library_remove_bg_task(self, asset_id: str):  # noqa: ANN001
+    """Cut the background out of a library image into nobg.png."""
+    from worker.pipeline.library import remove_background
+
+    return remove_background(asset_id)
+
+
 @app.task(name="refract.maintenance.retention")
 def retention_task(dry_run: bool = False):  # noqa: ANN001
     """Hourly sweep of regenerable/superseded media (see app.retention)."""

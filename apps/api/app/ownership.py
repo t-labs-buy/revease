@@ -5,7 +5,7 @@ Two rules hold everywhere:
 
 * A row the caller does not own is reported as **404, not 403**. A 403 would
   confirm the id exists in someone else's space; 404 leaks nothing.
-* Only the four top-level entities carry `user_id`. Everything else is reached
+* Only the five top-level entities carry `user_id`. Everything else is reached
   through its Project, so `owned_*` walks up to the project and checks that.
 * A project's collaborators (see `ProjectCollaborator`) pass the project check
   like the owner does, so every edit route accepts them without changes. The
@@ -30,6 +30,7 @@ from app.models import (
     Document,
     Job,
     KbArticle,
+    LibraryAsset,
     Project,
     ProjectCollaborator,
     RenderJob,
@@ -42,9 +43,9 @@ from app.models import (
 from app.storage import store
 
 # The top-level entities that carry an owner column directly.
-OWNED_MODELS = (Project, Skill, KbArticle, BrandPackage)
+OWNED_MODELS = (Project, Skill, KbArticle, BrandPackage, LibraryAsset)
 
-_T = TypeVar("_T", Skill, KbArticle, BrandPackage)
+_T = TypeVar("_T", Skill, KbArticle, BrandPackage, LibraryAsset)
 
 
 def _missing(what: str) -> HTTPException:
@@ -79,7 +80,7 @@ def owned_project(
 
 
 def owned_row(db: Session, user: User, model: type[_T], row_id: str, what: str) -> _T:
-    """Fetch a directly-owned row (Skill / KbArticle / BrandPackage)."""
+    """Fetch a directly-owned row (Skill / KbArticle / BrandPackage / LibraryAsset)."""
     row = db.get(model, row_id)
     if row is None or (row.user_id != user.id and not user.is_admin):
         raise _missing(what)

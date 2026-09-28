@@ -1,5 +1,5 @@
 import { API_BASE, absoluteApiBase, apiFetch } from "@/lib/http";
-import { uploadLarge, type UploadProgress } from "@/lib/upload";
+import { putPart, sendParts, uploadLarge, type UploadProgress } from "@/lib/upload";
 
 // Re-exported so callers that build media/asset URLs keep importing it from here.
 export { API_BASE, absoluteApiBase };
@@ -352,7 +352,7 @@ export async function setTrim(
  *  - silent scene → full source length ÷ pace (same as a narrated scene)
  *  - narrated scene, AI voice → ~2.6 words/sec at voice speed · pace
  *  - narrated scene, original voice → source length ÷ pace
- *  - plus intro/outro; skipped scenes excluded. */
+ *  - plus inserted clips / title cards (incl. legacy intro/outro); skipped scenes excluded. */
 export function estimateOutputMs(spec: EditSpec): number {
   const WPS = 2.6;
   const pace = Math.min(1.5, Math.max(1, spec.pace ?? 1.0));
@@ -370,9 +370,8 @@ export function estimateOutputMs(spec: EditSpec): number {
       body += Math.max(300, (words.length / (WPS * (spec.voice.speed || 1) * pace)) * 1000);
     }
   }
-  const intro = spec.intro.enabled ? spec.intro.duration_ms : 0;
-  const outro = spec.outro.enabled ? spec.outro.duration_ms : 0;
-  return Math.round(body + intro + outro);
+  const inserts = effectiveInserts(spec).reduce((t, it) => t + insertDurationMs(it), 0);
+  return Math.round(body + inserts);
 }
 
 export interface MemoryStep {
@@ -1050,7 +1049,9 @@ export interface EditSpec {
   intro: IntroOutroCard;
   outro: IntroOutroCard;
   captions: { enabled: boolean };
-  music: { enabled: boolean; storage_key: string | null; gain_db: number };
+  music: MusicSettings;
+  inserts?: MediaInsert[]; // Media tab: full-screen clips / title cards between scenes
+  overlays?: MediaOverlay[]; // Media tab: logos / picture-in-picture over the video
   crop?: CropRegion; // legacy single crop — superseded by `crops`
   crops?: CropRegion[]; // multi-range crops: first enabled region whose window
   //   covers a moment wins; a region without a window applies everywhere
@@ -1068,6 +1069,246 @@ export interface EditSpec {
   elements?: EditElement[];
   zooms?: ZoomRegion[]; // standalone timeline zooms; win over scene zooms where they overlap
   segments: EditSegment[];
+}
+
+export interface MusicSettings {
+  enabled: boolean;
+  storage_key: string | null;
+  gain_db: number;
+  asset_id?: string | null;
+  name?: string | null;
+  duck?: boolean; // dip under the narration (default on)
+  fade_in_ms?: number;
+  fade_out_ms?: number;
+  start_ms?: number; // offset into the track
+}
+
+/** Where an insert plays: before the first scene, after a scene, or at the end. */
+export type InsertPosition = "start" | "end" | `after:${string}`;
+
+export interface MediaInsert {
+  id: string;
+  type: "image" | "video" | "title";
+  asset_id?: string;
+  media_key?: string;
+  name?: string;
+  nobg?: boolean;
+  title?: string;
+  position: InsertPosition;
+  duration_ms: number; // images / title cards; videos derive from trim + media length
+  media_ms?: number; // full clip length (videos), for the estimate and trim bounds
+  trim_start_ms?: number;
+  trim_end_ms?: number;
+  keep_audio?: boolean;
+  fit?: "cover" | "contain";
+}
+
+export type OverlayRange = "all" | "body" | { start_ms: number; end_ms: number };
+
+export interface MediaOverlay {
+  id: string;
+  type: "image" | "video";
+  asset_id: string;
+  media_key: string;
+  name?: string;
+  nobg?: boolean;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  range: OverlayRange; // custom windows are on the source clock, like elements
+  opacity?: number;
+  loop?: boolean;
+}
+
+/** Mirror of app.editspec.effective_inserts: inserts in playback order, legacy
+ * intro/outro folded in. `slot` -1 = before scene 0, i = after scene i. */
+export function effectiveInserts(spec: EditSpec): (MediaInsert & { slot: number; legacy?: boolean })[] {
+  const segs = spec.segments ?? [];
+  const n = segs.length;
+  const slotOf = new Map(segs.map((s, i) => [s.step_id, i]));
+  const items: (MediaInsert & { legacy?: boolean })[] = [...(spec.inserts ?? [])];
+  const ids = new Set(items.map((x) => x.id));
+  (["intro", "outro"] as const).forEach((which) => {
+    const card = spec[which];
+    if (!card?.enabled || ids.has(which)) return;
+    const legacy: MediaInsert & { legacy?: boolean } = card.media_key
+      ? { id: which, type: card.media_type || "image", media_key: card.media_key, keep_audio: true,
+          position: which === "intro" ? "start" : "end", duration_ms: card.duration_ms || 2000, legacy: true }
+      : { id: which, type: "title", title: card.title, position: which === "intro" ? "start" : "end",
+          duration_ms: card.duration_ms || 2000, legacy: true };
+    if (which === "intro") items.unshift(legacy);
+    else items.push(legacy);
+  });
+  const keyed: { k: [number, number, number]; it: MediaInsert & { slot: number; legacy?: boolean } }[] = [];
+  items.forEach((it, order) => {
+    if (!["image", "video", "title"].includes(it.type)) return;
+    if (it.type !== "title" && !it.media_key) return;
+    const pos = String(it.position || "end");
+    let slot: number, band: number;
+    if (pos === "start") [slot, band] = [-1, 0];
+    else if (pos.startsWith("after:")) [slot, band] = [slotOf.get(pos.slice(6)) ?? n - 1, 1];
+    else [slot, band] = [n - 1, 2];
+    keyed.push({ k: [slot, band, order], it: { ...it, slot } });
+  });
+  keyed.sort((a, b) => a.k[0] - b.k[0] || a.k[1] - b.k[1] || a.k[2] - b.k[2]);
+  return keyed.map((x) => x.it);
+}
+
+/** Mirror of app.editspec.insert_duration_ms. */
+export function insertDurationMs(it: MediaInsert): number {
+  if (it.type === "video") {
+    const t0 = it.trim_start_ms || 0;
+    if (it.trim_end_ms) return Math.max(500, it.trim_end_ms - t0);
+    if (it.media_ms) return Math.max(500, it.media_ms - t0);
+  }
+  return Math.max(500, it.duration_ms || 2000);
+}
+
+// ---- media library (editor Media tab) ----
+export interface LibraryAsset {
+  id: string;
+  kind: "image" | "video" | "audio";
+  name: string;
+  ext: string;
+  source: "upload" | "recording";
+  storage_key: string;
+  normalized_key: string | null;
+  poster_key: string | null;
+  nobg_key: string | null;
+  size: number;
+  width: number | null;
+  height: number | null;
+  duration_ms: number | null;
+  has_audio: boolean;
+  status: "uploading" | "processing" | "ready" | "error";
+  bg_status: "none" | "running" | "ready" | "error";
+  error: string | null;
+  created_at: string;
+  put_url?: string | null;
+  upload_id?: string | null;
+  part_size?: number;
+  part_count?: number;
+}
+
+export interface ReusableRecording {
+  session_id: string;
+  project_id: string;
+  project_name: string;
+  created_at: string;
+  duration_ms: number | null;
+  poster: string | null;
+  storage_key: string;
+}
+
+async function libJson<T>(r: Response, what: string): Promise<T> {
+  if (!r.ok) {
+    let detail = `${what} failed: ${r.status}`;
+    try {
+      const j = await r.json();
+      if (typeof j?.detail === "string") detail = j.detail;
+    } catch {
+      /* not json */
+    }
+    throw new Error(detail);
+  }
+  return r.json() as Promise<T>;
+}
+
+export async function listLibrary(kind?: LibraryAsset["kind"]): Promise<LibraryAsset[]> {
+  const r = await apiFetch(`/library${kind ? `?kind=${kind}` : ""}`, { cache: "no-store" });
+  return libJson(r, "listLibrary");
+}
+
+export async function removeBackground(id: string): Promise<LibraryAsset> {
+  return libJson(await apiFetch(`/library/${id}/remove-bg`, { method: "POST" }), "removeBackground");
+}
+
+export async function listReusableRecordings(): Promise<ReusableRecording[]> {
+  return libJson(await apiFetch(`/library/recordings`, { cache: "no-store" }), "listRecordings");
+}
+
+export async function importRecording(sessionId: string): Promise<LibraryAsset> {
+  return libJson(
+    await apiFetch(`/library/import-recording`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: sessionId }),
+    }),
+    "importRecording",
+  );
+}
+
+export async function renameLibraryAsset(id: string, name: string): Promise<LibraryAsset> {
+  return libJson(
+    await apiFetch(`/library/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    }),
+    "renameAsset",
+  );
+}
+
+export async function deleteLibraryAsset(id: string): Promise<void> {
+  const r = await apiFetch(`/library/${id}`, { method: "DELETE" });
+  if (!r.ok && r.status !== 404) throw new Error(`deleteAsset failed: ${r.status}`);
+}
+
+/** SVGs are rasterized in the browser (ffmpeg/Pillow can't draw them well):
+ * a 2048-px PNG keeps logos crisp at any overlay size. */
+async function rasterizeSvg(file: File): Promise<File> {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = new Image();
+    await new Promise<void>((res, rej) => {
+      img.onload = () => res();
+      img.onerror = () => rej(new Error("this SVG could not be read"));
+      img.src = url;
+    });
+    const w0 = img.naturalWidth || 512;
+    const h0 = img.naturalHeight || 512;
+    const k = 2048 / Math.max(w0, h0);
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.round(w0 * k);
+    canvas.height = Math.round(h0 * k);
+    canvas.getContext("2d")!.drawImage(img, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise<Blob | null>((res) => canvas.toBlob(res, "image/png"));
+    if (!blob) throw new Error("this SVG could not be converted");
+    return new File([blob], file.name.replace(/\.svg$/i, ".png"), { type: "image/png" });
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+/** Upload any image / video / audio file into the user's media library. Small
+ * files go in one PUT, large ones as resumable parts; the worker then
+ * normalizes it (poll listLibrary until status is ready). */
+export async function uploadToLibrary(
+  input: File,
+  opts: { onProgress?: (p: UploadProgress) => void; signal?: AbortSignal } = {},
+): Promise<LibraryAsset> {
+  const file = /\.svg$/i.test(input.name) || input.type === "image/svg+xml" ? await rasterizeSvg(input) : input;
+  const ext = (file.name.split(".").pop() || "").toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 5);
+  const created = await libJson<LibraryAsset>(
+    await apiFetch(`/library`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: input.name.slice(0, 200), ext, size: file.size }),
+    }),
+    "createAsset",
+  );
+  if (created.put_url) {
+    await putPart(created.put_url, file, (loaded) => opts.onProgress?.({ loaded, total: file.size }), opts.signal);
+    return libJson(await apiFetch(`/library/${created.id}/uploaded`, { method: "POST" }), "finishUpload");
+  }
+  return sendParts<LibraryAsset>(
+    file,
+    { part_size: created.part_size || 0, part_count: created.part_count || 1, parts: [] },
+    `/library/${created.id}/parts/sign`,
+    `/library/${created.id}/complete`,
+    opts,
+  );
 }
 
 export interface IntroOutroCard {

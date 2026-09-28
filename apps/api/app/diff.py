@@ -86,6 +86,8 @@ CARRY_KEYS = (
     "voice", "aspect", "intro", "outro", "captions", "music", "title",
     # user-level look/timing settings must survive a reprocess (e.g. trim keep-ranges)
     "crop", "crops", "elements", "brand", "motion_zoom", "pace", "background",
+    # editor Media tab: inserted clips / title cards and picture-in-picture overlays
+    "inserts", "overlays",
 )
 
 

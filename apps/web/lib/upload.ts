@@ -69,9 +69,9 @@ async function json<T>(r: Response, what: string): Promise<T> {
 }
 
 /** PUT one part with upload progress (fetch has no upload progress events). */
-function putPart(url: string, body: Blob, onLoaded: (n: number) => void, signal?: AbortSignal): Promise<string> {
+export function putPart(url: string, body: Blob, onLoaded: (n: number) => void, signal?: AbortSignal): Promise<string> {
   return new Promise((resolve, reject) => {
-    const viaApi = url.startsWith("/uploads/");
+    const viaApi = url.startsWith("/"); // API route (local backend) vs presigned store URL
     const xhr = new XMLHttpRequest();
     xhr.open("PUT", viaApi ? `${API_BASE}${url}` : url);
     if (viaApi) {
@@ -102,38 +102,22 @@ function putPart(url: string, body: Blob, onLoaded: (n: number) => void, signal?
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-export async function uploadLarge(
-  sessionId: string,
-  kind: "raw_video" | "audio",
-  ext: string,
+export interface PartPlan {
+  part_size: number;
+  part_count: number;
+  parts: { number: number; etag: string; size: number }[]; // already received
+}
+
+/** Upload every missing part (CONCURRENCY at a time, each retried with
+ * backoff), then POST the complete call. Shared by capture uploads and the
+ * media library — only the sign / complete endpoints differ. */
+export async function sendParts<T>(
   blob: Blob,
-  opts: { onProgress?: (p: UploadProgress) => void; signal?: AbortSignal } = {},
-): Promise<string> {
-  const fileTag = blob instanceof File ? `${blob.name}:${blob.lastModified}` : "blob";
-  const resumeKey = `${sessionId}:${kind}:${blob.size}:${fileTag}`;
-  let info: UploadInfo | null = null;
-
-  const previous = resumeMap()[resumeKey];
-  if (previous) {
-    const r = await apiFetch(`/uploads/${previous}`, { cache: "no-store" });
-    if (r.ok) {
-      const j = (await r.json()) as UploadInfo;
-      if (j.status === "uploading") info = j;
-    }
-  }
-  if (!info) {
-    info = await json<UploadInfo>(
-      await apiFetch(`/sessions/${sessionId}/uploads`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ kind, ext, size: blob.size }),
-      }),
-      "createUpload",
-    );
-    remember(resumeKey, info.upload_id);
-  }
-  const up = info;
-
+  up: PartPlan,
+  signPath: string,
+  completePath: string,
+  opts: { onProgress?: (p: UploadProgress) => void; signal?: AbortSignal },
+): Promise<T> {
   const etags = new Map<number, string>(up.parts.map((p) => [p.number, p.etag]));
   const doneBytes = new Map<number, number>(up.parts.map((p) => [p.number, p.size]));
   const inflight = new Map<number, number>();
@@ -157,7 +141,7 @@ export async function uploadLarge(
     if (!batch.includes(n)) batch.unshift(n);
     signing = (async () => {
       const r = await json<{ parts: { number: number; url: string }[] }>(
-        await apiFetch(`/uploads/${up.upload_id}/parts/sign`, {
+        await apiFetch(signPath, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ numbers: batch.slice(0, SIGN_BATCH) }),
@@ -203,8 +187,8 @@ export async function uploadLarge(
   };
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, pending.length || 1) }, worker));
 
-  const done = await json<{ storage_key: string }>(
-    await apiFetch(`/uploads/${up.upload_id}/complete`, {
+  return json<T>(
+    await apiFetch(completePath, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -212,6 +196,45 @@ export async function uploadLarge(
       }),
     }),
     "completeUpload",
+  );
+}
+
+export async function uploadLarge(
+  sessionId: string,
+  kind: "raw_video" | "audio",
+  ext: string,
+  blob: Blob,
+  opts: { onProgress?: (p: UploadProgress) => void; signal?: AbortSignal } = {},
+): Promise<string> {
+  const fileTag = blob instanceof File ? `${blob.name}:${blob.lastModified}` : "blob";
+  const resumeKey = `${sessionId}:${kind}:${blob.size}:${fileTag}`;
+  let info: UploadInfo | null = null;
+
+  const previous = resumeMap()[resumeKey];
+  if (previous) {
+    const r = await apiFetch(`/uploads/${previous}`, { cache: "no-store" });
+    if (r.ok) {
+      const j = (await r.json()) as UploadInfo;
+      if (j.status === "uploading") info = j;
+    }
+  }
+  if (!info) {
+    info = await json<UploadInfo>(
+      await apiFetch(`/sessions/${sessionId}/uploads`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kind, ext, size: blob.size }),
+      }),
+      "createUpload",
+    );
+    remember(resumeKey, info.upload_id);
+  }
+  const done = await sendParts<{ storage_key: string }>(
+    blob,
+    { part_size: info.part_size, part_count: info.part_count, parts: info.parts },
+    `/uploads/${info.upload_id}/parts/sign`,
+    `/uploads/${info.upload_id}/complete`,
+    opts,
   );
   remember(resumeKey, null);
   return done.storage_key;
