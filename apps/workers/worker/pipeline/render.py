@@ -44,6 +44,14 @@ FPS = 30
 # until the outro while the audio kept going. Pinning the mp4 timescale on
 # every clip makes the concat safe even if a clip's frame rate ever differs.
 MP4_TIMESCALE = FPS * 512  # 15360 — what the mp4 muxer picks for 30 fps anyway
+# ...and one audio layout. Scene clips and title cards are mono 24 kHz (Kokoro's
+# native rate). Inserted media used to be encoded stereo, and the concat's audio
+# path never recovers from a mono → stereo → mono flip: every scene after the
+# first insert came out 3 dB quieter (the 1/√2 up/down-mix) with smeared noise
+# in the pauses, heard as a distorted voice by the end of the video. Every clip
+# that feeds the concat must carry this layout.
+AUDIO_RATE = 24000
+AUDIO_CHANNELS = 1
 DEFAULT_PACE = 1.0  # global tempo, applies uniformly whether a scene has voice or not
 # Breathing room after each narrated scene: without it, one script's narration ends
 # and the next starts on the very next frame, which reads as rushed. The pause is
@@ -608,7 +616,8 @@ def _render_segment(seg, seg_tl, src_video, dims, captions, font, work: Path,
     cmd += ["-filter_complex", fc, "-map", "[vout]", "-map", "1:a",
             "-c:v", "libx264", "-preset", "veryfast", "-crf", CRF, "-pix_fmt", "yuv420p",
             "-video_track_timescale", str(MP4_TIMESCALE),
-            "-c:a", "aac", "-ar", "24000", "-shortest", "-t", f"{dur_s:.3f}", str(clip)]
+            "-c:a", "aac", "-ar", str(AUDIO_RATE), "-ac", str(AUDIO_CHANNELS),
+            "-shortest", "-t", f"{dur_s:.3f}", str(clip)]
     ok = _run(cmd)
     if not ok:
         raise RuntimeError(f"segment {seg_tl.index} render failed")
@@ -662,7 +671,7 @@ def _render_titlecard(text, dur_ms, dims, font, work, tag, brand: dict | None = 
         inputs += ["-i", f"gradients=s={w}x{h}:c0=0x{c0}:c1=0x{c1}:x0=0:y0=0:x1={w}:y1={h}"]
     else:
         inputs += ["-i", f"color=c=0x0b0f1a:s={w}x{h}"]
-    inputs += ["-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono"]
+    inputs += ["-f", "lavfi", "-i", f"anullsrc=r={AUDIO_RATE}:cl=mono"]
 
     steps = [f"[0:v]scale={w}:{h}[bg]"]
     last = "bg"
@@ -681,7 +690,8 @@ def _render_titlecard(text, dur_ms, dims, font, work, tag, brand: dict | None = 
         "-filter_complex", fc, "-map", "[v]", "-map", "1:a",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", CRF, "-pix_fmt", "yuv420p",
         "-video_track_timescale", str(MP4_TIMESCALE),
-        "-c:a", "aac", "-ar", "24000", "-t", f"{dur_s:.3f}", str(clip),
+        "-c:a", "aac", "-ar", str(AUDIO_RATE), "-ac", str(AUDIO_CHANNELS),
+        "-t", f"{dur_s:.3f}", str(clip),
     ])
     return clip
 
@@ -716,9 +726,11 @@ def _render_media_card(media_key: str, media_type: str, duration_ms: int, dims: 
         dur_ms = max(500, int(duration_ms))
     w, h = dims
     # A video card keeps its own soundtrack; an image (or a silent/muted video)
-    # gets a silent track so the concat always sees an audio stream.
+    # gets a silent track so the concat always sees an audio stream. Either way
+    # the track is downmixed to the scene clips' layout (see AUDIO_CHANNELS) —
+    # "v4" in the hash retires the stereo clips older renders cached.
     keep_audio = bool(keep_audio) and media_type == "video" and _has_audio(source)
-    chash = _sha("v3", tag, media_key, media_type, dur_ms, t0, dims, keep_audio, fit)
+    chash = _sha("v4", tag, media_key, media_type, dur_ms, t0, dims, keep_audio, fit)
     clip = work / f"{tag}_{chash}.mp4"
     if clip.exists():
         return clip, dur_ms
@@ -727,7 +739,7 @@ def _render_media_card(media_key: str, media_type: str, duration_ms: int, dims: 
     if keep_audio:
         audio_map = ["-map", "0:a:0"]
     else:
-        inputs += ["-f", "lavfi", "-i", "anullsrc=r=24000:cl=stereo"]
+        inputs += ["-f", "lavfi", "-i", f"anullsrc=r={AUDIO_RATE}:cl=mono"]
         audio_map = ["-map", "1:a:0"]
     if fit == "contain":
         inputs += ["-f", "lavfi", "-i", f"color=c=0x0b0f1a:s={w}x{h}:r={FPS}"]
@@ -741,7 +753,8 @@ def _render_media_card(media_key: str, media_type: str, duration_ms: int, dims: 
         "ffmpeg", "-y", *inputs, "-filter_complex", graph, "-map", "[v]", *audio_map,
         "-c:v", "libx264", "-preset", "veryfast", "-crf", CRF, "-pix_fmt", "yuv420p",
         "-video_track_timescale", str(MP4_TIMESCALE),
-        "-c:a", "aac", "-ar", "24000", "-ac", "2", "-t", f"{dur_ms / 1000:.3f}", str(clip),
+        "-c:a", "aac", "-ar", str(AUDIO_RATE), "-ac", str(AUDIO_CHANNELS),
+        "-t", f"{dur_ms / 1000:.3f}", str(clip),
     ])
     if not ok:
         raise RuntimeError(f"media card render failed: {media_key}")
@@ -816,6 +829,44 @@ def _overlay_graph(overlays: list[dict], placed: list[Placed], dims: tuple[int, 
     return inputs, ";".join(steps)
 
 
+def _exact_audio(clip: Path, slot_ms: int) -> Path:
+    """The clip's soundtrack as PCM of exactly `slot_ms`, cached next to the clip.
+
+    The concat's audio clock is built from these, not from the clips' AAC
+    tracks. AAC frames are 1024 samples, so a clip's decoded audio runs up to
+    one frame past its slot (or a little short of it), and the join — which
+    appends decoded samples, timestamps ignored — slid the narration ~30 ms
+    later at every seam: 0.2 s behind the picture by the eighth scene, with
+    click-zooms and captions landing before the words they belong to. PCM has
+    no frame padding, so the sum of these tracks is the timeline total by
+    construction, exactly as `build_timeline` promises."""
+    wav = clip.with_suffix(".wav")
+    if wav.exists():
+        return wav
+    part = clip.with_suffix(".part.wav")
+    ok = _run(["ffmpeg", "-y", "-i", str(clip), "-vn", "-af", "apad", "-t", f"{slot_ms / 1000:.3f}",
+               "-c:a", "pcm_s16le", "-ar", str(AUDIO_RATE), "-ac", str(AUDIO_CHANNELS), str(part)])
+    if not ok or not part.exists():
+        raise RuntimeError(f"audio extract failed: {clip.name}")
+    part.replace(wav)
+    return wav
+
+
+def _join_cmd(video_list: Path, audio_list: Path, ov_inputs: list[str], ov_graph: str,
+              total_ms: int, out: Path) -> list[str]:
+    """ffmpeg command for the final join: video from the clip concat (input 0),
+    Media-tab overlays composited in the same encode (inputs 1..n, see
+    _overlay_graph), and audio from the exact-length PCM concat — appended
+    LAST so the overlay input indices hold."""
+    a_idx = 1 + sum(1 for x in ov_inputs if x == "-i")
+    video_map = ["-filter_complex", ov_graph, "-map", "[vout]"] if ov_graph else ["-map", "0:v"]
+    return ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(video_list), *ov_inputs,
+            "-f", "concat", "-safe", "0", "-i", str(audio_list),
+            *video_map, "-map", f"{a_idx}:a",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", CRF, "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-t", f"{total_ms / 1000:.3f}", str(out)]
+
+
 def _music_mix_cmd(video: Path, music_src: Path, music: dict, total_ms: int, out: Path) -> list[str]:
     """ffmpeg command mixing a looped music bed under the narration: gain, a
     start offset into the track, fade in/out, and (by default) ducking — the
@@ -847,32 +898,21 @@ def _music_mix_cmd(video: Path, music_src: Path, music: dict, total_ms: int, out
 
 
 def _music_source(music: dict | None, work: Path) -> Path | None:
-    """The background-music file to loop under the narration: the user's uploaded
-    track when set, else a built-in soft ambient pad synthesized once — two warm
-    chords (A / D major) crossfading on a slow 24 s cycle with a gentle breathing
-    tremolo, low-passed so it sits under speech instead of competing with it."""
+    """The background-music file to loop under the narration: the user's library
+    track, or nothing. There used to be a synthesized fallback pad (eight sine
+    waves seesawing between two chords, on a 48 s loop whose baked-in fades
+    dipped to silence at every wrap) — it sounded like a test tone under the
+    voice, so "music on, no track chosen" now means no music, and the Media tab
+    says so instead of quietly substituting."""
     if not music or not music.get("enabled"):
         return None
     key = music.get("storage_key")
-    if key:
-        p = store.fetch(key)
-        if p is not None:
-            return p
-        log.warning("music track %s missing; falling back to the built-in pad", key)
-    pad = work / "ambient_pad.wav"
-    if pad.exists():
-        return pad
-    xa = "(0.5+0.5*sin(2*PI*t/24))"  # chord A weight
-    xb = "(0.5-0.5*sin(2*PI*t/24))"  # chord B weight (complementary)
-    chord_a = f"{xa}*(0.30*sin(2*PI*110*t)+0.22*sin(2*PI*164.81*t)+0.20*sin(2*PI*220*t)+0.12*sin(2*PI*277.18*t))"
-    chord_b = f"{xb}*(0.30*sin(2*PI*146.83*t)+0.22*sin(2*PI*220*t)+0.20*sin(2*PI*293.66*t)+0.12*sin(2*PI*369.99*t))"
-    expr = f"(0.75+0.25*sin(2*PI*0.05*t))*({chord_a}+{chord_b})"
-    ok = _run([
-        "ffmpeg", "-y", "-f", "lavfi", "-i", f"aevalsrc={expr}:s=24000:d=48",
-        "-af", "lowpass=f=1500,afade=t=in:d=2,afade=t=out:st=46:d=2",
-        "-c:a", "pcm_s16le", str(pad),
-    ])
-    return pad if ok and pad.exists() else None
+    if not key:
+        return None
+    p = store.fetch(key)
+    if p is None:
+        log.warning("music track %s missing; delivering the video without music", key)
+    return p
 
 
 def _extract_audio(src_video: Path, start_ms: int, end_ms: int, out: Path, tempo: float = 1.0) -> int:
@@ -1098,6 +1138,7 @@ def run_render(render_job_id: str) -> dict:
             logo_pos = str(brand.get("logo_position") or "Top Right")
 
         clips: list[Path] = []
+        slot_ms: list[int] = []  # each clip's length on the output clock (see _exact_audio)
         rendered = reused = 0
         # Media tab: full-screen inserts spliced between scene clips (outside the
         # scene timeline — see placement.py) and overlays composited at concat.
@@ -1117,6 +1158,7 @@ def run_render(render_job_id: str) -> dict:
                     continue
                 clip_path, dur = got
                 clips.append(clip_path)
+                slot_ms.append(dur)
                 placed.append(Placed("insert", clock, clock + dur))
                 clock += dur
                 inserts_done += 1
@@ -1129,6 +1171,7 @@ def run_render(render_job_id: str) -> dict:
                                         crops=crops, elements=elements, logo=logo, logo_pos=logo_pos,
                                         background=spec.get("background"), zooms=tl_zooms)
             clips.append(clip)
+            slot_ms.append(seg_tl.out_duration_ms)
             placed.append(Placed("scene", clock, clock + seg_tl.out_duration_ms,
                                  int(s.get("source_start_ms", 0)), int(s.get("source_end_ms", 0))))
             clock += seg_tl.out_duration_ms
@@ -1138,10 +1181,14 @@ def run_render(render_job_id: str) -> dict:
         if not segs:
             add_inserts(0)
 
-        # concat (re-encode for safe, uniform output); overlays ride the same encode
+        # concat (re-encode for safe, uniform output); overlays ride the same encode.
+        # Video comes from the clips; audio from exact-length PCM per clip so the
+        # narration cannot slide against the picture at the seams (_exact_audio).
         report(0.87, "Joining scenes into the final video…")
         list_file = work / "concat.txt"
         list_file.write_text("".join(f"file '{c}'\n" for c in clips))
+        audio_list = work / "concat_audio.txt"
+        audio_list.write_text("".join(f"file '{_exact_audio(c, ms)}'\n" for c, ms in zip(clips, slot_ms)))
         music = spec.get("music") or {}
         music_src = _music_source(music, work)
         overlays = [o for o in spec.get("overlays") or [] if isinstance(o, dict) and o.get("media_key")]
@@ -1149,15 +1196,10 @@ def run_render(render_job_id: str) -> dict:
         out_key = f"renders/{vp.id}/final_{overall}.mp4"
         out_path = store.local_path(out_key)
         ov_inputs, ov_graph = _overlay_graph(overlays, placed, dims)
-        video_args = (["-filter_complex", ov_graph, "-map", "[vout]", "-map", "0:a"] if ov_graph else [])
-        ok = _run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file), *ov_inputs,
-                   *video_args, "-c:v", "libx264", "-preset", "veryfast", "-crf", CRF, "-pix_fmt", "yuv420p",
-                   "-c:a", "aac", "-t", f"{clock / 1000:.3f}", str(out_path)])
+        ok = _run(_join_cmd(list_file, audio_list, ov_inputs, ov_graph, clock, out_path))
         if not ok and ov_graph:
             log.warning("overlay pass failed; exporting without overlays")
-            ok = _run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file),
-                       "-c:v", "libx264", "-preset", "veryfast", "-crf", CRF, "-pix_fmt", "yuv420p",
-                       "-c:a", "aac", str(out_path)])
+            ok = _run(_join_cmd(list_file, audio_list, [], "", clock, out_path))
         if not ok:
             raise RuntimeError("concat failed")
 
