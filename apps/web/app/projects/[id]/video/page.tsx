@@ -11,6 +11,7 @@ import {
   downloadMedia,
   fetchPreviewTimeline,
   getRender,
+  getTranscriptWords,
   getVideo,
   mediaUrl,
   patchVideo,
@@ -28,7 +29,18 @@ import {
   type PreviewTimeline,
   type PreviewTimelineSegment,
   type RenderJob,
+  type TranscriptWord,
 } from "@/lib/api";
+import {
+  mergeWithNext,
+  packSegments,
+  packedToSource,
+  proportionalWordIndex,
+  sourceToPacked,
+  splitAt,
+  wordSourceMs,
+  type PackedItem,
+} from "@/lib/segments";
 import { ProgressBar } from "@/components/ProgressBar";
 import { Spinner } from "@/components/ui";
 import { VoicePanel } from "@/components/VoicePanel";
@@ -117,12 +129,6 @@ const BG_PRESETS: { id: string; label: string; css: string }[] = [
 const eff = (s: EditSegment) =>
   s.words.filter((_, i) => !s.removed.includes(i)).join(" ");
 const tokenize = (text: string) => text.trim().split(/\s+/).filter(Boolean);
-const wordTimeSec = (s: EditSegment, wi: number) => {
-  const start = s.source_start_ms;
-  const end = Math.max(s.source_end_ms, start + 300);
-  const n = Math.max(1, s.words.length);
-  return (start + ((end - start) * wi) / n) / 1000;
-};
 // Maps between raw SOURCE time (the recording's own clock — what the Script
 // tab and source_start_ms/end_ms use) and the render's OUTPUT clock (what the
 // AI-voice track is actually placed on, since the render retimes each scene to
@@ -231,6 +237,9 @@ export default function VideoEditor({
   const { id } = use(params);
   const [spec, setSpec] = useState<EditSpec | null>(null);
   const [savedSpec, setSavedSpec] = useState<EditSpec | null>(null);
+  // Whisper's word timings (raw-recording clock). Empty for speechless captures;
+  // then word clicks and word splits fall back to a proportional estimate.
+  const [transcriptWords, setTranscriptWords] = useState<TranscriptWord[]>([]);
   const [source, setSource] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("Script");
   const [error, setError] = useState<string | null>(null);
@@ -613,6 +622,9 @@ export default function VideoEditor({
     future.current = [];
     baseline.current = null;
     setHistState({ canUndo: false, canRedo: false });
+    setTranscriptWords([]);
+    // Non-fatal: the editor works without timings, just less precisely.
+    getTranscriptWords(id).then(setTranscriptWords).catch(() => setTranscriptWords([]));
     getVideo(id)
       .then((v) => {
         setSpec(v?.edit_spec ?? null);
@@ -1026,34 +1038,43 @@ export default function VideoEditor({
     return () => window.removeEventListener("keydown", onKey);
   }, [undo, redo]);
 
-  // Split a scene at the playhead into two scenes.
+  // Source time (seconds) where word `wi` of a scene is spoken — exact when the
+  // script is still verbatim, else estimated by position within the window.
+  const wordSec = useCallback(
+    (seg: EditSegment, wi: number) => wordSourceMs(seg, wi, transcriptWords) / 1000,
+    [transcriptWords],
+  );
+
+  // Split a scene at the playhead into two scenes. The words are divided by
+  // where the playhead sits in the window; the exact variant is splitAtWord.
   const splitSegment = useCallback((idx: number, atMs: number) => {
     setSpec((s) => {
       if (!s || !s.segments[idx]) return s;
-      const seg = s.segments[idx];
-      if (atMs <= seg.source_start_ms + 150 || atMs >= seg.source_end_ms - 150)
-        return s;
-      const frac =
-        (atMs - seg.source_start_ms) /
-        (seg.source_end_ms - seg.source_start_ms);
-      const wi = Math.round(seg.words.length * frac);
-      const a: EditSegment = {
-        ...seg,
-        source_end_ms: Math.round(atMs),
-        words: seg.words.slice(0, wi),
-        removed: seg.removed.filter((r) => r < wi),
-      };
-      const b: EditSegment = {
-        ...seg,
-        step_id: `split_${Date.now()}`,
-        source_start_ms: Math.round(atMs),
-        words: seg.words.slice(wi),
-        removed: seg.removed.filter((r) => r >= wi).map((r) => r - wi),
-      };
-      const arr = [...s.segments];
-      arr.splice(idx, 1, a, b);
-      return { ...s, segments: arr };
+      return splitAt(s, idx, atMs, proportionalWordIndex(s.segments[idx], atMs));
     });
+  }, []);
+
+  // Split a scene right before word `wi`: the tail of the script moves to a new
+  // scene whose footage starts where that word was spoken, so voice and video
+  // line up on both sides instead of by estimate.
+  const splitAtWord = useCallback(
+    (idx: number, wi: number) => {
+      setSpec((s) => {
+        if (!s || !s.segments[idx]) return s;
+        const seg = s.segments[idx];
+        if (wi <= 0 || wi >= seg.words.length) return s;
+        return splitAt(s, idx, wordSourceMs(seg, wi, transcriptWords), wi);
+      });
+    },
+    [transcriptWords],
+  );
+
+  // Merge a scene with the one after it — the repair for a sentence the
+  // pipeline cut in two at a click or a pause. Keeps the first scene's id, so
+  // only the merged clip re-renders.
+  const mergeSegment = useCallback((idx: number) => {
+    setEditIdx(null);
+    setSpec((s) => (s ? mergeWithNext(s, idx) : s));
   }, []);
 
   // AI rewrite: polish one line, or the whole script, via Claude.
@@ -1734,6 +1755,13 @@ export default function VideoEditor({
                             {rewriting === i ? "…" : "⚡"}
                           </IconBtn>
                           <IconBtn
+                            title="Merge into the previous scene"
+                            onClick={() => mergeSegment(i - 1)}
+                            disabled={i === 0}
+                          >
+                            ⤒
+                          </IconBtn>
+                          <IconBtn
                             title="Delete"
                             onClick={() => deleteSegment(i)}
                             danger
@@ -1768,17 +1796,23 @@ export default function VideoEditor({
                               <button
                                 key={wi}
                                 onClick={(e) => {
-                                  if (e.shiftKey) {
+                                  if (e.altKey) {
+                                    splitAtWord(i, wi);
+                                  } else if (e.shiftKey) {
                                     mutateSeg(i, {
                                       removed: struck
                                         ? seg.removed.filter((x) => x !== wi)
                                         : [...seg.removed, wi],
                                     });
                                   } else {
-                                    playFrom(wordTimeSec(seg, wi));
+                                    playFrom(wordSec(seg, wi));
                                   }
                                 }}
-                                title="click to play · shift-click to strike"
+                                title={
+                                  wi === 0
+                                    ? "click to play · shift-click to strike"
+                                    : "click to play · shift-click to strike · alt-click to split the scene here"
+                                }
                                 className={`mr-1 rounded px-0.5 ${struck
                                   ? "text-[#c4c9d6] line-through"
                                   : "hover:bg-[#1E8F8E]/10"
@@ -2359,6 +2393,8 @@ export default function VideoEditor({
           onDuplicate={() => activeIdx >= 0 && duplicateSegment(activeIdx)}
           onSkip={() => activeIdx >= 0 && toggleSkip(activeIdx)}
           onSplit={() => activeIdx >= 0 && splitSegment(activeIdx, cur * 1000)}
+          onMerge={() => activeIdx >= 0 && mergeSegment(activeIdx)}
+          canMerge={activeIdx >= 0 && activeIdx < spec.segments.length - 1}
           onUndo={undo}
           onRedo={redo}
           canUndo={histState.canUndo}
@@ -2378,6 +2414,7 @@ export default function VideoEditor({
           cur={cur}
           dur={dur}
           crops={crops}
+          segments={spec.segments}
           cropSel={cropEditIdx}
           setCropSel={setCropSel}
           seekTo={seekTo}
@@ -3555,6 +3592,8 @@ function TimelineToolbar({
   canUndo,
   canRedo,
   onSplit,
+  onMerge,
+  canMerge,
   onSkip,
   skipActive,
   onDuplicate,
@@ -3569,6 +3608,8 @@ function TimelineToolbar({
   canUndo: boolean;
   canRedo: boolean;
   onSplit: () => void;
+  onMerge: () => void;
+  canMerge: boolean;
   onSkip: () => void;
   skipActive: boolean;
   onDuplicate: () => void;
@@ -3602,6 +3643,14 @@ function TimelineToolbar({
         title="Split scene at playhead"
       >
         ✂ Split
+      </button>
+      <button
+        onClick={onMerge}
+        disabled={!canMerge}
+        className="btn btn-ghost btn-sm"
+        title="Merge scene with the next one — joins the narration, keeps both clips"
+      >
+        ⧺ Merge
       </button>
       <button
         onClick={onSkip}
@@ -3656,13 +3705,7 @@ function TimelineToolbar({
 // swapped in for the full multi-row timeline — same inline editing, no popup.
 // A layout item is one segment placed on the compressed (gap-free) effective
 // timeline: `start`/`end` are effective ms, `idx` is its real index in spec.segments.
-type TrimLayoutItem = {
-  s: EditSegment;
-  idx: number;
-  start: number;
-  end: number;
-  d: number;
-};
+type TrimLayoutItem = PackedItem;
 // Trim track scale at zoom 1: the track is at least this wide per second of
 // footage and scrolls sideways, instead of squeezing the whole recording into
 // the page width (unreadable on a long recording). The Zoom slider multiplies it.
@@ -3684,6 +3727,8 @@ function TrimTrack({
   onDuplicate,
   onSkip,
   onSplit,
+  onMerge,
+  canMerge,
   onUndo,
   onRedo,
   canUndo,
@@ -3709,6 +3754,8 @@ function TrimTrack({
   onDuplicate: () => void;
   onSkip: () => void;
   onSplit: () => void;
+  onMerge: () => void;
+  canMerge: boolean;
   onUndo: () => void;
   onRedo: () => void;
   canUndo: boolean;
@@ -3722,39 +3769,11 @@ function TrimTrack({
   const activeSeg = activeIdx >= 0 ? spec.segments[activeIdx] : null;
 
   // Pack every segment back-to-back in "effective" time — no gaps, even if the
-  // source has silence between them — same feel as the old Trim popup.
-  const layout = useMemo(() => {
-    const sorted = spec.segments
-      .map((s, idx) => ({ s, idx }))
-      .sort((a, b) => a.s.source_start_ms - b.s.source_start_ms);
-    let off = 0;
-    const items: TrimLayoutItem[] = sorted.map(({ s, idx }) => {
-      const d = Math.max(0, s.source_end_ms - s.source_start_ms);
-      const it = { s, idx, start: off, end: off + d, d };
-      off += d;
-      return it;
-    });
-    return { items, total: Math.max(off, 1) };
-  }, [spec.segments]);
-
-  const effToItem = (eff: number) =>
-    layout.items.find((it) => eff >= it.start && eff < it.end) ??
-    layout.items[layout.items.length - 1] ??
-    null;
-  const effToSource = (eff: number) => {
-    const it = effToItem(eff);
-    return it ? it.s.source_start_ms + (eff - it.start) : 0;
-  };
-  const sourceToEff = (srcMs: number) => {
-    const it =
-      layout.items.find(
-        (x) => srcMs >= x.s.source_start_ms && srcMs < x.s.source_end_ms,
-      ) ?? [...layout.items].reverse().find((x) => x.s.source_end_ms <= srcMs);
-    if (!it) return 0;
-    return srcMs >= it.s.source_start_ms && srcMs < it.s.source_end_ms
-      ? it.start + (srcMs - it.s.source_start_ms)
-      : it.end;
-  };
+  // source has silence between them — same feel as the old Trim popup. The
+  // Crop track shares this layout (lib/segments.ts) so both views match.
+  const layout = useMemo(() => packSegments(spec.segments), [spec.segments]);
+  const effToSource = (eff: number) => packedToSource(layout, eff);
+  const sourceToEff = (srcMs: number) => sourceToPacked(layout, srcMs);
   const effAtClientX = (clientX: number) => {
     const r = trackRef.current?.getBoundingClientRect();
     if (!r) return 0;
@@ -3825,6 +3844,8 @@ function TrimTrack({
         canUndo={canUndo}
         canRedo={canRedo}
         onSplit={onSplit}
+        onMerge={onMerge}
+        canMerge={canMerge}
         onSkip={onSkip}
         skipActive={skipActive}
         onDuplicate={onDuplicate}
@@ -4151,6 +4172,7 @@ function CropTrack({
   cur,
   dur,
   crops,
+  segments,
   cropSel,
   setCropSel,
   seekTo,
@@ -4165,6 +4187,7 @@ function CropTrack({
   cur: number;
   dur: number;
   crops: CropRegion[];
+  segments: EditSegment[];
   cropSel: number;
   setCropSel: (n: number) => void;
   seekTo: (s: number) => void;
@@ -4176,7 +4199,17 @@ function CropTrack({
 }) {
   const frames = useFilmstrip(source, 48);
   const stripRef = useRef<HTMLDivElement>(null);
-  const totalMs = Math.max(dur * 1000, 1);
+  // Same packed clock as Trim mode: kept scenes back to back, cuts closed, so
+  // the strip shows only footage the render will use. Crops stay stored in raw
+  // source ms (what the render reads); only drawing and dragging go through
+  // the two maps. A crop left entirely inside a cut packs to zero width and is
+  // simply not drawn — it matches no scene, so it has no effect anyway.
+  const layout = useMemo(() => packSegments(segments), [segments]);
+  const packed = layout.items.length > 0;
+  const totalMs = packed ? layout.total : Math.max(dur * 1000, 1);
+  const toSrc = (ms: number) => (packed ? packedToSource(layout, ms) : ms);
+  const toPacked = (ms: number) => (packed ? sourceToPacked(layout, ms) : ms);
+  const srcEndMs = packed ? toSrc(totalMs) : totalMs;
   const sel = Math.min(cropSel, Math.max(0, crops.length - 1));
   const box = crops[sel] as CropRegion | undefined;
   const dragRef = useRef<null | {
@@ -4193,7 +4226,7 @@ function CropTrack({
   const stripDown = (e: React.PointerEvent) => {
     dragRef.current = { mode: "seek", idx: -1, grab: 0 };
     e.currentTarget.setPointerCapture?.(e.pointerId);
-    seekTo(msAtX(e.clientX) / 1000);
+    seekTo(toSrc(msAtX(e.clientX)) / 1000);
   };
   const blockDown = (
     e: React.PointerEvent,
@@ -4208,16 +4241,17 @@ function CropTrack({
     dragRef.current = {
       mode,
       idx,
-      grab: msAtX(e.clientX) - (crops[idx].start_ms ?? 0),
+      // grab offset on the packed clock, where the pointer lives
+      grab: msAtX(e.clientX) - toPacked(crops[idx].start_ms ?? 0),
     };
     stripRef.current?.setPointerCapture?.(e.pointerId);
   };
   const stripMove = (e: React.PointerEvent) => {
     const d = dragRef.current;
     if (!d) return;
-    const at = msAtX(e.clientX);
+    const at = msAtX(e.clientX); // packed ms
     if (d.mode === "seek") {
-      seekTo(at / 1000);
+      seekTo(toSrc(at) / 1000);
       return;
     }
     const c = crops[d.idx];
@@ -4225,19 +4259,23 @@ function CropTrack({
     const s0 = c.start_ms ?? 0;
     const en = c.end_ms ?? 0;
     if (d.mode === "move") {
-      const width = en - s0;
+      // Slide the window on the packed clock, then map each edge back to
+      // source separately — crossing a seam stretches the source span over
+      // the cut, which is right since the cut never renders.
+      const p0 = toPacked(s0);
+      const width = toPacked(en) - p0;
       const ns = Math.max(0, Math.min(at - d.grab, totalMs - width));
       onPatchCrop(d.idx, {
-        start_ms: Math.round(ns),
-        end_ms: Math.round(ns + width),
+        start_ms: Math.round(toSrc(ns)),
+        end_ms: Math.round(toSrc(ns + width)),
       });
     } else if (d.mode === "l") {
       onPatchCrop(d.idx, {
-        start_ms: Math.round(Math.max(0, Math.min(at, en - 500))),
+        start_ms: Math.round(Math.max(0, Math.min(toSrc(at), en - 500))),
       });
     } else {
       onPatchCrop(d.idx, {
-        end_ms: Math.round(Math.min(totalMs, Math.max(at, s0 + 500))),
+        end_ms: Math.round(Math.min(srcEndMs, Math.max(toSrc(at), s0 + 500))),
       });
     }
   };
@@ -4330,8 +4368,12 @@ function CropTrack({
                   sel,
                   e.target.checked
                     ? {
+                      // 10 s of KEPT footage from the playhead, measured on the
+                      // packed clock so the default window never lands in a cut
                       start_ms: Math.round(cur * 1000),
-                      end_ms: Math.round(Math.min(dur, cur + 10) * 1000),
+                      end_ms: Math.round(
+                        Math.min(srcEndMs, toSrc(toPacked(cur * 1000) + 10_000)),
+                      ),
                     }
                     : { start_ms: 0, end_ms: 0 },
                 )
@@ -4347,13 +4389,46 @@ function CropTrack({
             onPointerUp={stripUp}
             className="relative mt-3 h-16 touch-none select-none overflow-hidden rounded-lg bg-[#0e1116] ring-1 ring-inset ring-[var(--border)]"
           >
-            <Filmstrip frames={frames} className="opacity-70" />
+            {packed ? (
+              // one slice of real frames per kept scene, packed edge to edge
+              layout.items.map((it) => {
+                const blk = framesInRange(frames, it.s.source_start_ms, it.s.source_end_ms);
+                return (
+                  <span
+                    key={it.s.step_id}
+                    style={{
+                      left: `${(it.start / totalMs) * 100}%`,
+                      width: `${Math.max(0.3, (it.d / totalMs) * 100)}%`,
+                    }}
+                    title={it.s.skipped ? "Skipped scene" : undefined}
+                    className={`absolute inset-y-0 flex overflow-hidden ${it.s.skipped ? "opacity-25 grayscale" : "opacity-70"}`}
+                  >
+                    {blk.map((f, i) => (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        key={i}
+                        src={f.url}
+                        alt=""
+                        draggable={false}
+                        className="h-full flex-1 object-cover"
+                        style={{ minWidth: 0 }}
+                      />
+                    ))}
+                  </span>
+                );
+              })
+            ) : (
+              <Filmstrip frames={frames} className="opacity-70" />
+            )}
             {crops.map((c, i) => {
               const s0 = c.start_ms ?? 0;
               const en = c.end_ms ?? 0;
               if (en <= s0) return null; // whole-video crop — no window to draw
-              const left = (s0 / totalMs) * 100;
-              const width = Math.max(0.5, ((en - s0) / totalMs) * 100);
+              const p0 = toPacked(s0);
+              const p1 = toPacked(en);
+              if (p1 <= p0) return null; // sits entirely inside a cut — nothing to show
+              const left = (p0 / totalMs) * 100;
+              const width = Math.max(0.5, ((p1 - p0) / totalMs) * 100);
               const active = i === sel;
               return (
                 <div
@@ -4395,7 +4470,7 @@ function CropTrack({
             {/* playhead */}
             <span
               style={{
-                left: `${Math.min(100, (cur * 1000 * 100) / totalMs)}%`,
+                left: `${Math.min(100, (toPacked(cur * 1000) * 100) / totalMs)}%`,
               }}
               className="pointer-events-none absolute inset-y-0 w-px bg-white"
             />

@@ -13,10 +13,18 @@ from app.auth import CurrentUser
 from app.db import get_session
 from app.diff import migrate_edit_spec
 from app.editspec import build_edit_spec, mark_dirty, voice_timeline_key, voice_track_key
-from app.models import CaptureSession, LibraryAsset, MediaAsset, RenderJob, VideoProject, WorkflowGraphRow
+from app.models import (
+    CaptureSession,
+    LibraryAsset,
+    MediaAsset,
+    RenderJob,
+    Transcript,
+    VideoProject,
+    WorkflowGraphRow,
+)
 from app.ownership import owned_project, owned_render_job
 from app.queue import enqueue_render, enqueue_voice_track
-from app.schemas import EditSpecPatch, RenderJobOut, VideoSpecOut
+from app.schemas import EditSpecPatch, RenderJobOut, TranscriptOut, TranscriptWordOut, VideoSpecOut
 from app.storage import store
 
 router = APIRouter(tags=["video"])
@@ -158,6 +166,37 @@ def get_video(
         source_video=_source_video(db, project_id),
         source_proxy=_source_video(db, project_id, "proxy"),
         latest_render=_latest_render(db, vp),
+    )
+
+
+@router.get("/projects/{project_id}/transcript", response_model=TranscriptOut)
+def get_transcript(
+    project_id: str, user: CurrentUser, db: Session = Depends(get_session)
+) -> TranscriptOut:
+    """Word timings for the project's latest capture (the same session whose
+    recording the editor previews). Times are on the raw recording's clock —
+    the pipeline filters trimmed words out but never shifts them — so they
+    line up with the edit spec's source_start_ms/source_end_ms as-is. Empty
+    when the capture had no speech or Whisper was unavailable."""
+    owned_project(db, user, project_id)
+    sess = db.scalar(
+        select(CaptureSession)
+        .where(CaptureSession.project_id == project_id)
+        .order_by(CaptureSession.created_at.desc())
+    )
+    if sess is None:
+        return TranscriptOut()
+    row = db.scalar(select(Transcript).where(Transcript.session_id == sess.id))
+    if row is None:
+        return TranscriptOut(session_id=sess.id)
+    return TranscriptOut(
+        session_id=sess.id,
+        provider=row.provider,
+        words=[
+            TranscriptWordOut(w=str(x.get("w", "")), t_start=float(x.get("t_start", 0.0)),
+                              t_end=float(x.get("t_end", 0.0)))
+            for x in (row.words_json or [])
+        ],
     )
 
 

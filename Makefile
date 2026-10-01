@@ -118,8 +118,9 @@ test-py: ## Run Python tests (workflow-graph + api + workers)
 	cd $(API_DIR) && uv run pytest -q
 	cd $(WORKERS_DIR) && uv run pytest -q
 
-test-js: ## Run JS/TS tests (workflow-graph)
+test-js: ## Run JS/TS tests (workflow-graph + web editor helpers)
 	npm run test --workspace @refract/workflow-graph
+	npm run test --workspace @refract/web
 
 lint: ## Lint all apps
 	cd $(API_DIR) && uv run ruff check .

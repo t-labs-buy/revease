@@ -252,6 +252,22 @@ class VideoSpecOut(BaseModel):
     latest_render: RenderJobOut | None = None  # newest finished render, shown on open
 
 
+class TranscriptWordOut(BaseModel):
+    w: str
+    t_start: float  # seconds on the raw recording's clock (same as source_start_ms)
+    t_end: float
+
+
+class TranscriptOut(BaseModel):
+    """Whisper's word timings for the project's latest capture. The editor uses
+    them to split a scene at a spoken word, and to play from the instant a word
+    was said, instead of guessing by proportion of the scene's window."""
+
+    session_id: str | None = None
+    provider: str = "none"
+    words: list[TranscriptWordOut] = []
+
+
 class EditSpecPatch(BaseModel):
     edit_spec: dict
 
