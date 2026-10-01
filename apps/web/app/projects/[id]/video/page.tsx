@@ -560,6 +560,12 @@ export default function VideoEditor({
     if (!video || !audio) return;
     let raf = 0;
     let frozenAt = -1; // index of the segment currently holding its last frame
+    // True only while THIS effect has paused the video to hold a frame. The
+    // conductor may only resume a video it froze itself — never one the user
+    // (or the trim-edge check) paused, which it would otherwise undo on the
+    // next frame because the 'pause' event that tears this effect down is
+    // delivered asynchronously.
+    let held = false;
     let spokenId: string | null = null;
 
     const tick = () => {
@@ -585,14 +591,16 @@ export default function VideoEditor({
           }
           if (!video.paused) {
             conductorFreezingRef.current = true;
+            held = true;
             video.pause();
           }
         } else {
           frozenAt = -1;
-          if (video.paused || Math.abs(video.currentTime * 1000 - targetSrcMs) > 180) {
+          if (held || Math.abs(video.currentTime * 1000 - targetSrcMs) > 180) {
             video.currentTime = targetSrcMs / 1000;
           }
-          if (video.paused) {
+          if (held && video.paused) {
+            held = false;
             conductorResumingRef.current = true;
             void video.play().catch(() => { });
           }
@@ -1315,11 +1323,22 @@ export default function VideoEditor({
     seekTo(seconds);
     void videoRef.current?.play();
   }
+  // A user-initiated pause. Drops `playing` synchronously instead of waiting for
+  // the video's 'pause' event: Chrome queues that event as a task, so the
+  // conductor's next animation frame could run first, see a paused video and
+  // resume it — the pause never stuck and the resync glitched the picture.
+  // React flushes this state change (and the conductor effect's cleanup) before
+  // the handler returns, so no frame can fire in between.
+  function pausePlayback() {
+    setPlaying(false);
+    audioRef.current?.pause();
+    videoRef.current?.pause();
+  }
   function togglePlay() {
     const v = videoRef.current;
     if (!v) return;
-    if (v.paused) void v.play();
-    else v.pause();
+    if (v.paused) void v.play().catch(() => { });
+    else pausePlayback();
   }
   function fullscreen() {
     void frameRef.current?.requestFullscreen?.();
@@ -2333,7 +2352,7 @@ export default function VideoEditor({
                 else if (c.key === "trim") {
                   // Trim swaps the timeline below to a focused single-track view
                   // (inline, no popup) — click again to go back to the full timeline.
-                  videoRef.current?.pause();
+                  pausePlayback();
                   setActiveTool((t) => (t === "trim" ? null : "trim"));
                   timelineRef.current?.scrollIntoView({
                     behavior: "smooth",
@@ -2342,7 +2361,7 @@ export default function VideoEditor({
                 } else if (c.key === "crop") {
                   // Crop swaps the timeline below to a region-editing track (same
                   // pattern as Trim) and shows a draggable box on the preview above.
-                  videoRef.current?.pause();
+                  pausePlayback();
                   if (activeTool !== "crop") {
                     const list = cropList(spec);
                     if (!list.length)
