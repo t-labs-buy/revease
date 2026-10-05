@@ -1077,9 +1077,12 @@ export default function VideoEditor({
     [transcriptWords],
   );
 
-  // Merge a scene with the one after it — the repair for a sentence the
+  // Merge scene `idx` with the one after it — the repair for a sentence the
   // pipeline cut in two at a click or a pause. Keeps the first scene's id, so
-  // only the merged clip re-renders.
+  // only the merged clip re-renders. The only UI entry point is the ⤒ button
+  // on a script row, which calls this with `i - 1`: "merge this scene into the
+  // previous one". (A Trim-toolbar Merge was removed — two buttons with
+  // different directions confused people.)
   const mergeSegment = useCallback((idx: number) => {
     setEditIdx(null);
     setSpec((s) => (s ? mergeWithNext(s, idx) : s));
@@ -2412,8 +2415,6 @@ export default function VideoEditor({
           onDuplicate={() => activeIdx >= 0 && duplicateSegment(activeIdx)}
           onSkip={() => activeIdx >= 0 && toggleSkip(activeIdx)}
           onSplit={() => activeIdx >= 0 && splitSegment(activeIdx, cur * 1000)}
-          onMerge={() => activeIdx >= 0 && mergeSegment(activeIdx)}
-          canMerge={activeIdx >= 0 && activeIdx < spec.segments.length - 1}
           onUndo={undo}
           onRedo={redo}
           canUndo={histState.canUndo}
@@ -3611,8 +3612,6 @@ function TimelineToolbar({
   canUndo,
   canRedo,
   onSplit,
-  onMerge,
-  canMerge,
   onSkip,
   skipActive,
   onDuplicate,
@@ -3627,8 +3626,6 @@ function TimelineToolbar({
   canUndo: boolean;
   canRedo: boolean;
   onSplit: () => void;
-  onMerge: () => void;
-  canMerge: boolean;
   onSkip: () => void;
   skipActive: boolean;
   onDuplicate: () => void;
@@ -3662,14 +3659,6 @@ function TimelineToolbar({
         title="Split scene at playhead"
       >
         ✂ Split
-      </button>
-      <button
-        onClick={onMerge}
-        disabled={!canMerge}
-        className="btn btn-ghost btn-sm"
-        title="Merge scene with the next one — joins the narration, keeps both clips"
-      >
-        ⧺ Merge
       </button>
       <button
         onClick={onSkip}
@@ -3746,8 +3735,6 @@ function TrimTrack({
   onDuplicate,
   onSkip,
   onSplit,
-  onMerge,
-  canMerge,
   onUndo,
   onRedo,
   canUndo,
@@ -3773,8 +3760,6 @@ function TrimTrack({
   onDuplicate: () => void;
   onSkip: () => void;
   onSplit: () => void;
-  onMerge: () => void;
-  canMerge: boolean;
   onUndo: () => void;
   onRedo: () => void;
   canUndo: boolean;
@@ -3863,8 +3848,6 @@ function TrimTrack({
         canUndo={canUndo}
         canRedo={canRedo}
         onSplit={onSplit}
-        onMerge={onMerge}
-        canMerge={canMerge}
         onSkip={onSkip}
         skipActive={skipActive}
         onDuplicate={onDuplicate}

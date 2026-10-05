@@ -110,8 +110,10 @@ Release-gate checklist (§5) all satisfied except the two provider-key items (Wh
   that straddles either lands in two scenes. Whisper also often ends a
   "sentence" at a long pause, which no segmentation rule can undo — so the
   repair lives in the editor, Trupeer-style.
-- **Merge**: `⧺ Merge` in the Trim toolbar (active scene + next) and `⤒` on a
-  script row (into the previous). Pure transform in `apps/web/lib/segments.ts`:
+- **Merge**: `⤒` on a script row merges the scene *into the previous one*
+  (disabled on the first scene). It is the only entry point — a Trim-toolbar
+  Merge that went the other direction was dropped as confusing. Pure transform
+  in `apps/web/lib/segments.ts`:
   keeps the first scene's `step_id` (so `mark_dirty` re-renders only the merged
   clip), joins words, shifts filler indices, spans both source windows,
   re-points `after:<id>` inserts at the survivor.
