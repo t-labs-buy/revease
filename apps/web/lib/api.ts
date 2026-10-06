@@ -1347,6 +1347,22 @@ export async function getVideo(projectId: string): Promise<VideoSpec | null> {
   return r.json();
 }
 
+export interface TranscriptWord {
+  w: string;
+  t_start: number; // seconds on the raw recording's clock (same as source_start_ms)
+  t_end: number;
+}
+
+/** Whisper's word timings for the project's latest capture. Empty when the
+ * capture had no speech. Lets the editor split a scene at the instant a word
+ * was spoken instead of guessing by proportion. */
+export async function getTranscriptWords(projectId: string): Promise<TranscriptWord[]> {
+  const r = await apiFetch(`/projects/${projectId}/transcript`, { cache: "no-store" });
+  if (!r.ok) return [];
+  const body = (await r.json()) as { words?: TranscriptWord[] };
+  return body.words ?? [];
+}
+
 export async function patchVideo(projectId: string, editSpec: EditSpec): Promise<VideoSpec> {
   const r = await apiFetch(`/projects/${projectId}/video`, {
     method: "PATCH",

@@ -104,6 +104,38 @@ Release-gate checklist (§5) all satisfied except the two provider-key items (Wh
 - **Render**: inserts are spliced between scene clips and overlays are composited in the concat encode, so moving a logo or changing the music re-renders 0 scenes (asserted in `test_render.py`). A spec may only reference this project's media or the editor's own library (422 otherwise).
 - **Tests**: `test_library.py`, `test_placement.py`, `test_bgremove.py` (real ISNet when the model is present), `test_library_job.py`, the render test and a retention test.
 
+## Scene merge + word-level split (2026-10-01)
+
+- Why: the pipeline cuts narration at clicks and at pauses > 2 s, so a sentence
+  that straddles either lands in two scenes. Whisper also often ends a
+  "sentence" at a long pause, which no segmentation rule can undo — so the
+  repair lives in the editor, Trupeer-style.
+- **Merge**: `⤒` on a script row merges the scene *into the previous one*
+  (disabled on the first scene). It is the only entry point — a Trim-toolbar
+  Merge that went the other direction was dropped as confusing. Pure transform
+  in `apps/web/lib/segments.ts`:
+  keeps the first scene's `step_id` (so `mark_dirty` re-renders only the merged
+  clip), joins words, shifts filler indices, spans both source windows,
+  re-points `after:<id>` inserts at the survivor.
+- **Split at a word**: alt-click a word in the Script tab. `GET
+  /projects/{id}/transcript` exposes Whisper's word timings (raw-recording
+  clock, same as `source_start_ms`); when the scene's script is still verbatim
+  the cut lands exactly where that word was spoken, otherwise (AI rewrite,
+  manual edit) it falls back to the old proportional estimate. Plain word
+  clicks now also play from the exact spoken instant.
+- Tests: `apps/api/tests/test_transcript.py`; `npm run test --workspace
+  @refract/web` (node --test over `lib/*.test.ts`, now part of `make test-js`).
+- Graph and doc are untouched by a merge/split — the doc still shows the
+  original steps until regenerated.
+- **Crop track on the packed clock.** Trim mode always drew kept scenes back
+  to back; the Crop track drew the raw file, so trimmed footage reappeared
+  there. The packing (`packSegments` / `packedToSource` / `sourceToPacked`
+  in `lib/segments.ts`) is now shared: Crop shows one slice of frames per kept
+  scene, cuts closed, skipped scenes greyed. Crops are still stored in raw
+  source ms (what render.py reads); only drawing and dragging map through the
+  packed clock. A crop left entirely inside a cut (cropped first, trimmed
+  later) packs to zero width and is not drawn — it matches no scene, so it has
+  no effect anyway. The main timeline stays on the raw clock by choice.
 ## Deployed to ivolve as v3 (2026-09-24)
 
 - Images `reg.ivolve.cloud/ivolve/revease:{api,worker,web}-v3`, built natively on the host.
