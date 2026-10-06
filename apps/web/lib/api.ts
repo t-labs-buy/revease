@@ -124,6 +124,7 @@ export interface Asset {
 export interface SessionDetail extends Session {
   assets: Asset[];
   event_count: number;
+  script?: string | null; // the narration script the user supplied, if any
 }
 
 export interface CaptureEvent {
@@ -347,6 +348,41 @@ export async function setTrim(
   return r.json();
 }
 
+/** Replace (or, with "", clear) a recording's narration script. The pipeline
+ * re-runs and rebuilds the scenes around it; 409 while it is still processing. */
+export async function setSessionScript(sessionId: string, script: string): Promise<Session> {
+  const r = await apiFetch(`/sessions/${sessionId}/script`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ script }),
+  });
+  if (r.status === 409) throw new Error("This recording is still being processed — try again in a moment.");
+  if (!r.ok) throw new Error(`setSessionScript failed: ${r.status}`);
+  pokeActivity();
+  return r.json();
+}
+
+// Pause marker inside a scene's script, e.g. `[pause:1.5]` — one token, voiced
+// as silence. Ports of PAUSE_RE / split_pauses / spoken_text in
+// apps/api/app/editspec.py; keep the three in step.
+export const PAUSE_RE = /\[pause:(\d+(?:\.\d+)?)\]/gi;
+export const PAUSE_MIN_S = 0.2;
+export const PAUSE_MAX_S = 3.0;
+const clampPause = (s: number) => Math.min(PAUSE_MAX_S, Math.max(PAUSE_MIN_S, s));
+
+/** Seconds if `word` is a pause marker, else null. */
+export function pauseSeconds(word: string): number | null {
+  const m = /^\[pause:(\d+(?:\.\d+)?)\]$/i.exec(word);
+  return m ? clampPause(parseFloat(m[1])) : null;
+}
+
+export const pauseToken = (seconds: number) => `[pause:${clampPause(seconds)}]`;
+
+/** The script as prose: pause markers removed. */
+export function spokenText(script: string): string {
+  return script.replace(PAUSE_RE, " ").trim().split(/\s+/).filter(Boolean).join(" ");
+}
+
 /** Approximate AI-generated output duration (ms) from an edit-spec. Mirrors the
  * render pipeline's timing rules exactly:
  *  - silent scene → full source length ÷ pace (same as a narrated scene)
@@ -361,13 +397,16 @@ export function estimateOutputMs(spec: EditSpec): number {
   for (const s of spec.segments) {
     if (s.skipped) continue; // excluded from the render
     const srcMs = Math.max(0, s.source_end_ms - s.source_start_ms);
-    const words = s.words.filter((_, i) => !s.removed.includes(i));
+    const kept = s.words.filter((_, i) => !s.removed.includes(i));
+    // pause markers are silence, not words: counted by their length instead
+    const words = kept.filter((w) => pauseSeconds(w) === null);
+    const pauseMs = kept.reduce((t, w) => t + (pauseSeconds(w) ?? 0) * 1000, 0);
     if (words.length === 0) {
       body += Math.max(300, srcMs / pace);
     } else if (useOriginal) {
       body += Math.max(300, srcMs / pace);
     } else {
-      body += Math.max(300, (words.length / (WPS * (spec.voice.speed || 1) * pace)) * 1000);
+      body += Math.max(300, (words.length / (WPS * (spec.voice.speed || 1) * pace)) * 1000) + pauseMs;
     }
   }
   const inserts = effectiveInserts(spec).reduce((t, it) => t + insertDurationMs(it), 0);
@@ -770,7 +809,13 @@ export async function rewriteLines(
 
 export async function generateScript(
   projectId: string,
-  scenes: { target?: string; action?: string; narration?: string; seconds?: number }[],
+  scenes: {
+    target?: string;
+    action?: string;
+    narration?: string;
+    seconds?: number;
+    screenshot?: string | null; // the scene's frame: the model then narrates what it sees
+  }[],
   title: string,
   instruction?: string,
 ): Promise<string[]> {
@@ -1357,10 +1402,19 @@ export interface TranscriptWord {
  * capture had no speech. Lets the editor split a scene at the instant a word
  * was spoken instead of guessing by proportion. */
 export async function getTranscriptWords(projectId: string): Promise<TranscriptWord[]> {
+  return (await getTranscript(projectId)).words;
+}
+
+/** The same call, plus which capture the words belong to — the project's latest
+ * session, i.e. the one whose recording the editor previews. `sessionId` is
+ * null only for a project with no capture. */
+export async function getTranscript(
+  projectId: string,
+): Promise<{ sessionId: string | null; words: TranscriptWord[] }> {
   const r = await apiFetch(`/projects/${projectId}/transcript`, { cache: "no-store" });
-  if (!r.ok) return [];
-  const body = (await r.json()) as { words?: TranscriptWord[] };
-  return body.words ?? [];
+  if (!r.ok) return { sessionId: null, words: [] };
+  const body = (await r.json()) as { session_id?: string | null; words?: TranscriptWord[] };
+  return { sessionId: body.session_id ?? null, words: body.words ?? [] };
 }
 
 export async function patchVideo(projectId: string, editSpec: EditSpec): Promise<VideoSpec> {

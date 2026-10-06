@@ -96,10 +96,20 @@ class Viewport(BaseModel):
     h: int = Field(gt=0)
 
 
+# A narration script is prose, not a document: 50k characters is ~5 hours spoken.
+SCRIPT_MAX_CHARS = 50_000
+
+
 class SessionCreate(BaseModel):
     project_id: str
     source_type: SourceType
     viewport: Viewport | None = None
+    # Narration for a recording without a voiceover; replaces transcription.
+    script: str | None = Field(default=None, max_length=SCRIPT_MAX_CHARS)
+
+
+class SessionScript(BaseModel):
+    script: str = Field(default="", max_length=SCRIPT_MAX_CHARS)  # empty clears it
 
 
 class SessionOut(BaseModel):
@@ -133,6 +143,7 @@ class AssetOut(BaseModel):
 class SessionDetail(SessionOut):
     assets: list[AssetOut] = []
     event_count: int = 0
+    script: str | None = None  # the user-supplied narration script, if any
 
 
 class SessionComplete(BaseModel):

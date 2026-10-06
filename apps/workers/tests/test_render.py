@@ -180,3 +180,45 @@ def test_media_inserts_overlays_and_music_never_rerender_scenes():
         assert job2.output_key != job1.output_key
     finally:
         db.close()
+
+
+def test_pause_marker_adds_silence_and_rerenders_only_its_scene():
+    """A `[pause:N]` token in one scene's script lengthens that scene by N
+    seconds of silence and re-renders it alone — the other scenes' audio file
+    names (and so their clip hashes) are untouched."""
+    db = SessionLocal()
+    try:
+        vp = _setup(db)
+        spec = {**vp.edit_spec_json}
+        spec["intro"] = {**spec["intro"], "enabled": False}
+        spec["outro"] = {**spec["outro"], "enabled": False}
+        vp.edit_spec_json = spec
+        db.commit()
+
+        job1 = RenderJob(video_project_id=vp.id, status="pending")
+        db.add(job1)
+        db.commit()
+        db.refresh(job1)
+        stats1 = run_render(job1.id)
+        assert stats1["segments_rendered"] == 3
+
+        new_spec = {**vp.edit_spec_json}
+        new_spec["segments"] = [dict(s) for s in new_spec["segments"]]
+        words = list(new_spec["segments"][1]["words"])
+        new_spec["segments"][1]["words"] = words[:2] + ["[pause:1.5]"] + words[2:]
+        vp.edit_spec_json = mark_dirty(vp.edit_spec_json, new_spec)
+        db.commit()
+
+        job2 = RenderJob(video_project_id=vp.id, status="pending")
+        db.add(job2)
+        db.commit()
+        db.refresh(job2)
+        stats2 = run_render(job2.id)
+        assert stats2["segments_rendered"] == 1 and stats2["segments_reused"] == 2, stats2
+        db.refresh(job1)
+        db.refresh(job2)
+        # the offline TTS stub sizes a clip by word count with a floor, so the
+        # split halves may each hit the floor: the scene grows by AT LEAST the pause
+        assert _probe_s(job2.output_key) - _probe_s(job1.output_key) >= 1.4
+    finally:
+        db.close()

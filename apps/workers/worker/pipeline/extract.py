@@ -59,8 +59,9 @@ def build_graph(
                 "selector": cand.get("selector"),
                 "screenshot": cand.get("screenshot"),
                 "bbox": _clean_bbox(cand.get("bbox")),
-                # Verbatim invariant: the script is the transcript span, or empty —
-                # never an LLM-invented sentence.
+                # Verbatim invariant: the script is the span the caller supplied
+                # (spoken words, the user's script, or the draft written for a
+                # speechless recording) — the labelling model never rewrites it.
                 "narration": (cand.get("narration_span") or "").strip(),
                 "t_start": cand.get("t_start"),
                 "t_end": cand.get("t_end"),

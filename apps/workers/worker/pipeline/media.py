@@ -201,6 +201,34 @@ def demux_audio(video_path: Path, out_wav: Path) -> Path | None:
     return out_wav
 
 
+# Scene score (0..1) above which two consecutive sampled frames count as a screen
+# change. Screen recordings are mostly static, so this sits far below the ~0.3
+# used for film cuts: a page navigation or a modal scores ~0.1+, typing or a
+# cursor move ~0.001.
+SCENE_CUT_THRESHOLD = 0.08
+
+
+def detect_scene_cuts(video_path: Path, threshold: float = SCENE_CUT_THRESHOLD) -> list[float]:
+    """Times (seconds) where the screen visibly changes — the boundaries a
+    speechless recording is segmented on, and what script lines snap to.
+
+    One decode at 5 fps / 320 px wide, no output file. Best-effort: any ffmpeg
+    failure returns [] and callers fall back to evenly spaced / proportional
+    boundaries."""
+    try:
+        proc = _run([
+            "ffmpeg", "-threads", str(get_settings().media_threads), "-i", str(video_path),
+            "-vf", f"fps=5,scale=320:-2,select='gt(scene,{threshold})',showinfo",
+            "-an", "-f", "null", "-",
+        ])
+    except (FFmpegError, FileNotFoundError):
+        log.warning("scene-cut detection failed for %s; continuing without cuts", video_path)
+        return []
+    cuts = sorted(float(m) for m in re.findall(r"pts_time:([0-9.]+)", proc.stderr))
+    log.info("detected %d scene cuts in %s", len(cuts), video_path)
+    return cuts
+
+
 def extract_keyframes(
     video_path: Path, out_dir: Path, fps_cap: float = 1.0, max_frames: int = 600
 ) -> list[Keyframe]:

@@ -1,5 +1,11 @@
 """Pipeline orchestrator: Capture Session -> Workflow Graph.
 
+Where the narration comes from, in order of precedence: Auto Record's transcript;
+a script the user supplied (`CaptureSession.script_text` — skips Whisper, see
+scriptalign); the spoken words. A recording with neither opens in the editor with
+empty scenes — the pipeline never writes narration itself; that is the editor's
+Generate button, pressed by the user.
+
 Stages (media -> whisper -> merge -> extract) each get a Job row keyed
 (session_id, stage, version) so re-runs are idempotent — a stage already `done`
 for this version is skipped, and the graph is upserted by (project, version) so a
@@ -16,6 +22,7 @@ from sqlalchemy import func, select
 
 from app.config import get_settings
 from app.db import SessionLocal, init_db
+from app.editspec import spoken_text
 from app.models import (
     AutoRecordRun,
     CaptureSession,
@@ -32,6 +39,8 @@ from worker.pipeline.narrate import narrate_steps
 from worker.pipeline.progress import Heartbeat, Reporter, fmt_clock
 from worker.pipeline.providers import Transcript as TranscriptData
 from worker.pipeline.providers import Word, transcribe
+from worker.pipeline.scriptalign import parse_script, script_steps, script_text
+from worker.pipeline.scriptvision import align_starts
 from worker.pipeline.segment import segment
 from worker.pipeline.segment_auto import segment_auto
 
@@ -140,6 +149,8 @@ def run_pipeline(session_id: str, token: str | None = None) -> dict[str, Any]:
         if auto_run is not None:
             auto_run.status = "processing"
             db.commit()
+        # A user-written narration script (recordings without a voiceover).
+        script_lines = [] if is_auto else parse_script(sess.script_text or "")
 
         # ---- media stage: ffmpeg keyframes + audio demux ---------------------
         job = _job(db, session_id, "media", version)
@@ -164,6 +175,9 @@ def run_pipeline(session_id: str, token: str | None = None) -> dict[str, Any]:
                 with Heartbeat(Job, job.id):
                     if is_auto:
                         _write_user_transcript(db, sess, auto_run.transcript_text if auto_run else "")
+                    elif script_lines:
+                        # A supplied script wins over whatever is on the audio track.
+                        _write_user_transcript(db, sess, spoken_text(script_text(script_lines)))
                     else:
                         _run_whisper(db, sess, report)
                 _finish(db, job, "Transcript ready")
@@ -196,8 +210,10 @@ def run_pipeline(session_id: str, token: str | None = None) -> dict[str, Any]:
         # Apply trim — keep-ranges (from split/delete) take precedence, else a single
         # in/out window. Keep only events/keyframes/words inside the kept region(s).
         keep = sess.keep_ranges_json
+        spans: list[tuple[float, float]] | None = None  # kept source windows, seconds
         if keep:
             rngs = [(a / 1000.0, b / 1000.0) for a, b in keep if b > a]
+            spans = rngs
             in_keep = lambda t: any(a <= t <= b for a, b in rngs)  # noqa: E731
             events = [e for e in events if in_keep(e["t_ms"] / 1000.0)]
             keyframes = [(t, k) for (t, k) in keyframes if in_keep(t)]
@@ -209,8 +225,11 @@ def run_pipeline(session_id: str, token: str | None = None) -> dict[str, Any]:
             keyframes = [(t, k) for (t, k) in keyframes if t0 / 1000.0 <= t <= t1 / 1000.0]
             transcript.words = [w for w in transcript.words if t0 / 1000.0 <= w.t_start <= t1 / 1000.0]
             duration = (t1 - t0) / 1000.0
+            spans = [(t0 / 1000.0, t1 / 1000.0)]
         else:
             duration = _duration_s(sess, events, keyframes, transcript)
+        spans = spans or [(0.0, duration)]
+        has_clicks = sess.telemetry == "present" and any(e["type"] == "click" for e in events)
 
         if is_auto:
             # Project the agent's decision log onto steps (timing from telemetry
@@ -228,9 +247,33 @@ def run_pipeline(session_id: str, token: str | None = None) -> dict[str, Any]:
             )
             for cand, narr in zip(candidate_steps, narrations):
                 cand["narration_span"] = narr
-        else:
+        elif script_lines and has_clicks:
+            # Clicks are real step boundaries (and carry the zoom targets): keep
+            # them and spread the script across those steps, verbatim.
             candidate_steps = segment(
                 events, transcript, keyframes, screenshots_by_seq, duration, sess.telemetry
+            )
+            with Heartbeat(Job, job.id):
+                narrations = narrate_steps(candidate_steps, [], script_text(script_lines))
+            for cand, narr in zip(candidate_steps, narrations):
+                cand["narration_span"] = narr
+        elif script_lines:
+            # No clicks to segment on: the script defines the scenes, and each
+            # line is placed on the video (see scriptalign for the layering).
+            with Heartbeat(Job, job.id):
+                cuts = _scene_cuts(db, sess, spans)
+                llm_starts = align_starts(script_lines, keyframes, cuts, spans[-1][1])
+            candidate_steps = script_steps(script_lines, spans, keyframes, cuts, llm_starts)
+        else:
+            # Neither speech nor clicks: segment on real screen changes. The
+            # scenes open empty in the editor — narration is written only when
+            # the user asks for it there (Generate / Apply script).
+            speechless = not has_clicks and not transcript.words
+            with Heartbeat(Job, job.id):
+                cuts = _scene_cuts(db, sess, spans) if speechless else []
+            candidate_steps = segment(
+                events, transcript, keyframes, screenshots_by_seq, duration, sess.telemetry,
+                cuts=cuts,
             )
         _finish(db, job, f"Found {len(candidate_steps)} steps")
 
@@ -307,14 +350,34 @@ def run_pipeline(session_id: str, token: str | None = None) -> dict[str, Any]:
 
 
 def _write_user_transcript(db, sess: CaptureSession, text: str) -> None:
-    """Auto Record has no spoken audio — persist the user's supplied transcript as
-    the session transcript (provider='user') so downstream titling still works."""
+    """No spoken audio to transcribe (Auto Record, or a supplied script) — persist
+    the user's text as the session transcript (provider='user') so downstream
+    titling still works. No word timings: nothing was spoken on the recording's
+    clock."""
     existing = db.scalar(select(Transcript).where(Transcript.session_id == sess.id))
     if existing:
         db.delete(existing)
         db.commit()
     db.add(Transcript(session_id=sess.id, words_json=[], text=text or "", provider="user"))
     db.commit()
+
+
+def _scene_cuts(db, sess: CaptureSession, spans: list[tuple[float, float]]) -> list[float]:
+    """Screen-change times inside the kept video. Reads the 540p proxy when there
+    is one (a fraction of the decode); best-effort — no video or an ffmpeg error
+    is simply no cuts."""
+    asset = None
+    for kind in ("proxy", "raw_video"):
+        asset = db.scalar(
+            select(MediaAsset).where(MediaAsset.session_id == sess.id, MediaAsset.kind == kind)
+        )
+        if asset:
+            break
+    path = store.fetch(asset.storage_key) if asset else None
+    if path is None:
+        return []
+    cuts = media_stage.detect_scene_cuts(path)
+    return [c for c in cuts if any(a < c < b for a, b in spans)]
 
 
 # --------------------------------------------------------------------------- #

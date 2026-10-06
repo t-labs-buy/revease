@@ -15,6 +15,7 @@ Callers keep their own prompts and parsing; they only swap the transport.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from app.config import get_settings
 
@@ -69,6 +70,59 @@ def complete(system: str, prompt: str, *, max_tokens: int = 16000, timeout: floa
             json={"model": s.openrouter_model, "max_tokens": min(max_tokens, OPENROUTER_MAX_TOKENS),
                   "temperature": 0.2,
                   "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}]},
+            timeout=timeout,
+        )
+        r.raise_for_status()
+        choice = r.json()["choices"][0]
+        if choice.get("finish_reason") == "length":
+            raise ValueError("model output was truncated (max_tokens reached) — try again")
+        return choice["message"]["content"] or ""
+    raise NoLLMConfigured("no AI key configured (set REFRACT_ANTHROPIC_API_KEY or REFRACT_OPENROUTER_API_KEY)")
+
+
+def complete_vision(
+    system: str, parts: list[str | bytes], *, max_tokens: int = 16000, timeout: float = 180
+) -> str:
+    """`complete` for a prompt that interleaves text (str) and JPEG images
+    (bytes), in order. Same contract: NoLLMConfigured without a key, ValueError
+    when the reply was cut off."""
+    import base64
+
+    s = get_settings()
+    if s.anthropic_api_key:
+        import anthropic
+
+        content: list[Any] = [
+            {"type": "text", "text": p}
+            if isinstance(p, str)
+            else {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
+                                              "data": base64.b64encode(p).decode("ascii")}}
+            for p in parts
+        ]
+        client = anthropic.Anthropic(api_key=s.anthropic_api_key, timeout=timeout)
+        msg = client.messages.create(
+            model=s.anthropic_model, max_tokens=max_tokens, thinking={"type": "adaptive"},
+            system=system, messages=[{"role": "user", "content": content}],
+        )
+        if msg.stop_reason == "max_tokens":
+            raise ValueError("model output was truncated (max_tokens reached) — try again")
+        return "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
+    if s.openrouter_api_key:
+        import httpx
+
+        content = [
+            {"type": "text", "text": p}
+            if isinstance(p, str)
+            else {"type": "image_url",
+                  "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(p).decode("ascii")}}
+            for p in parts
+        ]
+        r = httpx.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={"Authorization": f"Bearer {s.openrouter_api_key}", "Content-Type": "application/json"},
+            json={"model": s.openrouter_model, "max_tokens": min(max_tokens, OPENROUTER_MAX_TOKENS),
+                  "temperature": 0.2,
+                  "messages": [{"role": "system", "content": system}, {"role": "user", "content": content}]},
             timeout=timeout,
         )
         r.raise_for_status()

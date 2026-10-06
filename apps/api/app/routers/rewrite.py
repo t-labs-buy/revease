@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import CurrentUser
 from app.db import get_session
+from app.editspec import spoken_text
 from app.ownership import owned_project
 from app.rewrite import generate_script, rewrite_lines, suggest_zooms_with_source
 
@@ -48,7 +49,9 @@ def rewrite(
     if not payload.lines:
         return RewriteOut(lines=[])
     try:
-        return RewriteOut(lines=rewrite_lines(payload.lines, payload.instruction))
+        # Pause markers are timing, not words: the model would read them as text.
+        lines = [spoken_text(ln) for ln in payload.lines]
+        return RewriteOut(lines=rewrite_lines(lines, payload.instruction))
     except Exception as e:  # surface a clean message to the editor
         raise HTTPException(status_code=502, detail=f"AI rewrite failed: {e}")
 
@@ -61,7 +64,10 @@ def generate(
     if not payload.scenes:
         return RewriteOut(lines=[])
     try:
-        return RewriteOut(lines=generate_script(payload.scenes, payload.title, payload.instruction))
+        scenes = [
+            {**sc, "narration": spoken_text(str(sc.get("narration") or ""))} for sc in payload.scenes
+        ]
+        return RewriteOut(lines=generate_script(scenes, payload.title, payload.instruction))
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"AI script generation failed: {e}")
 

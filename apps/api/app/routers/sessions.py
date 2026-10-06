@@ -31,6 +31,7 @@ from app.schemas import (
     SessionCreate,
     SessionDetail,
     SessionOut,
+    SessionScript,
     SessionStatus,
     SessionTrim,
     UploadTargetOut,
@@ -74,6 +75,7 @@ def create_session(
         telemetry="absent",
         status="created",
         viewport_json=payload.viewport.model_dump() if payload.viewport else None,
+        script_text=(payload.script or "").strip() or None,
     )
     db.add(sess)
     db.commit()
@@ -207,6 +209,24 @@ def reprocess_session(
     return sess
 
 
+@router.put("/{session_id}/script", response_model=SessionOut)
+def set_script(
+    session_id: str, payload: SessionScript, user: CurrentUser, db: Session = Depends(get_session)
+) -> CaptureSession:
+    """Set (or, with an empty string, clear) the narration script and re-run
+    understanding, which rebuilds the scenes around it. Refused while a run is
+    live for the same reason as reprocess — and so the script a running pipeline
+    read can't change underneath it."""
+    sess = owned_session(db, user, session_id)
+    if _pipeline_running(db, sess.id):
+        raise HTTPException(status_code=409, detail="this recording is still being processed")
+    sess.script_text = payload.script.strip() or None
+    db.commit()
+    db.refresh(sess)
+    enqueue_understanding(sess.id)
+    return sess
+
+
 def _pipeline_running(db: Session, session_id: str) -> bool:
     """A stage is running with a fresh heartbeat (see worker progress.Heartbeat)."""
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=get_settings().pipeline_stale_after_s)
@@ -264,6 +284,7 @@ def get_session_detail(
     detail = SessionDetail.model_validate(sess)  # assets filled from the relationship
     detail.event_count = event_count or 0
     detail.poster = _poster_for(db, sess.id)
+    detail.script = sess.script_text
     return detail
 
 

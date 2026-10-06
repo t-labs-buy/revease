@@ -8,7 +8,7 @@ import json
 import re
 import logging
 
-from app.llm import complete, has_llm, provider_name
+from app.llm import complete, complete_vision, has_llm, provider_name
 from app.tracing import observe
 
 log = logging.getLogger("refract.rewrite")
@@ -139,19 +139,49 @@ def _part_note(start: int, batch: list, total: int) -> str:
     return f"\n(These are scenes {start + 1}-{start + len(batch)} of {total}; keep the style consistent.)\n"
 
 
+GEN_FRAMES_NOTE = (
+    "\n\nEach scene below is followed by a frame from the recording at that scene. Narrate "
+    "what the frame shows — name the pages, buttons and fields you can actually read — and "
+    "never describe UI that is not visible. A scene's \"target\" may be a generic placeholder "
+    "(\"Screen 3\") when the recording had no clicks or speech; trust the frame over it."
+)
+# Frames are heavy: fewer scenes per call keeps each call inside AI_DEADLINE_S.
+FRAMES_BATCH = 12
+
+
+def _gen_with_frames(batch: list[dict], prompt: str) -> str:
+    """One Generate call that also shows the model each scene's frame — the
+    only way to narrate a recording that had no clicks and no speech. Scenes
+    whose frame can't be loaded are simply described in text."""
+    from app.frames import frame_jpeg
+
+    parts: list[str | bytes] = [prompt]
+    for i, sc in enumerate(batch):
+        img = frame_jpeg(sc.get("screenshot"))
+        if img is not None:
+            parts += [f"Frame for scene {i + 1}:", img]
+    return complete_vision(GEN_SYSTEM + GEN_FRAMES_NOTE, parts, max_tokens=16000, timeout=AI_DEADLINE_S)
+
+
 @observe(name="ai-generate-script")
 def generate_script(scenes: list[dict], title: str = "Product demo", instruction: str | None = None) -> list[str]:
     """Write a coherent narration line for each scene (using its target/action + any
-    existing note as context)."""
+    existing note as context, and its frame when the editor sends `screenshot`).
+    Runs only when the user presses Generate — the pipeline never calls this."""
     if not scenes:
         return []
     if not has_llm():
         raise RuntimeError("no AI key configured (set REFRACT_ANTHROPIC_API_KEY or REFRACT_OPENROUTER_API_KEY in .env)")
+    with_frames = any(sc.get("screenshot") for sc in scenes)
+    text_only = [{k: v for k, v in sc.items() if k != "screenshot"} for sc in scenes]
 
     def work(start: int, batch: list[dict]) -> list[str]:
-        return _call_claude(GEN_SYSTEM, _gen_prompt(batch, title, instruction) + _part_note(start, batch, len(scenes)), len(batch))
+        prompt = _gen_prompt(text_only[start:start + len(batch)], title, instruction) + _part_note(start, batch, len(scenes))
+        if with_frames:
+            return _parse(_gen_with_frames(batch, prompt), len(batch))
+        return _call_claude(GEN_SYSTEM, prompt, len(batch))
 
-    results = _run_batches(scenes, work)
+    results = _run_batches(scenes, work, size=FRAMES_BATCH if with_frames else BATCH)
     if all(r is None for _, _, r in results):
         raise RuntimeError("the AI did not answer in time — try again")
     lines: list[str] = []

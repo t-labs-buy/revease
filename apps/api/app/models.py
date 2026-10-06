@@ -133,6 +133,10 @@ class CaptureSession(Base):
     # message carries the same token and is dropped; a new request (re-trim,
     # reprocess) carries a new one and waits for the running one to finish.
     pipeline_token: Mapped[str | None] = mapped_column(String, nullable=True)
+    # A narration script the user supplied (recordings without a voiceover).
+    # When set it replaces transcription: the pipeline aligns it to the video
+    # (worker scriptalign) instead of running Whisper.
+    script_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     project: Mapped[Project] = relationship(back_populates="sessions")

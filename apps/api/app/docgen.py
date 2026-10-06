@@ -19,6 +19,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from app.editspec import spoken_text
 from app.schemas import DocV2
 from app.storage import store
 
@@ -92,7 +93,7 @@ def build_document_v2(
     steps = graph_json.get("steps", [])
     doc = write_document_fallback(
         project_title=project_title or graph_json.get("title") or "Workflow",
-        transcript_text=" ".join((s.get("narration") or "").strip() for s in steps).strip(),
+        transcript_text=spoken_text(" ".join((s.get("narration") or "") for s in steps)),
         steps=steps,
         graph_version=graph_json.get("version"),
     )

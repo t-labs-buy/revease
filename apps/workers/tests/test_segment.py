@@ -72,3 +72,19 @@ def test_zero_duration_and_single_click_ok():
     steps = segment(_clicks(0), Transcript(), [], {}, 0.0, "present")
     assert len(steps) == 1
     assert steps[0]["t_start"] == 0.0 and steps[0]["t_end"] == 0.0
+
+
+def test_scene_cuts_drive_boundaries_when_supplied():
+    kfs = [(float(t), f"f{t}.jpg") for t in range(0, 60)]
+    # 12.0 and 12.5 are one scene (too close); 58.0 is too near the end
+    steps = segment([], Transcript(), kfs, {}, 60.0, "absent", cuts=[12.0, 12.5, 30.0, 58.0])
+    assert [(s["t_start"], s["t_end"]) for s in steps] == [(0.0, 12.0), (12.0, 30.0), (30.0, 60.0)]
+    assert steps[1]["screenshot"] == "f13.jpg"  # a beat after the cut, not the transition frame
+    assert all(s["narration_span"] == "" for s in steps)
+
+
+def test_scene_cuts_are_capped_by_merging_the_shortest_scenes():
+    kfs = [(float(t), f"f{t}.jpg") for t in range(0, 300)]
+    steps = segment([], Transcript(), kfs, {}, 300.0, "absent", cuts=[float(t) for t in range(3, 297, 3)])
+    assert len(steps) == 20 and steps[0]["t_start"] == 0.0 and steps[-1]["t_end"] == 300.0
+    assert all(a["t_end"] == b["t_start"] for a, b in zip(steps, steps[1:]))

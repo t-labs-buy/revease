@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.config import get_settings
-from app.editspec import detect_filler, effective_script, tokenize
+from app.editspec import detect_filler, effective_script, spoken_text, tokenize
 from app.schemas import DocV2, clean_text
 from app.tracing import observe
 
@@ -101,7 +101,7 @@ def _sentence_case(s: str) -> str:
 def _clean_narration(text: str) -> str:
     """Struck fillers, capitalised, terminal punctuation — the same cleanup the
     video editor applies by default, so the doc and the voiceover agree."""
-    words = tokenize(text)
+    words = tokenize(spoken_text(text))  # pause markers are timing, not prose
     kept = effective_script(words, detect_filler(words))
     kept = _sentence_case(kept)
     if kept and kept[-1] not in ".!?":

@@ -5,8 +5,9 @@ steps. Pure functions over plain data so they are exhaustively unit-testable.
   target/bbox, its nearest keyframe, and the transcript span covering it. Leading
   narration (before the first click) attaches to step 1; trailing narration (after
   the last click) attaches to the final step.
-- telemetry absent: fall back to transcript sentences, else scene keyframes,
-  else one whole-session step.
+- telemetry absent: fall back to transcript sentences, else scenes (detected
+  screen changes when the caller supplies `cuts`, evenly sampled keyframes
+  otherwise), else one whole-session step.
 """
 
 from __future__ import annotations
@@ -100,6 +101,7 @@ def segment(
     screenshots_by_seq: dict[int, str],
     duration_s: float,
     telemetry: str,
+    cuts: list[float] | None = None,
 ) -> list[dict[str, Any]]:
     clicks = sorted(
         [e for e in events if e.get("type") == "click"], key=lambda e: e.get("t_ms", 0)
@@ -114,7 +116,7 @@ def segment(
         return _split_silence_gaps(steps, transcript, keyframes)
 
     if keyframes:
-        return _segment_by_scenes(keyframes, duration_s)
+        return _segment_by_scenes(keyframes, duration_s, cuts)
 
     return [
         {
@@ -218,23 +220,48 @@ def _segment_by_transcript(
 
 
 MAX_SCENE_STEPS = 20
+# Screen changes closer together than this are one scene (a page that loads in
+# two paints, a menu opening then closing).
+MIN_SCENE_S = 3.0
+
+
+def scene_bounds(start: float, duration_s: float, cuts: list[float]) -> list[float]:
+    """Scene start times for a speechless recording, from detected screen
+    changes: `start`, then each cut at least MIN_SCENE_S after the previous
+    boundary and before the end. Over MAX_SCENE_STEPS, the shortest scene is
+    merged into its neighbour until it fits."""
+    bounds = [start]
+    for c in sorted(cuts):
+        if c - bounds[-1] >= MIN_SCENE_S and duration_s - c >= MIN_SCENE_S:
+            bounds.append(c)
+    while len(bounds) > MAX_SCENE_STEPS:
+        ends = bounds[1:] + [duration_s]
+        i = min(range(len(bounds)), key=lambda j: ends[j] - bounds[j])
+        del bounds[i if i > 0 else 1]  # the first boundary is the start of the video
+    return bounds
 
 
 def _segment_by_scenes(
-    keyframes: list[tuple[float, str]], duration_s: float
+    keyframes: list[tuple[float, str]], duration_s: float, cuts: list[float] | None = None
 ) -> list[dict[str, Any]]:
-    """Coarse scene steps for a telemetry-less, speechless upload. Capped at
+    """Coarse scene steps for a telemetry-less, speechless upload. With detected
+    screen changes (`cuts`) the steps follow them; without, capped at
     MAX_SCENE_STEPS by evenly sampling the keyframes — never one step per frame."""
     if not keyframes:
         return []
-    n = min(len(keyframes), MAX_SCENE_STEPS)
-    if n <= 1:
-        picked = [keyframes[0]]
+    bounds = scene_bounds(keyframes[0][0], duration_s, cuts) if cuts else []
+    if len(bounds) > 1:
+        # a beat into the scene: the frame AT a cut is often mid-transition
+        picked = [(t, _nearest_frame(t + 1.0, keyframes)) for t in bounds]
     else:
-        idxs = [round(i * (len(keyframes) - 1) / (n - 1)) for i in range(n)]
-        # de-dupe while preserving order
-        seen: set[int] = set()
-        picked = [keyframes[i] for i in idxs if not (i in seen or seen.add(i))]
+        n = min(len(keyframes), MAX_SCENE_STEPS)
+        if n <= 1:
+            picked = [keyframes[0]]
+        else:
+            idxs = [round(i * (len(keyframes) - 1) / (n - 1)) for i in range(n)]
+            # de-dupe while preserving order
+            seen: set[int] = set()
+            picked = [keyframes[i] for i in idxs if not (i in seen or seen.add(i))]
 
     steps: list[dict[str, Any]] = []
     for i, (t, key) in enumerate(picked):

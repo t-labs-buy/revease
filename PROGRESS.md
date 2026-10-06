@@ -136,6 +136,48 @@ Release-gate checklist (§5) all satisfied except the two provider-key items (Wh
   packed clock. A crop left entirely inside a cut (cropped first, trimmed
   later) packs to zero width and is not drawn — it matches no scene, so it has
   no effect anyway. The main timeline stays on the raw clock by choice.
+## Narration for videos without a voiceover (2026-10-06)
+
+Everything up to the editor is unchanged: record / upload → processing starts
+at once, exactly as before, and processing **never writes narration** (no
+tokens spent without asking). A voiceless recording opens in the editor with
+empty scenes and a panel offering **Generate script** / **Upload script**.
+
+- **Generate script** (editor, on click only). The existing
+  `POST /projects/{id}/generate-script` now takes each scene's `screenshot`;
+  with frames present it calls the model through `llm.complete_vision`
+  (`rewrite._gen_with_frames`, 12 scenes per call) so a silent recording is
+  narrated from what is on screen rather than from "Screen N" labels. Frames
+  are downscaled by `app/frames.py` (Pillow via fpdf2, no new dependency).
+- **Upload script** (editor "Apply script"; also `script` on session create for
+  API callers). Stored on `CaptureSession.script_text`; `PUT
+  /sessions/{id}/script` sets or clears it and re-runs understanding (409
+  while live, like reprocess). The modal waits for the new graph version.
+- **Timing.** A script needs no timestamps: a scene's output length is already
+  its TTS length, so the only thing computed is which stretch of video each
+  line owns. `worker/pipeline/scriptalign.py` (pure): one scene per sentence;
+  starts from a user timestamp (`[0:42]`, `1:02 -`, SRT cues) when written,
+  else the vision model's answer (`scriptvision.align_starts`, up to 48
+  downscaled keyframes), else the line's share of the words; unpinned starts
+  snap to a real screen change. Windows partition the kept video (trim /
+  keep ranges honoured), narration stays verbatim. On a click-telemetry
+  session the click steps are kept and the script is spread across them with
+  the Auto Record aligner (`narrate_steps`, now plan-optional).
+- **Silent upload, no script.** `media.detect_scene_cuts` (one low-res ffmpeg
+  pass, `scene>0.08`) replaces the evenly spaced slices with real screen
+  changes (`segment.scene_bounds`, still capped at 20). No AI call: the
+  scenes stay empty until the user presses Generate or uploads a script.
+- **Pause markers.** `[pause:1.5]` (0.2–3 s) inside a scene's script is one
+  token; `editspec.split_pauses` / `spoken_text` are shared by API, worker and
+  a TS port in `lib/api.ts`. The renderer voices each stretch separately and
+  joins them with silence (`_paused_step_audio`), captions go quiet during the
+  pause, docs / titles / rewrite prompts see the prose only. A script without
+  markers takes the exact old path, so existing clip hashes are unchanged
+  (render test asserts a pause re-renders only its own scene).
+- Tests: `apps/workers/tests/test_scriptalign.py`, `test_pipeline_script.py`,
+  `test_segment.py` (cuts), `test_render.py` (pause); `apps/api/tests/test_script.py`,
+  `test_llm.py` (Generate with frames).
+
 ## Deployed to ivolve as v3 (2026-09-24)
 
 - Images `reg.ivolve.cloud/ivolve/revease:{api,worker,web}-v3`, built natively on the host.
