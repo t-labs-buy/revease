@@ -383,6 +383,59 @@ export function spokenText(script: string): string {
   return script.replace(PAUSE_RE, " ").trim().split(/\s+/).filter(Boolean).join(" ");
 }
 
+/** Most words a scene of `seconds` can carry at voice `speed` (speed × pace)
+ * before the render would freeze its last frame waiting for the voice. Port of
+ * rewrite.scene_word_budget: ~2.3 words/s (a little under Kokoro's real rate)
+ * after the 0.8 s scene gap. */
+export function sceneWordBudget(seconds: number, speed = 1): number {
+  return Math.max(0, Math.floor((seconds - 0.8) * 2.3 * Math.max(0.5, speed)));
+}
+
+/** The whole script against the whole recording. When the total runs over,
+ * every scene overruns at once (a long script spread over short footage) and
+ * per-scene fixes are pointless — the script as a whole has to shrink, or the
+ * recording grow. `ratio` is how much of each line can stay. */
+export function scriptFit(spec: EditSpec): { words: number; budget: number; ratio: number } {
+  let words = 0;
+  let budget = 0;
+  const speed = (spec.voice.speed || 1) * Math.min(1.5, Math.max(1, spec.pace ?? 1));
+  for (const seg of spec.segments) {
+    if (seg.skipped) continue;
+    const kept = seg.words.filter((_, i) => !seg.removed.includes(i));
+    const n = kept.filter((w) => pauseSeconds(w) === null).length;
+    if (!n) continue;
+    const pauseS = kept.reduce((t, w) => t + (pauseSeconds(w) ?? 0), 0);
+    words += n;
+    budget += sceneWordBudget((seg.source_end_ms - seg.source_start_ms) / 1000 - pauseS, speed);
+  }
+  return { words, budget, ratio: words ? Math.min(1, budget / words) : 1 };
+}
+
+/** Spoken length of a script at ~2.6 words/s (what estimateOutputMs assumes). */
+export function spokenSeconds(text: string, speed = 1): number {
+  const n = spokenText(text).split(/\s+/).filter(Boolean).length;
+  return n / (2.6 * Math.max(0.5, speed));
+}
+
+/** Whether a scene's script runs past its footage — the render would then hold
+ * the last frame while the voice finishes. Pause markers eat footage time
+ * rather than words, so they come off the budget first. Returns null when the
+ * line fits (or the scene is skipped / silent / on the original voice). */
+export function sceneOverrun(
+  seg: EditSegment,
+  spec: EditSpec,
+): { words: number; budget: number } | null {
+  if (seg.skipped || spec.voice.use_original) return null;
+  const kept = seg.words.filter((_, i) => !seg.removed.includes(i));
+  const words = kept.filter((w) => pauseSeconds(w) === null).length;
+  if (words === 0) return null;
+  const pauseS = kept.reduce((t, w) => t + (pauseSeconds(w) ?? 0), 0);
+  const speed = (spec.voice.speed || 1) * Math.min(1.5, Math.max(1, spec.pace ?? 1));
+  const seconds = (seg.source_end_ms - seg.source_start_ms) / 1000 - pauseS;
+  const budget = sceneWordBudget(seconds, speed);
+  return words > budget ? { words, budget } : null;
+}
+
 /** Approximate AI-generated output duration (ms) from an edit-spec. Mirrors the
  * render pipeline's timing rules exactly:
  *  - silent scene → full source length ÷ pace (same as a narrated scene)
@@ -814,6 +867,7 @@ export async function generateScript(
     action?: string;
     narration?: string;
     seconds?: number;
+    max_words?: number; // hard cap so the line fits the footage (see sceneWordBudget)
     screenshot?: string | null; // the scene's frame: the model then narrates what it sees
   }[],
   title: string,

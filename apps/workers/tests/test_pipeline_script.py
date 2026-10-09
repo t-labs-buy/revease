@@ -118,3 +118,4 @@ def test_silent_upload_without_script_follows_screen_changes_and_stays_empty(mon
         assert all(s["narration"] == "" for s in steps)
     finally:
         db.close()
+

@@ -16,12 +16,15 @@ import {
   getVideo,
   pauseSeconds,
   pauseToken,
+  sceneOverrun,
+  scriptFit,
   mediaUrl,
   patchVideo,
   generateScript,
   pollVoiceTrack,
   renderVideo,
   rewriteLines,
+  sceneWordBudget,
   startVoiceTrack,
   suggestZooms,
   uploadMedia,
@@ -50,6 +53,7 @@ import { VoicePanel } from "@/components/VoicePanel";
 import { ProjectAccess } from "@/components/ProjectAccess";
 import { PreviewOverlay } from "@/components/PreviewOverlay";
 import { ApplyScriptModal } from "@/components/ApplyScriptModal";
+import { GenerateScriptModal } from "@/components/GenerateScriptModal";
 import { MediaPanel } from "@/components/media/MediaPanel";
 import { MediaOverlayLayer, MusicPreview } from "@/components/media/MediaOverlayLayer";
 import { TlMediaTrack } from "@/components/media/TlMediaTrack";
@@ -255,6 +259,8 @@ export default function VideoEditor({
   // Shown when the project opened with every scene empty; dismissed by hand
   // or as soon as any scene has narration.
   const [narrationPrompt, setNarrationPrompt] = useState(false);
+  // Generate first asks for a brief (mandatory); this holds the pending call.
+  const [genAsk, setGenAsk] = useState<{ fillEmptyOnly: boolean } | null>(null);
   const [source, setSource] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("Script");
   const [error, setError] = useState<string | null>(null);
@@ -1182,7 +1188,7 @@ export default function VideoEditor({
   }
 
   // Generate narration for scenes with none (using scene targets + the rest as context).
-  async function genScript(fillEmptyOnly: boolean) {
+  async function genScript(fillEmptyOnly: boolean, brief: string) {
     if (!spec || rewriting !== null) return;
     setRewriting("gen");
     setError(null);
@@ -1196,18 +1202,25 @@ export default function VideoEditor({
         action: s.action ?? "",
         narration: eff(s),
         screenshot: silent ? s.screenshot ?? null : null,
-        // on-screen duration → the model budgets ~2-2.5 words/sec so the
-        // narration fits the scene and the output length stays correct
+        // on-screen duration, and the hard word cap it allows at this
+        // project's voice speed × pace — a longer line would freeze the last
+        // frame while the voice finishes (the API enforces the cap)
         seconds: Math.max(
           1,
           Math.round((s.source_end_ms - s.source_start_ms) / 1000),
+        ),
+        max_words: sceneWordBudget(
+          (s.source_end_ms - s.source_start_ms) / 1000,
+          (spec.voice.speed || 1) * Math.min(1.5, Math.max(1, spec.pace ?? 1)),
         ),
       }));
       const lines = await generateScript(
         id,
         scenes,
         spec.title,
-        TONE_INSTR[tone],
+        // the author's brief gives the model the why and the audience; the
+        // scenes only say what happens on screen
+        `${TONE_INSTR[tone]}\n\nAbout this video (from the author — follow it): ${brief}`,
       );
       setSpec((s) => {
         if (!s) return s;
@@ -1392,8 +1405,14 @@ export default function VideoEditor({
   function togglePlay() {
     const v = videoRef.current;
     if (!v) return;
-    if (v.paused) void v.play().catch(() => { });
-    else pausePlayback();
+    // Decide from the editor's `playing`, not `v.paused`: while the conductor
+    // holds a scene's last frame (narration longer than its footage) the video
+    // element IS paused although playback is on — the voice is the clock. Read
+    // there, v.paused turned the Pause button into Play, so the first click
+    // resumed the frozen frame and the line kept advancing; only a second
+    // click paused.
+    if (playing) pausePlayback();
+    else void v.play().catch(() => { });
   }
   function fullscreen() {
     void frameRef.current?.requestFullscreen?.();
@@ -1659,6 +1678,17 @@ export default function VideoEditor({
           onApplied={() => window.location.reload()}
         />
       )}
+      {genAsk && (
+        <GenerateScriptModal
+          projectId={id}
+          onClose={() => setGenAsk(null)}
+          onGenerate={(brief) => {
+            const { fillEmptyOnly } = genAsk;
+            setGenAsk(null);
+            void genScript(fillEmptyOnly, brief);
+          }}
+        />
+      )}
       {showRemoveScript && sessionId && (
         <ApplyScriptModal
           sessionId={sessionId}
@@ -1745,6 +1775,24 @@ export default function VideoEditor({
             )}
             {tab === "Script" && (
               <>
+                {(() => {
+                  // One notice at the top; the affected scenes carry a ⚠ icon.
+                  const fit = scriptFit(spec);
+                  const n = spec.segments.filter((s) => sceneOverrun(s, spec)).length;
+                  if (!n) return null;
+                  const whole = fit.words > fit.budget;
+                  return (
+                    <p className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+                      <strong>
+                        {whole
+                          ? `Script too long for this recording: ${fit.words} words, but the footage carries about ${fit.budget}.`
+                          : `${n} scene${n === 1 ? "" : "s"} ${n === 1 ? "has" : "have"} more script than footage.`}
+                      </strong>{" "}
+                      The picture freezes while the voice finishes on scenes marked ⚠. Shorten those
+                      lines, merge a scene with a neighbour for more footage, or raise the voice speed.
+                    </p>
+                  );
+                })()}
                 {narrationPrompt && spec.segments.every((s) => !eff(s).trim()) && (
                   <div className="rounded-xl border border-[#1E8F8E]/30 bg-[#1E8F8E]/5 px-4 py-3">
                     <div className="flex items-start justify-between gap-2">
@@ -1764,7 +1812,7 @@ export default function VideoEditor({
                     </div>
                     <div className="mt-3 flex flex-wrap gap-2">
                       <button
-                        onClick={() => genScript(true)}
+                        onClick={() => setGenAsk({ fillEmptyOnly: true })}
                         disabled={rewriting !== null}
                         title="The AI looks at each scene's frame and writes one line per scene"
                         className="btn btn-primary btn-sm"
@@ -1828,7 +1876,7 @@ export default function VideoEditor({
                       )}
                     </button>
                     <button
-                      onClick={() => genScript(true)}
+                      onClick={() => setGenAsk({ fillEmptyOnly: true })}
                       disabled={rewriting !== null}
                       title="Write narration for scenes that have none"
                       className="btn btn-secondary btn-sm whitespace-nowrap"
@@ -1903,6 +1951,18 @@ export default function VideoEditor({
                             edited
                           </span>
                         )}
+                        {(() => {
+                          const over = sceneOverrun(seg, spec);
+                          if (!over) return null;
+                          return (
+                            <span
+                              className="cursor-help text-sm text-red-600"
+                              title={`Script too long: ${over.words} words, but this scene's footage carries about ${over.budget} at the current voice speed — the last frame freezes while the voice finishes.`}
+                            >
+                              ⚠
+                            </span>
+                          );
+                        })()}
                         <div className="ml-auto flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
                           <IconBtn
                             title="Edit"

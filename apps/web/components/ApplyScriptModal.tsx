@@ -1,7 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { getSessionDetail, getSessionStatus, setSessionScript } from "@/lib/api";
+import { getSessionDetail, getSessionStatus, setSessionScript, spokenSeconds, spokenText } from "@/lib/api";
+
+const mmss = (s: number) => `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, "0")}`;
 import { ModalShell } from "@/components/EditModals";
 import { ScriptInput } from "@/components/ScriptInput";
 import { Spinner } from "@/components/ui";
@@ -25,6 +27,7 @@ export function ApplyScriptModal({
 }) {
   const remove = mode === "remove";
   const [script, setScript] = useState("");
+  const [recordingS, setRecordingS] = useState(0);
   const [loaded, setLoaded] = useState(false);
   const [phase, setPhase] = useState<"edit" | "waiting">("edit");
   const [message, setMessage] = useState<string | null>(null);
@@ -33,7 +36,10 @@ export function ApplyScriptModal({
 
   useEffect(() => {
     getSessionDetail(sessionId)
-      .then((d) => setScript(d.script ?? ""))
+      .then((d) => {
+        setScript(d.script ?? "");
+        setRecordingS((d.duration_ms ?? 0) / 1000);
+      })
       .catch(() => {})
       .finally(() => setLoaded(true));
   }, [sessionId]);
@@ -130,6 +136,27 @@ export function ApplyScriptModal({
             are kept.
           </p>
           <ScriptInput value={script} onChange={setScript} rows={12} disabled={waiting || !loaded} />
+          {(() => {
+            // Warn before the pipeline runs: a script that needs more voice
+            // time than there is footage freezes the picture for the rest.
+            const voiceS = spokenSeconds(script);
+            if (!recordingS || voiceS < 1) return null;
+            const over = voiceS > recordingS * 1.05;
+            return (
+              <p className={`mt-2 text-xs ${over ? "text-red-600" : "text-[var(--text-3)]"}`}>
+                ≈ {spokenText(script).split(/\s+/).filter(Boolean).length} words · about {mmss(voiceS)} of
+                voice; the recording is {mmss(recordingS)}.
+                {over && (
+                  <>
+                    {" "}
+                    <strong>The script is longer than the video</strong> — the picture will freeze
+                    while the voice finishes. Trim it to roughly {mmss(recordingS)} of speech (~
+                    {Math.floor(recordingS * 2.3)} words) before applying.
+                  </>
+                )}
+              </p>
+            );
+          })()}
         </>
       )}
       <div className="h-4" />

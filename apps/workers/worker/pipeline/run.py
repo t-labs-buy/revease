@@ -231,6 +231,7 @@ def run_pipeline(session_id: str, token: str | None = None) -> dict[str, Any]:
         spans = spans or [(0.0, duration)]
         has_clicks = sess.telemetry == "present" and any(e["type"] == "click" for e in events)
 
+
         if is_auto:
             # Project the agent's decision log onto steps (timing from telemetry
             # events keyed by decision index), then align the transcript across them.
