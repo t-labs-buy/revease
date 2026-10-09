@@ -95,6 +95,9 @@ class Settings(BaseSettings):
     # a constant rate so the encode is bounded. 30 fps is plenty for screen capture.
     media_normalize_fps: int = 30
     media_normalize_preset: str = "veryfast"
+    # source.mp4 is the master every render reads; x264's default (crf 23)
+    # already smeared screen text before the first scene was cut from it.
+    media_normalize_crf: int = 18
     media_normalize_timeout_s: int = 6 * 3600
 
     # --- Media library (editor Media tab) ---

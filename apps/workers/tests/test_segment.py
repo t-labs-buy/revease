@@ -46,8 +46,9 @@ def test_no_clicks_present_flag_falls_back_to_transcript():
 def test_absent_no_transcript_uses_scene_keyframes():
     kfs = [(0.0, "f0.jpg"), (2.5, "f1.jpg")]
     steps = segment([], Transcript(), kfs, {}, 5.0, "absent")
-    assert len(steps) == 2
-    assert steps[0]["screenshot"] == "f0.jpg" and steps[1]["t_end"] == 5.0
+    # 5 s holds one scene of MIN_SCENE_S, not two 2.5 s slivers
+    assert len(steps) == 1
+    assert steps[0]["screenshot"] == "f0.jpg" and steps[0]["t_end"] == 5.0
 
 
 def test_absent_no_data_single_step():
@@ -72,6 +73,18 @@ def test_zero_duration_and_single_click_ok():
     steps = segment(_clicks(0), Transcript(), [], {}, 0.0, "present")
     assert len(steps) == 1
     assert steps[0]["t_start"] == 0.0 and steps[0]["t_end"] == 0.0
+
+
+def test_even_split_keeps_scenes_at_least_min_scene_s():
+    """No cuts on a short silent recording: one keyframe per second must not
+    become one scene per second (0-word budgets); scenes are >= MIN_SCENE_S."""
+    kfs = [(float(t), f"f{t}.jpg") for t in range(0, 18)]
+    steps = segment([], Transcript(), kfs, {}, 18.0, "absent")
+    assert len(steps) == 6
+    assert all(s["t_end"] - s["t_start"] >= 3.0 for s in steps)
+    assert steps[0]["t_start"] == 0.0 and steps[-1]["t_end"] == 18.0
+    # too short for even one full scene: a single step
+    assert len(segment([], Transcript(), kfs[:2], {}, 2.0, "absent")) == 1
 
 
 def test_scene_cuts_drive_boundaries_when_supplied():

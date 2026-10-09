@@ -246,7 +246,10 @@ def _segment_by_scenes(
 ) -> list[dict[str, Any]]:
     """Coarse scene steps for a telemetry-less, speechless upload. With detected
     screen changes (`cuts`) the steps follow them; without, capped at
-    MAX_SCENE_STEPS by evenly sampling the keyframes — never one step per frame."""
+    MAX_SCENE_STEPS by evenly sampling the keyframes — never one step per frame,
+    and never a scene shorter than MIN_SCENE_S: keyframes come one per second,
+    so an 18 s recording with a static screen used to become 18 one-second
+    scenes, each too short to carry a single narrated word."""
     if not keyframes:
         return []
     bounds = scene_bounds(keyframes[0][0], duration_s, cuts) if cuts else []
@@ -254,11 +257,18 @@ def _segment_by_scenes(
         # a beat into the scene: the frame AT a cut is often mid-transition
         picked = [(t, _nearest_frame(t + 1.0, keyframes)) for t in bounds]
     else:
-        n = min(len(keyframes), MAX_SCENE_STEPS)
+        n = min(len(keyframes), MAX_SCENE_STEPS, max(1, int(duration_s // MIN_SCENE_S)))
         if n <= 1:
             picked = [keyframes[0]]
         else:
-            idxs = [round(i * (len(keyframes) - 1) / (n - 1)) for i in range(n)]
+            # scene starts spread evenly over the video's time (not over the
+            # keyframe list, whose last entry would open a one-second tail scene)
+            t0 = keyframes[0][0]
+            span = max(duration_s - t0, 0.0)
+            idxs = [
+                min(range(len(keyframes)), key=lambda j, tt=t0 + i * span / n: abs(keyframes[j][0] - tt))
+                for i in range(n)
+            ]
             # de-dupe while preserving order
             seen: set[int] = set()
             picked = [keyframes[i] for i in idxs if not (i in seen or seen.add(i))]

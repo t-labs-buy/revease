@@ -102,3 +102,11 @@ $("autorec").addEventListener("click", async () => {
   await loadProjects();
   await refreshRecordingUI();
 })();
+
+// Recording quality (encoder bit rate; see offscreen.js QUALITY_BPS). Stored so
+// the offscreen recorder reads it when a capture starts.
+const qualityEl = document.getElementById("quality");
+chrome.storage.local.get("recQuality").then(({ recQuality }) => {
+  qualityEl.value = recQuality === "long" ? "long" : "sharp";
+});
+qualityEl.addEventListener("change", () => chrome.storage.local.set({ recQuality: qualityEl.value }));

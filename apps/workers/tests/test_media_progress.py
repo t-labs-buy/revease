@@ -45,6 +45,22 @@ def test_normalize_reports_progress_caps_fps_and_leaves_no_partial(tmp_path):
     assert fps.stdout.strip() == "30/1"  # 60 fps source bounded to 30
 
 
+@needs_ffmpeg
+def test_normalize_accepts_an_odd_sized_window_share(tmp_path):
+    """A 1850x1053 window share used to fail the media stage ("height not
+    divisible by 2"), leaving the project on the raw WebM. One row is dropped."""
+    src = tmp_path / "odd.avi"
+    subprocess.run(["ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc=size=370x211:rate=10:duration=1",
+                    "-c:v", "rawvideo", "-pix_fmt", "rgb24", str(src)], capture_output=True, check=True)
+    out = tmp_path / "source.mp4"
+    proxy = tmp_path / "proxy.mp4"
+    assert normalize_video(src, out, duration_s=1.0, proxy_out=proxy) == out
+    dims = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                           "stream=width,height", "-of", "csv=p=0", str(out)], capture_output=True, text=True)
+    assert dims.stdout.strip() == "370,210"
+    assert proxy.exists()
+
+
 def _session_with_running_media(heartbeat_age_s: float) -> str:
     db = SessionLocal()
     p = Project(name="dup")

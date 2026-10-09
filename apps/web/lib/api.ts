@@ -1140,11 +1140,26 @@ export const cropActive = (c: CropRegion, atMs: number): boolean =>
 export const activeCrop = (crops: CropRegion[], atMs: number): CropRegion | undefined =>
   crops.find((c) => cropActive(c, atMs));
 
+export type ExportQuality = "standard" | "high" | "best";
+export type ExportResolution = "720p" | "1080p" | "1440p" | "2160p" | "source";
+// The one export control: the frame size. "source" (the default) keeps the
+// recording's own size so nothing is stretched or shrunk; compression is fixed
+// at the "high" tier for every file (quality stays an API-only field).
+export const EXPORT_RESOLUTIONS: { value: ExportResolution; label: string }[] = [
+  { value: "source", label: "Match recording" },
+  { value: "720p", label: "720p" },
+  { value: "1080p", label: "1080p" },
+  { value: "1440p", label: "1440p" },
+  { value: "2160p", label: "4K" },
+];
+
 export interface EditSpec {
   graph_version: number;
   title: string;
   voice: { voice_id: string; speed: number; use_original?: boolean };
   aspect: "16:9" | "9:16" | "1:1";
+  // how the final file is encoded; clips are near-lossless regardless
+  export?: { quality: ExportQuality; resolution: ExportResolution };
   intro: IntroOutroCard;
   outro: IntroOutroCard;
   captions: { enabled: boolean };

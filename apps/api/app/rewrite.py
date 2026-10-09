@@ -54,7 +54,18 @@ def _parse(text: str, n: int) -> list[str]:
     arr = json.loads(t)
     if not isinstance(arr, list) or len(arr) != n:
         raise ValueError(f"expected {n} lines, got {type(arr).__name__} of {len(arr) if isinstance(arr, list) else '?'}")
-    return [str(x).strip() for x in arr]
+    return [_line_of(x) for x in arr]
+
+
+def _line_of(item: object) -> str:
+    """A model sometimes answers in the shape it was asked in — `{"line": …,
+    "max_words": 23}` instead of the bare string — and str() of that object
+    once became a scene's narration. Unwrap it; anything else is text."""
+    if isinstance(item, dict):
+        for key in ("line", "text", "narration"):
+            if isinstance(item.get(key), str):
+                return item[key].strip()
+    return str(item).strip()
 
 
 GEN_SYSTEM = (
@@ -199,31 +210,38 @@ def fit_to_budget(line: str, max_words: int) -> str:
 SHORTEN_SYSTEM = (
     "You tighten narration lines for a TTS voiceover so each fits a hard word limit. "
     "Keep the meaning, the product names and the tone; cut filler and secondary clauses. "
-    "Count the words. Reply with ONLY a JSON array of strings, one per line, same order."
+    "Count the words. Reply with ONLY a JSON array of the shortened lines as plain strings, "
+    "one per line, same order — no objects, no keys, no word counts."
 )
 
 
 def _shorten(lines: list[str], limits: list[int]) -> list[str]:
-    items = [{"line": ln, "max_words": m} for ln, m in zip(lines, limits)]
-    prompt = "Shorten each line to at most its max_words:\n" + json.dumps(items, ensure_ascii=False)
+    # lines and limits as two flat lists: there is no object shape to echo back
+    prompt = (
+        "Lines:\n" + json.dumps(lines, ensure_ascii=False)
+        + "\nWord limit for each line, same order:\n" + json.dumps(limits)
+        + "\nShorten each line to at most its limit."
+    )
     return _call_claude(SHORTEN_SYSTEM, prompt, len(lines))
 
 
-def enforce_budgets(lines: list[str], limits: list[int]) -> list[str]:
+def enforce_budgets(lines: list[str], limits: list[int | None]) -> list[str]:
     """Lines that overran their scene go back once to be shortened, then are
     trimmed at a sentence boundary. Budget-less scenes (limit None) pass through."""
-    over = [i for i, (ln, m) in enumerate(zip(lines, limits)) if m is not None and _word_count(ln) > m]
+    over: list[tuple[int, int]] = [
+        (i, m) for i, (ln, m) in enumerate(zip(lines, limits)) if m is not None and _word_count(ln) > m
+    ]
     if not over:
         return lines
     out = list(lines)
     try:
-        shorter = _shorten([lines[i] for i in over], [limits[i] for i in over])
-        for i, ln in zip(over, shorter):
+        shorter = _shorten([lines[i] for i, _ in over], [m for _, m in over])
+        for (i, _), ln in zip(over, shorter):
             out[i] = ln
     except Exception as e:
         log.warning("shorten pass failed (%s); trimming at sentence boundaries", e)
-    for i in over:
-        out[i] = fit_to_budget(out[i], limits[i])
+    for i, m in over:
+        out[i] = fit_to_budget(out[i], m)
     return out
 
 

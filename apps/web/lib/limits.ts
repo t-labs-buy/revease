@@ -26,6 +26,46 @@ export const RECORD_WARN_MS = MAX_VIDEO_MS - 5 * 60 * 1000;
 
 export const LIMIT_LABEL = `up to ${MAX_VIDEO_MB} MB and ${MAX_VIDEO_MIN} minutes`;
 
+/**
+ * Recording quality = the encoder bit rate MediaRecorder is given. Left unset,
+ * Chrome encodes at ~2.5 Mbps whatever the size, which smears 1080p screen
+ * text before the file ever reaches the server — the softness no export
+ * setting can recover. Sharp text at 1080p wants ~8 Mbps, but the 500 MB cap
+ * then holds only ~8 minutes, so the user picks: sharp and short, or long.
+ * "long" is sized so the full MAX_VIDEO_MIN fits under the size cap.
+ */
+export type RecordQuality = "sharp" | "long";
+export const RECORD_QUALITIES: Record<RecordQuality, { bps: number; label: string; blurb: string }> = {
+  sharp: { bps: 8_000_000, label: "Sharp", blurb: "crisp text, best for demos" },
+  long: {
+    bps: Math.floor((RECORD_STOP_BYTES * 8) / (RECORD_STOP_MS / 1000) / 100_000) * 100_000,
+    label: "Long",
+    blurb: "softer picture, full length",
+  },
+};
+export const DEFAULT_RECORD_QUALITY: RecordQuality = "sharp";
+export const RECORD_AUDIO_BPS = 96_000; // opus; speech needs no more
+
+/** Minutes a recording at `bps` lasts before the size cap stops it, or the
+ * time cap if that comes first. */
+export function recordMinutesAt(bps: number): number {
+  const bySize = (RECORD_STOP_BYTES * 8) / bps / 60;
+  return Math.floor(Math.min(bySize, RECORD_STOP_MS / 60000));
+}
+
+/** getDisplayMedia constraints: the screen's real pixel size and 30 fps as
+ * ideals (Chrome otherwise captures HiDPI screens scaled down and at whatever
+ * frame rate it likes). Ideals never fail a capture; Chrome picks the best it can. */
+export function captureConstraints(): MediaStreamConstraints {
+  const dpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
+  const w = typeof screen !== "undefined" ? screen.width * dpr : 1920;
+  const h = typeof screen !== "undefined" ? screen.height * dpr : 1080;
+  return {
+    video: { frameRate: { ideal: 30 }, width: { ideal: Math.round(w) }, height: { ideal: Math.round(h) } },
+    audio: true,
+  };
+}
+
 const SPLIT_HINT = `Please split it into parts of at most ${MAX_VIDEO_MIN} minutes / ${MAX_VIDEO_MB} MB and upload each part separately.`;
 
 const mb = (b: number) => (b >= 1024 ** 3 ? `${(b / 1024 ** 3).toFixed(2)} GB` : `${Math.round(b / 1024 / 1024)} MB`);

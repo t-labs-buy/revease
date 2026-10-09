@@ -28,12 +28,22 @@ def test_fit_to_budget_drops_whole_sentences_only():
     assert fit_to_budget("Short line.", 5) == "Short line."
 
 
+def test_parse_unwraps_an_echoed_object():
+    """The shorten pass once got `{"line": …, "max_words": 23}` back instead of
+    the string, and the object's repr became the scene's narration."""
+    wrapped = json.dumps([{"line": "Open Integrations, then Test Suites.", "max_words": 23}, "Done."])
+    assert rewrite._parse(wrapped, 2) == ["Open Integrations, then Test Suites.", "Done."]
+    assert rewrite._parse('["a", "b"]', 2) == ["a", "b"]
+
+
 def test_enforce_budgets_shortens_then_trims(monkeypatch):
-    asked: list[dict] = []
+    asked: list[int] = []
 
     def fake_complete(system, prompt, **kw):
-        items = json.loads(prompt.split("\n", 1)[1])
-        asked.extend(items)
+        # "Lines:\n[...]\nWord limit for each line, same order:\n[...]\n…"
+        parts = prompt.split("\n")
+        assert len(json.loads(parts[1])) == len(json.loads(parts[3]))
+        asked.extend(json.loads(parts[3]))
         # obeys for the first, ignores the limit for the second
         return json.dumps(["Open the invoices tab.", "Still far too long a sentence here. And another one."])
 
@@ -41,7 +51,7 @@ def test_enforce_budgets_shortens_then_trims(monkeypatch):
     monkeypatch.setattr(rewrite, "complete", fake_complete)
     lines = ["Open the invoices tab to see every invoice your team has.", "fits", "A very long line indeed, is it not."]
     out = enforce_budgets(lines, [4, None, 5])
-    assert [a["max_words"] for a in asked] == [4, 5]  # only the overruns go back
+    assert asked == [4, 5]  # only the overruns go back
     assert out[0] == "Open the invoices tab."
     assert out[1] == "fits"
     assert out[2] == "Still far too long a sentence here."  # trimmed to a sentence

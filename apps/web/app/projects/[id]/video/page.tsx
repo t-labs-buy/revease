@@ -32,6 +32,8 @@ import {
   type EditElement,
   type EditSegment,
   type EditSpec,
+  EXPORT_RESOLUTIONS,
+  type ExportResolution,
   type PreviewTimeline,
   type PreviewTimelineSegment,
   type RenderJob,
@@ -1222,6 +1224,14 @@ export default function VideoEditor({
         // scenes only say what happens on screen
         `${TONE_INSTR[tone]}\n\nAbout this video (from the author — follow it): ${brief}`,
       );
+      // every line came back empty: the scenes are too short to carry a word
+      // (the API trims to each scene's budget) — say so rather than fill nothing
+      if (lines.every((l) => !l.trim())) {
+        setError(
+          "These scenes are too short to narrate — each needs at least ~1.5 s on screen. Merge scenes, or re-analyse the recording.",
+        );
+        return;
+      }
       setSpec((s) => {
         if (!s) return s;
         const segs = s.segments.map((seg, i) => {
@@ -1634,6 +1644,23 @@ export default function VideoEditor({
             {[1, 1.1, 1.25, 1.5].map((p) => (
               <option key={p} value={p}>
                 {p}× pace
+              </option>
+            ))}
+          </select>
+          <select
+            value={spec.export?.resolution ?? "source"}
+            onChange={(e) =>
+              setSpec({
+                ...spec,
+                export: { quality: "high", ...spec.export, resolution: e.target.value as ExportResolution },
+              })
+            }
+            title="Export resolution — the size of the final video. Match recording keeps the recording's own size (nothing stretched or shrunk). A bigger size can't add detail the recording never had. Changing it re-exports every scene."
+            className="rounded-lg border border-[var(--border)] bg-[var(--card)] px-2 py-1.5 text-xs text-[var(--text-2)]"
+          >
+            {EXPORT_RESOLUTIONS.map((r) => (
+              <option key={r.value} value={r.value}>
+                {r.label}
               </option>
             ))}
           </select>

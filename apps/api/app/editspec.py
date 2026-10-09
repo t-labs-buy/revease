@@ -159,6 +159,11 @@ def build_edit_spec(graph_json: dict[str, Any], viewport: dict[str, int] | None)
         "title": graph_json.get("title", "Workflow"),
         "voice": {"voice_id": "af_sarah", "speed": 1.0, "use_original": False},
         "aspect": "16:9",
+        # export: the final file's frame size ("source" = the recording's own,
+        # so nothing is stretched or shrunk) and how hard it is compressed (the
+        # editor never changes quality; it is fixed at "high"). Clips that feed
+        # the final encode are near-lossless regardless — only this decides the file.
+        "export": {"quality": "high", "resolution": "source"},
         # intro/outro cards and automatic zooms are opt-in: a new project renders
         # the plain recording until the user turns them on in the editor.
         "intro": {"enabled": False, "title": graph_json.get("title", "Workflow"), "duration_ms": 2000},

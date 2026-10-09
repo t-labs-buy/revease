@@ -152,10 +152,13 @@ def normalize_video(
     s = get_settings()
     out_mp4.parent.mkdir(parents=True, exist_ok=True)
     tmp = out_mp4.with_name(out_mp4.stem + ".part.mp4")
+    # A window share can be an odd size (1850x1053): libx264 rejects odd yuv420p
+    # dimensions, so drop at most one row/column rather than fail the whole stage.
     cmd = ["ffmpeg", "-y", "-fflags", "+genpts", "-i", str(src),
+           "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
            "-fps_mode", "cfr", "-r", str(s.media_normalize_fps),
-           "-c:v", "libx264", "-preset", s.media_normalize_preset, "-pix_fmt", "yuv420p",
-           "-threads", str(s.media_threads)]
+           "-c:v", "libx264", "-preset", s.media_normalize_preset, "-crf", str(s.media_normalize_crf),
+           "-pix_fmt", "yuv420p", "-threads", str(s.media_threads)]
     has_a = has_audio(src)
     cmd += ["-c:a", "aac", "-ar", "44100"] if has_a else ["-an"]
     cmd += ["-movflags", "+faststart", str(tmp)]

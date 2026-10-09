@@ -37,6 +37,53 @@ log = logging.getLogger("refract.pipeline.render")
 
 ASPECTS = {"16:9": (1920, 1080), "9:16": (1080, 1920), "1:1": (1080, 1080)}
 FPS = 30
+
+
+def _even(n: float) -> int:
+    return max(2, int(round(n / 2)) * 2)  # yuv420p needs even dimensions
+
+
+def output_dims(aspect: str, short: int) -> tuple[int, int]:
+    """Frame size for `aspect` whose short side is `short` pixels. Both sides
+    are even: "Match recording" can hand us a window share such as 1850x1053,
+    and libx264 refuses an odd yuv420p dimension outright."""
+    short = _even(short)
+    if aspect == "9:16":
+        return (short, _even(short * 16 / 9))
+    if aspect == "1:1":
+        return (short, short)
+    return (_even(short * 16 / 9), short)
+
+
+def export_dims(spec: dict[str, Any], source_dims: tuple[int, int] | None) -> tuple[int, int]:
+    """The export frame from the spec's aspect + export resolution. Pure."""
+    aspect = spec.get("aspect", "16:9")
+    res = str((spec.get("export") or {}).get("resolution") or DEFAULT_RESOLUTION)
+    if res == "source" and source_dims:
+        short = min(max(min(source_dims), 720), 2160)
+    else:
+        short = RESOLUTIONS.get(res, RESOLUTIONS[FALLBACK_RESOLUTION])
+    return output_dims(aspect, short)
+
+
+def export_quality(spec: dict[str, Any]) -> tuple[str, str, str]:
+    """(tier, crf, preset) for the final encode from the spec's export quality."""
+    tier = str((spec.get("export") or {}).get("quality") or DEFAULT_QUALITY)
+    if tier not in QUALITY:
+        tier = DEFAULT_QUALITY
+    return (tier, *QUALITY[tier])
+
+
+def _probe_dims(path: Path) -> tuple[int, int] | None:
+    proc = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height",
+         "-of", "csv=p=0", str(path)], capture_output=True, text=True,
+    )
+    try:
+        w, h = proc.stdout.strip().split(",")[:2]
+        return (int(w), int(h))
+    except (ValueError, AttributeError):
+        return None
 # Every clip that feeds the final concat MUST share one video time base. The
 # concat demuxer (ffmpeg 4.4 on the deploy host) does not rescale between
 # differing time bases: a 30 fps intro (tbn 15360) followed by 25 fps scenes
@@ -57,9 +104,22 @@ DEFAULT_PACE = 1.0  # global tempo, applies uniformly whether a scene has voice 
 # and the next starts on the very next frame, which reads as rushed. The pause is
 # baked into the scene's audio (and thus its timeline slot), so nothing drifts.
 SCENE_GAP_MS = 800
-# Screen recordings are mostly text; the x264 default (crf 23) — applied twice,
-# once per segment and again at concat — smears it. 18 is visually lossless.
-CRF = "18"
+# Screen recordings are mostly text, and every clip here is encoded TWICE: once
+# as a scene (three times with a zoom) and again at the final join. The x264
+# default (crf 23) at each pass smeared it. Intermediates are therefore
+# near-lossless (crf 14 — they only feed the next encode and live in the render
+# cache), and only the FINAL encode decides the file: the user's export quality.
+CRF = "14"
+# Export quality tiers -> (crf, x264 preset) for the final join. A slower preset
+# finds a better encode at the same crf, so "best" costs export time, not just size.
+QUALITY = {"standard": ("20", "veryfast"), "high": ("17", "medium"), "best": ("15", "slow")}
+DEFAULT_QUALITY = "high"
+# Export resolutions by SHORT side; the aspect decides the frame. "source" takes
+# the recording's own short side (clamped to the table's range) — the only way a
+# 1440p/4K capture keeps its detail, and pointless for a 720p one.
+RESOLUTIONS = {"720p": 720, "1080p": 1080, "1440p": 1440, "2160p": 2160}
+DEFAULT_RESOLUTION = "source"
+FALLBACK_RESOLUTION = "1080p"  # no source dims, or a spec from before this field
 
 # Auto-zoom density: zooming every scene makes the whole video feel like it never
 # stops moving. Keep at least this much SOURCE time between zoom-ins (the output
@@ -861,7 +921,7 @@ def _exact_audio(clip: Path, slot_ms: int) -> Path:
 
 
 def _join_cmd(video_list: Path, audio_list: Path, ov_inputs: list[str], ov_graph: str,
-              total_ms: int, out: Path) -> list[str]:
+              total_ms: int, out: Path, crf: str = CRF, preset: str = "veryfast") -> list[str]:
     """ffmpeg command for the final join: video from the clip concat (input 0),
     Media-tab overlays composited in the same encode (inputs 1..n, see
     _overlay_graph), and audio from the exact-length PCM concat — appended
@@ -871,7 +931,7 @@ def _join_cmd(video_list: Path, audio_list: Path, ov_inputs: list[str], ov_graph
     return ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(video_list), *ov_inputs,
             "-f", "concat", "-safe", "0", "-i", str(audio_list),
             *video_map, "-map", f"{a_idx}:a",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", CRF, "-pix_fmt", "yuv420p",
+            "-c:v", "libx264", "-preset", preset, "-crf", crf, "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-t", f"{total_ms / 1000:.3f}", str(out)]
 
 
@@ -1063,7 +1123,6 @@ def run_render(render_job_id: str) -> dict:
 
         vp = db.get(VideoProject, job.video_project_id)
         spec = vp.edit_spec_json
-        dims = ASPECTS.get(spec.get("aspect", "16:9"), ASPECTS["16:9"])
         captions = bool(spec.get("captions", {}).get("enabled", True))
         voice = spec.get("voice", {"voice_id": "alloy", "speed": 1.0})
         font = _font()
@@ -1075,6 +1134,8 @@ def run_render(render_job_id: str) -> dict:
             .order_by(WorkflowGraphRow.version.desc())
         )
         src_video, src_session_id = _find_source_video(db, vp.project_id)
+        dims = export_dims(spec, _probe_dims(src_video) if src_video else None)
+        quality, final_crf, final_preset = export_quality(spec)
 
         segs = spec.get("segments", [])
         # skip: scenes flagged "skipped" are dropped from the render entirely.
@@ -1259,14 +1320,16 @@ def run_render(render_job_id: str) -> dict:
         music = spec.get("music") or {}
         music_src = _music_source(music, work)
         overlays = [o for o in spec.get("overlays") or [] if isinstance(o, dict) and o.get("media_key")]
-        overall = _sha([c.name for c in clips], music, overlays)
+        overall = _sha([c.name for c in clips], music, overlays, quality)
         out_key = f"renders/{vp.id}/final_{overall}.mp4"
         out_path = store.local_path(out_key)
         ov_inputs, ov_graph = _overlay_graph(overlays, placed, dims)
-        ok = _run(_join_cmd(list_file, audio_list, ov_inputs, ov_graph, clock, out_path))
+        ok = _run(_join_cmd(list_file, audio_list, ov_inputs, ov_graph, clock, out_path,
+                            crf=final_crf, preset=final_preset))
         if not ok and ov_graph:
             log.warning("overlay pass failed; exporting without overlays")
-            ok = _run(_join_cmd(list_file, audio_list, [], "", clock, out_path))
+            ok = _run(_join_cmd(list_file, audio_list, [], "", clock, out_path,
+                                crf=final_crf, preset=final_preset))
         if not ok:
             raise RuntimeError("concat failed")
 
@@ -1295,6 +1358,8 @@ def run_render(render_job_id: str) -> dict:
             "inserts": inserts_done,
             "overlays": len(overlays),
             "aspect": spec.get("aspect"),
+            "quality": quality,
+            "dims": list(dims),
         }
         report(0.96, "Saving the video…")
         store.commit(out_key)
