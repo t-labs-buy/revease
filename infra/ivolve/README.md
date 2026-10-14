@@ -2,8 +2,10 @@
 
 The live deployment. Host `13.204.129.141` (`ssh ivolve_cloud`), deploy root
 `~/apps/revease`. **URL: http://13.204.129.141:8020** (see "Why one port" for who
-can reach it). Running **v8** (2026-09-28; v3 since 2026-09-24): object storage (MinIO), Postgres,
-separate media/light workers, live progress, AI documentation.
+can reach it). Running **v8** (rebuilt 2026-10-14 from `feature/usage-tracking`; first v8 2026-09-28;
+v3 since 2026-09-24): object storage (MinIO), Postgres, separate media/light workers, live
+progress, AI documentation, Usage Tracker spans. The first v8 images are kept on the host as
+`*-v8-prev` (`TAG=v8-prev docker compose up -d` to roll back; local tags, not in the registry).
 
 This directory is the source of truth for everything except `.env` (secrets) and
 `src/` (the rsynced source). The deploy root mirrors it:
@@ -220,6 +222,10 @@ docker compose up -d --remove-orphans && docker exec revease-edge nginx -s reloa
 
 ## Verified
 
+- **2026-10-14 (v8 rebuild)**: narration from the whole recording, merge scenes and the export
+  changes (PRs #6–#8) plus Usage Tracker. Health and web through the edge; api, worker and
+  worker-light all build the usage provider against `https://usagetracker.ivolve.cloud`; the
+  server key returned 200 from the host before the switch.
 - **2026-09-24 (v3)**: health and web through the edge; presigned media through
   `/s3/` (307 → 200) and video Range (206); both workers on their queues, beat
   running; the in-flight 29-minute recording resumed on the new media worker,
@@ -248,6 +254,16 @@ docker compose exec -T api python -c "from app.llm import provider_name; print(p
 
 Spend and limit: https://openrouter.ai/settings/keys (the admin Usage page shows
 it too once `REFRACT_OPENROUTER_MANAGEMENT_KEY` is set).
+
+## Usage Tracker
+
+Business usage spans (`apps/api/app/usage_tracking.py`) go to `https://usagetracker.ivolve.cloud`,
+configured only by the `OTEL_*` lines in `.env` (all three app containers load it via `env_file`).
+Write the key literally in `OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer <key>`: compose does
+not expand `${UT_API_KEY}` from inside an env_file. `deployment.environment.name` must match the
+key's environment in Usage Tracker exactly (`development` for a `ut_dev_` key). Check a key from
+the host with an empty POST to `/v1/traces` (200 = accepted, 401 = rejected); turn tracking off
+with `OTEL_SDK_DISABLED=true` + `docker compose up -d`.
 
 ## Not configured
 
