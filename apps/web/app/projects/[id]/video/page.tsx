@@ -12,6 +12,8 @@ import {
   fetchPreviewTimeline,
   getRender,
   getSessionDetail,
+  getSessionStatus,
+  setSessionScript,
   getTranscript,
   getVideo,
   pauseSeconds,
@@ -21,6 +23,7 @@ import {
   mediaUrl,
   patchVideo,
   generateScript,
+  type ScriptMode,
   pollVoiceTrack,
   renderVideo,
   rewriteLines,
@@ -257,7 +260,6 @@ export default function VideoEditor({
   // rebuild them on the server; AI-written or typed narration sits on the
   // recording's own scenes and is just emptied locally.
   const [hasUploadedScript, setHasUploadedScript] = useState(false);
-  const [showRemoveScript, setShowRemoveScript] = useState(false);
   // Shown when the project opened with every scene empty; dismissed by hand
   // or as soon as any scene has narration.
   const [narrationPrompt, setNarrationPrompt] = useState(false);
@@ -278,7 +280,7 @@ export default function VideoEditor({
   const [rate, setRate] = useState(1);
   const [tlZoom, setTlZoom] = useState(1);
   const [rewriting, setRewriting] = useState<
-    null | "all" | "enhance" | "gen" | number
+    null | "all" | "enhance" | "gen" | "remove" | number
   >(null);
   const [tone, setTone] = useState<Tone>("Professional");
   const [zoomBusy, setZoomBusy] = useState(false);
@@ -1182,6 +1184,32 @@ export default function VideoEditor({
 
   // One-click enhance: tighten the whole script + turn on captions. Left
   // unsaved on purpose — the Discard / Keep changes bar is the way out of it,
+  // Remove an uploaded (or generated) script with no confirmation: clear it on
+  // the server, wait for the re-analysis it triggers to publish a newer graph
+  // version, then reload so the editor picks up the rebuilt scenes.
+  async function removeUploadedScript() {
+    if (!sessionId || rewriting !== null) return;
+    setRewriting("remove");
+    setError(null);
+    try {
+      const before = (await getSessionStatus(sessionId)).latest_version ?? 0;
+      await setSessionScript(sessionId, "");
+      for (;;) {
+        await new Promise((r) => setTimeout(r, 2500));
+        const s = await getSessionStatus(sessionId).catch(() => null);
+        if (!s || (s.latest_version ?? 0) <= before) continue;
+        if (s.status === "ready") {
+          window.location.reload();
+          return;
+        }
+        if (s.status === "error") throw new Error("Processing failed — the previous scenes are unchanged.");
+      }
+    } catch (e) {
+      setError(String(e instanceof Error ? e.message : e));
+      setRewriting(null);
+    }
+  }
+
   // so the voice is only rebuilt when you accept the rewrite.
   async function enhance() {
     if (!spec) return;
@@ -1189,8 +1217,10 @@ export default function VideoEditor({
     await rewriteAll(ENHANCE_INSTR, "enhance");
   }
 
-  // Generate narration for scenes with none (using scene targets + the rest as context).
-  async function genScript(fillEmptyOnly: boolean, brief: string) {
+  // Generate narration for scenes with none (using scene targets + the rest as
+  // context) — the per-scene path. The whole-recording path lives in
+  // GenerateScriptModal (a server job that rebuilds the scenes).
+  async function genScript(fillEmptyOnly: boolean, brief: string, mode: ScriptMode = "fit") {
     if (!spec || rewriting !== null) return;
     setRewriting("gen");
     setError(null);
@@ -1204,17 +1234,19 @@ export default function VideoEditor({
         action: s.action ?? "",
         narration: eff(s),
         screenshot: silent ? s.screenshot ?? null : null,
-        // on-screen duration, and the hard word cap it allows at this
+        // "fit": on-screen duration, and the hard word cap it allows at this
         // project's voice speed × pace — a longer line would freeze the last
-        // frame while the voice finishes (the API enforces the cap)
-        seconds: Math.max(
-          1,
-          Math.round((s.source_end_ms - s.source_start_ms) / 1000),
-        ),
-        max_words: sceneWordBudget(
-          (s.source_end_ms - s.source_start_ms) / 1000,
-          (spec.voice.speed || 1) * Math.min(1.5, Math.max(1, spec.pace ?? 1)),
-        ),
+        // frame while the voice finishes (the API enforces the cap).
+        // "free": no cap; the API then leaves the lines as written.
+        ...(mode === "fit"
+          ? {
+              seconds: Math.max(1, Math.round((s.source_end_ms - s.source_start_ms) / 1000)),
+              max_words: sceneWordBudget(
+                (s.source_end_ms - s.source_start_ms) / 1000,
+                (spec.voice.speed || 1) * Math.min(1.5, Math.max(1, spec.pace ?? 1)),
+              ),
+            }
+          : {}),
       }));
       const lines = await generateScript(
         id,
@@ -1593,7 +1625,10 @@ export default function VideoEditor({
     ];
 
   return (
-    <div className="flex h-screen flex-col bg-[var(--bg)] text-[var(--text)]">
+    // The editor fills the viewport below the shared top bar (h-14) and has no
+    // footer (Footer hides on this route); h-screen plus those made the whole
+    // page scroll by their height.
+    <div className="flex h-[calc(100dvh-3.5rem)] flex-col bg-[var(--bg)] text-[var(--text)]">
       {/* header */}
       <header className="flex items-center justify-between gap-4 border-b border-[var(--border)] bg-[var(--card)] px-6 py-3">
         <div className="flex min-w-0 items-center gap-3">
@@ -1708,19 +1743,16 @@ export default function VideoEditor({
       {genAsk && (
         <GenerateScriptModal
           projectId={id}
+          sessionId={sessionId}
+          instruction={TONE_INSTR[tone]}
           onClose={() => setGenAsk(null)}
-          onGenerate={(brief) => {
+          onGenerate={(brief, mode) => {
             const { fillEmptyOnly } = genAsk;
             setGenAsk(null);
-            void genScript(fillEmptyOnly, brief);
+            void genScript(fillEmptyOnly, brief, mode);
           }}
-        />
-      )}
-      {showRemoveScript && sessionId && (
-        <ApplyScriptModal
-          sessionId={sessionId}
-          mode="remove"
-          onClose={() => setShowRemoveScript(false)}
+          // the new graph version is served by GET /video, so a plain reload
+          // picks up the rebuilt scenes (same as Apply script)
           onApplied={() => window.location.reload()}
         />
       )}
@@ -1928,7 +1960,7 @@ export default function VideoEditor({
                       <button
                         onClick={() => {
                           if (hasUploadedScript) {
-                            setShowRemoveScript(true); // rebuild scenes on the server
+                            void removeUploadedScript(); // rebuild scenes on the server
                             return;
                           }
                           // AI-written or typed: empty every scene, keep the
@@ -1947,7 +1979,13 @@ export default function VideoEditor({
                         }
                         className="btn btn-ghost btn-sm whitespace-nowrap text-red-500"
                       >
-                        🗑 Remove script
+                        {rewriting === "remove" ? (
+                          <>
+                            <Spinner /> Removing…
+                          </>
+                        ) : (
+                          "🗑 Remove script"
+                        )}
                       </button>
                     )}
                   </div>

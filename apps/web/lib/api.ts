@@ -890,6 +890,38 @@ export async function generateScript(
   return (await r.json()).lines as string[];
 }
 
+/** "fit": every line sized to the footage it covers; "free": no limit. */
+export type ScriptMode = "fit" | "free";
+
+/** The whole-recording Generate: the worker shows the model the recording's
+ * frames and writes a timed script, then re-analyses the recording with it
+ * (scenes rebuilt around the lines, like Apply script). Returns the queued
+ * job; poll getSessionStatus for its progress (stage "script"), then for the
+ * new graph version. */
+export async function generateScriptFromRecording(
+  sessionId: string,
+  brief: string,
+  mode: ScriptMode,
+  instruction?: string,
+): Promise<JobStatus> {
+  const r = await apiFetch(`/sessions/${sessionId}/generate-script`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ brief, mode, instruction: instruction ?? null }),
+  });
+  if (!r.ok) {
+    let detail = `generate failed: ${r.status}`;
+    try {
+      detail = (await r.json()).detail ?? detail;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(detail);
+  }
+  pokeActivity();
+  return (await r.json()) as JobStatus;
+}
+
 export async function suggestZooms(
   projectId: string,
   scenes: { target?: string; action?: string; narration?: string }[],

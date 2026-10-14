@@ -26,6 +26,16 @@ def test_parse_progress_line():
     assert parse_progress_line("out_time_us=N/A") is None
 
 
+def test_keyframe_fps_spreads_long_recordings_over_their_whole_length():
+    from worker.pipeline.media import keyframe_fps
+
+    # short enough: one frame a second, and an unknown duration keeps the cap
+    assert keyframe_fps(35) == 1.0 and keyframe_fps(600) == 1.0 and keyframe_fps(0) == 1.0
+    # a 30-minute recording used to get frames for its first ten minutes only
+    fps = keyframe_fps(1800)
+    assert fps < 1.0 and 1800 * fps <= 600 and 1800 * fps > 590
+
+
 def test_fmt_clock():
     assert fmt_clock(75) == "01:15" and fmt_clock(3725) == "1:02:05" and fmt_clock(-3) == "00:00"
 

@@ -75,6 +75,15 @@ def enqueue_document_snapshot(project_id: str, step_id: str, t_seconds: float) -
     _send("refract.document.snapshot", [project_id, step_id, float(t_seconds)])
 
 
+def enqueue_script_generate(
+    session_id: str, job_id: str, brief: str, mode: str, instruction: str | None
+) -> None:
+    """Write a narration script from the whole recording's frames (worker:
+    several vision calls, minutes on a long recording), then re-run
+    understanding with it. Progress lives on the Job row `job_id`."""
+    _send("refract.script.generate", [session_id, job_id, brief, mode, instruction])
+
+
 def enqueue_library_process(asset_id: str) -> None:
     """Normalize a freshly uploaded library file (probe, transcode, poster)."""
     _send("refract.library.process", [asset_id])

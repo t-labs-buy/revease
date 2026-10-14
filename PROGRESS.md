@@ -178,6 +178,47 @@ empty scenes and a panel offering **Generate script** / **Upload script**.
   `test_segment.py` (cuts), `test_render.py` (pause); `apps/api/tests/test_script.py`,
   `test_llm.py` (Generate with frames).
 
+## Generate from the whole recording (2026-10-13)
+
+Why: on a silent upload the per-scene Generate wrote into the segmenter's five
+"Screen N" scenes from one frame each, under word caps of 5–27 words, and the
+result could not match the script the same video got when dropped into a chat
+with Claude (dozens of frames, free structure). One in four runs also failed
+with "did not answer in time" when the model had answered in four seconds but
+split its reply across several arrays.
+
+- **Whole-recording Generate.** `POST /sessions/{id}/generate-script`
+  `{brief, mode, instruction}` queues `refract.script.generate` (default
+  queue) with a Job row (stage `script`) the status endpoint lists. The worker
+  (`videoscript_job.py`) shows the model the recording's stored keyframes,
+  windowed at 60 per call (`app/videoscript.py`, pure helpers), each window
+  seeded with the previous window's last lines; the reply is timed lines
+  (`{"t", "line"}`), joined and written to `CaptureSession.script_text` as
+  `[m:ss.s] line`, then understanding re-runs — the ordinary Apply-script
+  path, so the model's cuts become the scenes and the graph is never touched
+  here. Click recordings keep their click scenes (the script is spread across
+  them, as before).
+- **Two lengths.** `mode: "fit"` budgets each line by the footage to the next
+  start (same `scene_word_budget` + shorten-then-trim as the per-scene path);
+  `"free"` has no limit and leaves pacing to Fit narration. The per-scene
+  Generate takes the same choice (free = no `max_words` sent).
+- **Editor.** The Generate modal asks for the brief, Source (Whole recording /
+  Current scenes — defaults to the recording when every scene is empty or the
+  scenes were cut for an uploaded script) and Length, then waits on the job
+  and the rebuild like Apply script does.
+- **Long recordings.** `media.keyframe_fps` spreads the 600-frame cap over the
+  whole length (a 30-min recording used to get frames for its first ten
+  minutes only, so nothing after that had cuts, alignment or narration). Up to
+  10 vision calls per Generate, ~350 input tokens a frame.
+- **Parser + error.** `rewrite.json_values` reads one array, several arrays on
+  separate lines, or an array inside prose/fences; all-batches-failed now
+  reports the real reason (an unreadable reply) instead of a timeout.
+- Tests: `apps/api/tests/test_videoscript.py` (windowing, parsing, joining,
+  fit budgets, the route's 202/400/404/409/422), `apps/workers/tests/
+  test_videoscript_job.py` (job end-to-end offline, then the pipeline cuts
+  one scene per line at the model's times; failure leaves the script alone),
+  `test_media_progress.py` (keyframe_fps).
+
 ## Deployed to ivolve as v3 (2026-09-24)
 
 - Images `reg.ivolve.cloud/ivolve/revease:{api,worker,web}-v3`, built natively on the host.

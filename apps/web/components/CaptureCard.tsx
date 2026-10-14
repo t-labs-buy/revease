@@ -60,15 +60,15 @@ export function CaptureCard({
       </div>
 
       {/* body */}
-      <div className="flex flex-1 flex-col p-5">
-        <h3 className="truncate text-[17px] font-semibold capitalize text-[var(--text)]">
+      <div className="flex flex-1 flex-col p-4">
+        <h3 className="truncate text-[15px] font-semibold capitalize text-[var(--text)]">
           {projectName ?? s.source_type}
         </h3>
-        <div className="mt-1 truncate text-sm text-[var(--text-2)]">
+        <div className="mt-0.5 truncate text-[13px] text-[var(--text-2)]">
           {projectName ? `${s.source_type} · ` : ""}
           {fmtDateIST(s.created_at)}
         </div>
-        <div className="mt-3.5 flex items-center justify-between border-t border-[var(--border)] pt-3">
+        <div className="mt-2.5 flex items-center justify-between border-t border-[var(--border)] pt-2.5">
           <span
             className={`badge px-2.5 py-1 ${
               s.telemetry === "present"

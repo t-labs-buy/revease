@@ -49,11 +49,35 @@ def _prompt(lines: list[str], instruction: str | None) -> str:
     )
 
 
-def _parse(text: str, n: int) -> list[str]:
+def json_values(text: str) -> list:
+    """Every JSON array or object in a reply, in order. A model asked for one
+    array has answered with five one-element arrays on separate lines (one per
+    frame it was shown), with prose around the array, and with code fences;
+    json.loads rejects all of those and the user saw a bogus timeout."""
     t = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-    arr = json.loads(t)
-    if not isinstance(arr, list) or len(arr) != n:
-        raise ValueError(f"expected {n} lines, got {type(arr).__name__} of {len(arr) if isinstance(arr, list) else '?'}")
+    dec = json.JSONDecoder()
+    out: list = []
+    i = 0
+    while i < len(t):
+        starts = [j for j in (t.find("[", i), t.find("{", i)) if j >= 0]
+        if not starts:
+            break
+        j = min(starts)
+        try:
+            val, end = dec.raw_decode(t, j)
+        except ValueError:
+            i = j + 1
+            continue
+        out.append(val)
+        i = end
+    return out
+
+
+def _parse(text: str, n: int) -> list[str]:
+    arrays = [v for v in json_values(text) if isinstance(v, list)]
+    arr = arrays[0] if len(arrays) == 1 else [x for a in arrays for x in a]
+    if len(arr) != n:
+        raise ValueError(f"expected {n} lines, got {len(arr)}")
     return [_line_of(x) for x in arr]
 
 
@@ -123,9 +147,11 @@ AI_DEADLINE_S = 45
 BATCH = 30
 
 
-def _run_batches(items: list, work, *, size: int = BATCH, deadline_s: float | None = None):
+def _run_batches(items: list, work, *, size: int = BATCH, deadline_s: float | None = None,
+                 errors: list[str] | None = None):
     """[(start, batch, result|None)] — result is None when that batch failed or
-    missed the deadline, so callers fall back for just those items."""
+    missed the deadline, so callers fall back for just those items. `errors`
+    collects why, so a caller that has nothing left can say so honestly."""
     from concurrent.futures import ThreadPoolExecutor, wait
 
     deadline_s = AI_DEADLINE_S if deadline_s is None else deadline_s
@@ -140,9 +166,22 @@ def _run_batches(items: list, work, *, size: int = BATCH, deadline_s: float | No
         else:
             reason = fut.exception() if fut in done else f"no answer within {deadline_s:.0f}s"
             log.warning("AI batch %d-%d failed: %s", start, start + len(batch) - 1, reason)
+            if errors is not None:
+                errors.append(str(reason))
             out.append((start, batch, None))
     pool.shutdown(wait=False, cancel_futures=True)  # late calls finish in the background, ignored
     return out
+
+
+def _all_failed(errors: list[str]) -> RuntimeError:
+    """The error for a call where no batch produced lines: a timeout when that
+    is what happened, otherwise the first real reason (an unreadable reply, an
+    API error) — "did not answer in time" used to cover both and sent users
+    retrying a prompt the model had answered in four seconds."""
+    real = [e for e in errors if not e.startswith("no answer within")]
+    if real:
+        return RuntimeError(f"the AI reply could not be used ({real[0]}) — try again")
+    return RuntimeError("the AI did not answer in time — try again")
 
 
 def _part_note(start: int, batch: list, total: int) -> str:
@@ -275,9 +314,10 @@ def generate_script(scenes: list[dict], title: str = "Product demo", instruction
             return _parse(_gen_with_frames(batch, prompt), len(batch))
         return _call_claude(GEN_SYSTEM, prompt, len(batch))
 
-    results = _run_batches(scenes, work, size=FRAMES_BATCH if with_frames else BATCH)
+    errors: list[str] = []
+    results = _run_batches(scenes, work, size=FRAMES_BATCH if with_frames else BATCH, errors=errors)
     if all(r is None for _, _, r in results):
-        raise RuntimeError("the AI did not answer in time — try again")
+        raise _all_failed(errors)
     lines: list[str] = []
     generated: list[bool] = []
     for _start, batch, res in results:  # a failed batch keeps its current narration
@@ -496,9 +536,10 @@ def rewrite_lines(lines: list[str], instruction: str | None = None) -> list[str]
         text = complete(SYSTEM, _prompt(batch, instruction), max_tokens=16000, timeout=AI_DEADLINE_S)
         return _parse(text, len(batch))
 
-    results = _run_batches(clean, work)
+    errors: list[str] = []
+    results = _run_batches(clean, work, errors=errors)
     if all(r is None for _, _, r in results):
-        raise RuntimeError("the AI did not answer in time — try again")
+        raise _all_failed(errors)
     out: list[str] = []
     for start, batch, res in results:  # a failed batch keeps the original lines
         out += res if res is not None else list(lines[start:start + len(batch)])
