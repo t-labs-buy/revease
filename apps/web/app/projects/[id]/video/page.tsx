@@ -11,14 +11,23 @@ import {
   downloadMedia,
   fetchPreviewTimeline,
   getRender,
-  getTranscriptWords,
+  getSessionDetail,
+  getSessionStatus,
+  setSessionScript,
+  getTranscript,
   getVideo,
+  pauseSeconds,
+  pauseToken,
+  sceneOverrun,
+  scriptFit,
   mediaUrl,
   patchVideo,
   generateScript,
+  type ScriptMode,
   pollVoiceTrack,
   renderVideo,
   rewriteLines,
+  sceneWordBudget,
   startVoiceTrack,
   suggestZooms,
   uploadMedia,
@@ -26,6 +35,8 @@ import {
   type EditElement,
   type EditSegment,
   type EditSpec,
+  EXPORT_RESOLUTIONS,
+  type ExportResolution,
   type PreviewTimeline,
   type PreviewTimelineSegment,
   type RenderJob,
@@ -46,6 +57,8 @@ import { Spinner } from "@/components/ui";
 import { VoicePanel } from "@/components/VoicePanel";
 import { ProjectAccess } from "@/components/ProjectAccess";
 import { PreviewOverlay } from "@/components/PreviewOverlay";
+import { ApplyScriptModal } from "@/components/ApplyScriptModal";
+import { GenerateScriptModal } from "@/components/GenerateScriptModal";
 import { MediaPanel } from "@/components/media/MediaPanel";
 import { MediaOverlayLayer, MusicPreview } from "@/components/media/MediaOverlayLayer";
 import { TlMediaTrack } from "@/components/media/TlMediaTrack";
@@ -240,6 +253,18 @@ export default function VideoEditor({
   // Whisper's word timings (raw-recording clock). Empty for speechless captures;
   // then word clicks and word splits fall back to a proportional estimate.
   const [transcriptWords, setTranscriptWords] = useState<TranscriptWord[]>([]);
+  // The capture behind this project (for "Apply script"); null until known.
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [showApplyScript, setShowApplyScript] = useState(false);
+  // An uploaded script's scenes were cut for its lines, so Remove script must
+  // rebuild them on the server; AI-written or typed narration sits on the
+  // recording's own scenes and is just emptied locally.
+  const [hasUploadedScript, setHasUploadedScript] = useState(false);
+  // Shown when the project opened with every scene empty; dismissed by hand
+  // or as soon as any scene has narration.
+  const [narrationPrompt, setNarrationPrompt] = useState(false);
+  // Generate first asks for a brief (mandatory); this holds the pending call.
+  const [genAsk, setGenAsk] = useState<{ fillEmptyOnly: boolean } | null>(null);
   const [source, setSource] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("Script");
   const [error, setError] = useState<string | null>(null);
@@ -255,7 +280,7 @@ export default function VideoEditor({
   const [rate, setRate] = useState(1);
   const [tlZoom, setTlZoom] = useState(1);
   const [rewriting, setRewriting] = useState<
-    null | "all" | "enhance" | "gen" | number
+    null | "all" | "enhance" | "gen" | "remove" | number
   >(null);
   const [tone, setTone] = useState<Tone>("Professional");
   const [zoomBusy, setZoomBusy] = useState(false);
@@ -631,12 +656,26 @@ export default function VideoEditor({
     baseline.current = null;
     setHistState({ canUndo: false, canRedo: false });
     setTranscriptWords([]);
-    // Non-fatal: the editor works without timings, just less precisely.
-    getTranscriptWords(id).then(setTranscriptWords).catch(() => setTranscriptWords([]));
+    // Non-fatal: the editor works without timings, just less precisely. The
+    // same call names the capture, which "Apply script" needs.
+    getTranscript(id)
+      .then(({ sessionId, words }) => {
+        setTranscriptWords(words);
+        setSessionId(sessionId);
+        if (sessionId) {
+          getSessionDetail(sessionId)
+            .then((d) => setHasUploadedScript(!!d.script))
+            .catch(() => setHasUploadedScript(false));
+        }
+      })
+      .catch(() => setTranscriptWords([]));
     getVideo(id)
       .then((v) => {
         setSpec(v?.edit_spec ?? null);
         setSavedSpec(v?.edit_spec ?? null);
+        // No narration at all (a recording without a voice): ask how to get one.
+        const segs = v?.edit_spec?.segments ?? [];
+        setNarrationPrompt(segs.length > 0 && segs.every((s) => !eff(s).trim()));
         // Preview + filmstrip + waveform use the light 540p proxy when it exists;
         // renders always read the full-quality source server-side.
         setSource(v?.source_proxy ?? v?.source_video ?? null);
@@ -705,6 +744,24 @@ export default function VideoEditor({
       mutateSeg(idx, { words: tokenize(text), removed: [] }),
     [mutateSeg],
   );
+
+  // The scene textarea being edited, so "Pause" can insert at its cursor. The
+  // token is committed with the rest of the text on blur / Done.
+  const editRef = useRef<HTMLTextAreaElement | null>(null);
+  const insertPause = useCallback((seconds: number) => {
+    const el = editRef.current;
+    if (!el) return;
+    const a = el.selectionStart ?? el.value.length;
+    const b = el.selectionEnd ?? a;
+    const before = el.value.slice(0, a);
+    const after = el.value.slice(b);
+    const tok = `${before && !/\s$/.test(before) ? " " : ""}${pauseToken(seconds)}${after && !/^\s/.test(after) ? " " : ""}`;
+    el.value = before + tok + after;
+    const at = before.length + tok.length;
+    el.focus();
+    el.setSelectionRange(at, at);
+    fitTextarea(el);
+  }, []);
 
   const addSegment = useCallback(() => {
     setSpec((s) => {
@@ -1127,6 +1184,32 @@ export default function VideoEditor({
 
   // One-click enhance: tighten the whole script + turn on captions. Left
   // unsaved on purpose — the Discard / Keep changes bar is the way out of it,
+  // Remove an uploaded (or generated) script with no confirmation: clear it on
+  // the server, wait for the re-analysis it triggers to publish a newer graph
+  // version, then reload so the editor picks up the rebuilt scenes.
+  async function removeUploadedScript() {
+    if (!sessionId || rewriting !== null) return;
+    setRewriting("remove");
+    setError(null);
+    try {
+      const before = (await getSessionStatus(sessionId)).latest_version ?? 0;
+      await setSessionScript(sessionId, "");
+      for (;;) {
+        await new Promise((r) => setTimeout(r, 2500));
+        const s = await getSessionStatus(sessionId).catch(() => null);
+        if (!s || (s.latest_version ?? 0) <= before) continue;
+        if (s.status === "ready") {
+          window.location.reload();
+          return;
+        }
+        if (s.status === "error") throw new Error("Processing failed — the previous scenes are unchanged.");
+      }
+    } catch (e) {
+      setError(String(e instanceof Error ? e.message : e));
+      setRewriting(null);
+    }
+  }
+
   // so the voice is only rebuilt when you accept the rewrite.
   async function enhance() {
     if (!spec) return;
@@ -1134,29 +1217,53 @@ export default function VideoEditor({
     await rewriteAll(ENHANCE_INSTR, "enhance");
   }
 
-  // Generate narration for scenes with none (using scene targets + the rest as context).
-  async function genScript(fillEmptyOnly: boolean) {
+  // Generate narration for scenes with none (using scene targets + the rest as
+  // context) — the per-scene path. The whole-recording path lives in
+  // GenerateScriptModal (a server job that rebuilds the scenes).
+  async function genScript(fillEmptyOnly: boolean, brief: string, mode: ScriptMode = "fit") {
     if (!spec || rewriting !== null) return;
     setRewriting("gen");
     setError(null);
     try {
+      // A voiced recording keeps the text-only Generate it always had. Only a
+      // recording with no narration at all sends its frames, so the model can
+      // narrate what is on screen instead of a "Screen 3" placeholder label.
+      const silent = spec.segments.every((s) => !eff(s).trim());
       const scenes = spec.segments.map((s) => ({
         target: s.target ?? "",
         action: s.action ?? "",
         narration: eff(s),
-        // on-screen duration → the model budgets ~2-2.5 words/sec so the
-        // narration fits the scene and the output length stays correct
-        seconds: Math.max(
-          1,
-          Math.round((s.source_end_ms - s.source_start_ms) / 1000),
-        ),
+        screenshot: silent ? s.screenshot ?? null : null,
+        // "fit": on-screen duration, and the hard word cap it allows at this
+        // project's voice speed × pace — a longer line would freeze the last
+        // frame while the voice finishes (the API enforces the cap).
+        // "free": no cap; the API then leaves the lines as written.
+        ...(mode === "fit"
+          ? {
+              seconds: Math.max(1, Math.round((s.source_end_ms - s.source_start_ms) / 1000)),
+              max_words: sceneWordBudget(
+                (s.source_end_ms - s.source_start_ms) / 1000,
+                (spec.voice.speed || 1) * Math.min(1.5, Math.max(1, spec.pace ?? 1)),
+              ),
+            }
+          : {}),
       }));
       const lines = await generateScript(
         id,
         scenes,
         spec.title,
-        TONE_INSTR[tone],
+        // the author's brief gives the model the why and the audience; the
+        // scenes only say what happens on screen
+        `${TONE_INSTR[tone]}\n\nAbout this video (from the author — follow it): ${brief}`,
       );
+      // every line came back empty: the scenes are too short to carry a word
+      // (the API trims to each scene's budget) — say so rather than fill nothing
+      if (lines.every((l) => !l.trim())) {
+        setError(
+          "These scenes are too short to narrate — each needs at least ~1.5 s on screen. Merge scenes, or re-analyse the recording.",
+        );
+        return;
+      }
       setSpec((s) => {
         if (!s) return s;
         const segs = s.segments.map((seg, i) => {
@@ -1340,8 +1447,14 @@ export default function VideoEditor({
   function togglePlay() {
     const v = videoRef.current;
     if (!v) return;
-    if (v.paused) void v.play().catch(() => { });
-    else pausePlayback();
+    // Decide from the editor's `playing`, not `v.paused`: while the conductor
+    // holds a scene's last frame (narration longer than its footage) the video
+    // element IS paused although playback is on — the voice is the clock. Read
+    // there, v.paused turned the Pause button into Play, so the first click
+    // resumed the frozen frame and the line kept advancing; only a second
+    // click paused.
+    if (playing) pausePlayback();
+    else void v.play().catch(() => { });
   }
   function fullscreen() {
     void frameRef.current?.requestFullscreen?.();
@@ -1512,7 +1625,10 @@ export default function VideoEditor({
     ];
 
   return (
-    <div className="flex h-screen flex-col bg-[var(--bg)] text-[var(--text)]">
+    // The editor fills the viewport below the shared top bar (h-14) and has no
+    // footer (Footer hides on this route); h-screen plus those made the whole
+    // page scroll by their height.
+    <div className="flex h-[calc(100dvh-3.5rem)] flex-col bg-[var(--bg)] text-[var(--text)]">
       {/* header */}
       <header className="flex items-center justify-between gap-4 border-b border-[var(--border)] bg-[var(--card)] px-6 py-3">
         <div className="flex min-w-0 items-center gap-3">
@@ -1566,6 +1682,23 @@ export default function VideoEditor({
               </option>
             ))}
           </select>
+          <select
+            value={spec.export?.resolution ?? "source"}
+            onChange={(e) =>
+              setSpec({
+                ...spec,
+                export: { quality: "high", ...spec.export, resolution: e.target.value as ExportResolution },
+              })
+            }
+            title="Export resolution — the size of the final video. Match recording keeps the recording's own size (nothing stretched or shrunk). A bigger size can't add detail the recording never had. Changing it re-exports every scene."
+            className="rounded-lg border border-[var(--border)] bg-[var(--card)] px-2 py-1.5 text-xs text-[var(--text-2)]"
+          >
+            {EXPORT_RESOLUTIONS.map((r) => (
+              <option key={r.value} value={r.value}>
+                {r.label}
+              </option>
+            ))}
+          </select>
           <ProjectAccess projectId={id} kind="video" />
           {!rendering && !showRender && render?.status === "done" && render.output_key && (
             <button
@@ -1596,6 +1729,32 @@ export default function VideoEditor({
         <p className="mx-6 mt-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
           {error}
         </p>
+      )}
+
+      {showApplyScript && sessionId && (
+        <ApplyScriptModal
+          sessionId={sessionId}
+          onClose={() => setShowApplyScript(false)}
+          // the new graph version is served by GET /video (edits migrate there),
+          // so a plain reload picks up the rebuilt scenes
+          onApplied={() => window.location.reload()}
+        />
+      )}
+      {genAsk && (
+        <GenerateScriptModal
+          projectId={id}
+          sessionId={sessionId}
+          instruction={TONE_INSTR[tone]}
+          onClose={() => setGenAsk(null)}
+          onGenerate={(brief, mode) => {
+            const { fillEmptyOnly } = genAsk;
+            setGenAsk(null);
+            void genScript(fillEmptyOnly, brief, mode);
+          }}
+          // the new graph version is served by GET /video, so a plain reload
+          // picks up the rebuilt scenes (same as Apply script)
+          onApplied={() => window.location.reload()}
+        />
       )}
 
       {/* body: 35% script / 65% preview */}
@@ -1675,6 +1834,67 @@ export default function VideoEditor({
             )}
             {tab === "Script" && (
               <>
+                {(() => {
+                  // One notice at the top; the affected scenes carry a ⚠ icon.
+                  const fit = scriptFit(spec);
+                  const n = spec.segments.filter((s) => sceneOverrun(s, spec)).length;
+                  if (!n) return null;
+                  const whole = fit.words > fit.budget;
+                  return (
+                    <p className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+                      <strong>
+                        {whole
+                          ? `Script too long for this recording: ${fit.words} words, but the footage carries about ${fit.budget}.`
+                          : `${n} scene${n === 1 ? "" : "s"} ${n === 1 ? "has" : "have"} more script than footage.`}
+                      </strong>{" "}
+                      The picture freezes while the voice finishes on scenes marked ⚠. Shorten those
+                      lines, merge a scene with a neighbour for more footage, or raise the voice speed.
+                    </p>
+                  );
+                })()}
+                {narrationPrompt && spec.segments.every((s) => !eff(s).trim()) && (
+                  <div className="rounded-xl border border-[#1E8F8E]/30 bg-[#1E8F8E]/5 px-4 py-3">
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <p className="text-sm font-semibold text-[var(--text)]">No narration found</p>
+                        <p className="mt-0.5 text-xs text-[var(--text-2)]">
+                          This recording has no voiceover. How would you like to add one?
+                        </p>
+                      </div>
+                      <button
+                        onClick={() => setNarrationPrompt(false)}
+                        title="I'll write it myself"
+                        className="rounded-lg p-1 text-[var(--text-3)] hover:bg-[var(--hover)]"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <button
+                        onClick={() => setGenAsk({ fillEmptyOnly: true })}
+                        disabled={rewriting !== null}
+                        title="The AI looks at each scene's frame and writes one line per scene"
+                        className="btn btn-primary btn-sm"
+                      >
+                        {rewriting === "gen" ? (
+                          <>
+                            <Spinner /> Writing…
+                          </>
+                        ) : (
+                          "✨ Generate script"
+                        )}
+                      </button>
+                      <button
+                        onClick={() => setShowApplyScript(true)}
+                        disabled={!sessionId || rewriting !== null}
+                        title="Paste or load your own script; the recording is re-analysed with it"
+                        className="btn btn-secondary btn-sm"
+                      >
+                        📄 Upload script
+                      </button>
+                    </div>
+                  </div>
+                )}
                 <div className="space-y-2">
                   <div className="relative">
                     <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--text-3)]">
@@ -1715,7 +1935,7 @@ export default function VideoEditor({
                       )}
                     </button>
                     <button
-                      onClick={() => genScript(true)}
+                      onClick={() => setGenAsk({ fillEmptyOnly: true })}
                       disabled={rewriting !== null}
                       title="Write narration for scenes that have none"
                       className="btn btn-secondary btn-sm whitespace-nowrap"
@@ -1728,6 +1948,46 @@ export default function VideoEditor({
                         "✍ Generate"
                       )}
                     </button>
+                    <button
+                      onClick={() => setShowApplyScript(true)}
+                      disabled={!sessionId || rewriting !== null}
+                      title="Use a written script as the narration — the recording is re-analysed and the scenes rebuilt around it"
+                      className="btn btn-secondary btn-sm whitespace-nowrap"
+                    >
+                      📄 Apply script
+                    </button>
+                    {(hasUploadedScript || spec.segments.some((s) => eff(s).trim())) && (
+                      <button
+                        onClick={() => {
+                          if (hasUploadedScript) {
+                            void removeUploadedScript(); // rebuild scenes on the server
+                            return;
+                          }
+                          // AI-written or typed: empty every scene, keep the
+                          // scenes. Local only: Discard brings the text back.
+                          setEditIdx(null);
+                          setSpec((s) =>
+                            s ? { ...s, segments: s.segments.map((seg) => ({ ...seg, words: [], removed: [] })) } : s,
+                          );
+                          setNarrationPrompt(true);
+                        }}
+                        disabled={rewriting !== null}
+                        title={
+                          hasUploadedScript
+                            ? "Remove the uploaded script and rebuild the scenes from the recording itself"
+                            : "Empty the narration of every scene (Discard to undo)"
+                        }
+                        className="btn btn-ghost btn-sm whitespace-nowrap text-red-500"
+                      >
+                        {rewriting === "remove" ? (
+                          <>
+                            <Spinner /> Removing…
+                          </>
+                        ) : (
+                          "🗑 Remove script"
+                        )}
+                      </button>
+                    )}
                   </div>
                 </div>
 
@@ -1756,6 +2016,18 @@ export default function VideoEditor({
                             edited
                           </span>
                         )}
+                        {(() => {
+                          const over = sceneOverrun(seg, spec);
+                          if (!over) return null;
+                          return (
+                            <span
+                              className="cursor-help text-sm text-red-600"
+                              title={`Script too long: ${over.words} words, but this scene's footage carries about ${over.budget} at the current voice speed — the last frame freezes while the voice finishes.`}
+                            >
+                              ⚠
+                            </span>
+                          );
+                        })()}
                         <div className="ml-auto flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
                           <IconBtn
                             title="Edit"
@@ -1793,27 +2065,76 @@ export default function VideoEditor({
                         </div>
                       </div>
                       {editIdx === i ? (
-                        <textarea
-                          autoFocus
-                          defaultValue={text}
-                          // grows to fit the whole narration — no inner scrollbar
-                          ref={fitTextarea}
-                          onInput={(e) => fitTextarea(e.currentTarget)}
-                          onBlur={(e) => {
-                            setSegText(i, e.target.value);
-                            setEditIdx(null);
-                          }}
-                          placeholder="Type the narration…"
-                          // styled like the read view (same font, line height,
-                          // edge offset and gap between words) so every word
-                          // wraps onto the same line while editing
-                          style={{ wordSpacing: "4px" }}
-                          className="min-h-[64px] w-full resize-none overflow-hidden rounded border-0 bg-transparent px-0.5 py-0 text-[15px] leading-relaxed text-[var(--text)] outline-none placeholder:text-[var(--text-3)] focus:ring-2 focus:ring-[#1E8F8E]/15"
-                        />
+                        <div>
+                          <textarea
+                            autoFocus
+                            defaultValue={text}
+                            // grows to fit the whole narration — no inner scrollbar
+                            ref={(el) => {
+                              fitTextarea(el);
+                              editRef.current = el;
+                            }}
+                            onInput={(e) => fitTextarea(e.currentTarget)}
+                            onBlur={(e) => {
+                              // the pause buttons below take focus first: let
+                              // their click land, then commit the text
+                              if (e.relatedTarget instanceof HTMLElement && e.relatedTarget.dataset.pause) return;
+                              setSegText(i, e.target.value);
+                              setEditIdx(null);
+                            }}
+                            placeholder="Type the narration…"
+                            // styled like the read view (same font, line height,
+                            // edge offset and gap between words) so every word
+                            // wraps onto the same line while editing
+                            style={{ wordSpacing: "4px" }}
+                            className="min-h-[64px] w-full resize-none overflow-hidden rounded border-0 bg-transparent px-0.5 py-0 text-[15px] leading-relaxed text-[var(--text)] outline-none placeholder:text-[var(--text-3)] focus:ring-2 focus:ring-[#1E8F8E]/15"
+                          />
+                          <div className="mt-1 flex items-center gap-1 text-xs text-[var(--text-3)]">
+                            <span>Pause:</span>
+                            {[0.5, 1, 2].map((s) => (
+                              <button
+                                key={s}
+                                data-pause="1"
+                                title={`Insert a ${s}s pause at the cursor (the voice stops, the video keeps playing)`}
+                                onClick={() => insertPause(s)}
+                                className="rounded border border-[var(--border)] px-1.5 py-0.5 hover:bg-[var(--hover)]"
+                              >
+                                ⏸ {s}s
+                              </button>
+                            ))}
+                            <button
+                              data-pause="1"
+                              onClick={() => {
+                                const el = editRef.current;
+                                if (el) setSegText(i, el.value);
+                                setEditIdx(null);
+                              }}
+                              className="ml-auto font-medium text-[#1E8F8E]"
+                            >
+                              Done
+                            </button>
+                          </div>
+                        </div>
                       ) : seg.words.length ? (
                         <p className="text-[15px] leading-relaxed text-[var(--text)]">
                           {seg.words.map((w, wi) => {
                             const struck = seg.removed.includes(wi);
+                            const pause = pauseSeconds(w);
+                            if (pause !== null) {
+                              return (
+                                <button
+                                  key={wi}
+                                  onClick={() =>
+                                    mutateSeg(i, { words: seg.words.filter((_, k) => k !== wi),
+                                                   removed: seg.removed.filter((x) => x !== wi).map((x) => (x > wi ? x - 1 : x)) })
+                                  }
+                                  title={`${pause}s pause — click to remove`}
+                                  className="mr-1 rounded bg-[var(--hover)] px-1.5 text-xs text-[var(--text-2)] ring-1 ring-inset ring-[var(--border)] hover:bg-red-500/10 hover:text-red-500"
+                                >
+                                  ⏸ {pause}s
+                                </button>
+                              );
+                            }
                             return (
                               <button
                                 key={wi}

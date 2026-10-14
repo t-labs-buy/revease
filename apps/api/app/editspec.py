@@ -38,6 +38,40 @@ def effective_script(words: list[str], removed: list[int]) -> str:
     return " ".join(w for i, w in enumerate(words) if i not in rm).strip()
 
 
+# Pause marker: one whitespace-free token inside a scene's words, e.g.
+# `[pause:1.5]`. Being a single token it survives tokenize / filler indices /
+# merge / split untouched; the worker voices the text around it and inserts that
+# much silence. Clamped so a typo can't stall a scene for a minute.
+PAUSE_RE = re.compile(r"\[pause:(\d+(?:\.\d+)?)\]", re.IGNORECASE)
+PAUSE_MIN_S = 0.2
+PAUSE_MAX_S = 3.0
+
+
+def split_pauses(script: str) -> list[str | float]:
+    """A script as alternating spoken chunks (str) and pauses (seconds, float),
+    in order. A script with no marker is one chunk — callers rely on that to keep
+    the marker-free path byte-identical."""
+    parts: list[str | float] = []
+    pos = 0
+    script = script or ""
+    for m in PAUSE_RE.finditer(script):
+        text = script[pos : m.start()].strip()
+        if text:
+            parts.append(text)
+        parts.append(min(PAUSE_MAX_S, max(PAUSE_MIN_S, float(m.group(1)))))
+        pos = m.end()
+    tail = script[pos:].strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def spoken_text(script: str) -> str:
+    """The script as prose: pause markers removed. For captions, documents,
+    titles and LLM prompts — anywhere the marker would be read as text."""
+    return " ".join(PAUSE_RE.sub(" ", script or "").split())
+
+
 def voice_signature(spec: dict[str, Any]) -> str:
     """Content hash of what the AI-voice track (and its pacing timeline) depends
     on: each segment's spoken text, its source window, and whether it's in the
@@ -125,6 +159,11 @@ def build_edit_spec(graph_json: dict[str, Any], viewport: dict[str, int] | None)
         "title": graph_json.get("title", "Workflow"),
         "voice": {"voice_id": "af_sarah", "speed": 1.0, "use_original": False},
         "aspect": "16:9",
+        # export: the final file's frame size ("source" = the recording's own,
+        # so nothing is stretched or shrunk) and how hard it is compressed (the
+        # editor never changes quality; it is fixed at "high"). Clips that feed
+        # the final encode are near-lossless regardless — only this decides the file.
+        "export": {"quality": "high", "resolution": "source"},
         # intro/outro cards and automatic zooms are opt-in: a new project renders
         # the plain recording until the user turns them on in the editor.
         "intro": {"enabled": False, "title": graph_json.get("title", "Workflow"), "duration_ms": 2000},

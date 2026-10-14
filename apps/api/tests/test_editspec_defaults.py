@@ -28,3 +28,8 @@ def test_click_zoom_is_off_but_keeps_its_target():
     assert zoom["enabled"] is False
     # centre of the 40x20 box at (100,100) in a 1280x720 viewport
     assert (zoom["cx"], zoom["cy"]) == (round(120 / 1280, 4), round(110 / 720, 4))
+
+
+def test_export_defaults_to_high_quality_at_the_recording_size():
+    spec = build_edit_spec(GRAPH, {"w": 1280, "h": 720})
+    assert spec["export"] == {"quality": "high", "resolution": "source"}

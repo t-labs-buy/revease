@@ -152,3 +152,46 @@ def test_script_and_rewrite_batches_keep_existing_text_on_failure(monkeypatch):
     got = rewrite.generate_script(scenes)
     assert len(got) == 45
     assert all(g == f"old {i}" for i, g in enumerate(got) if not g.startswith("new"))
+
+
+def test_generate_script_shows_the_model_each_scene_frame(monkeypatch):
+    """The editor's Generate sends each scene's frame: the model then sees the
+    screen and the call goes through the vision transport, in small batches.
+    A scene without a frame is described in text; text-only requests keep the
+    old path."""
+    from app import rewrite
+    from app.storage import store
+
+    key = "sessions/s1/frames/frame_0001.jpg"
+    p = store.local_path(key)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    from PIL import Image
+
+    Image.new("RGB", (1600, 900), (20, 120, 120)).save(p)
+
+    seen: list[list] = []
+
+    def fake_vision2(system, parts, **kw):
+        seen.append(parts)
+        assert "frame" in system.lower()
+        return '["a", "b", "c"]'
+
+    monkeypatch.setattr(rewrite, "has_llm", lambda: True)
+    monkeypatch.setattr(rewrite, "complete_vision", fake_vision2)
+    monkeypatch.setattr(rewrite, "complete", lambda *a, **k: (_ for _ in ()).throw(AssertionError("text path used")))
+    scenes = [
+        {"target": "Screen 1", "action": "custom", "narration": "", "seconds": 4, "screenshot": key},
+        {"target": "Screen 2", "action": "custom", "narration": "", "seconds": 4, "screenshot": "missing/frame.jpg"},
+        {"target": "Screen 3", "action": "custom", "narration": "", "seconds": 4, "screenshot": None},
+    ]
+    assert rewrite.generate_script(scenes) == ["a", "b", "c"]
+    parts = seen[0]
+    images = [x for x in parts if isinstance(x, bytes)]
+    assert len(images) == 1 and images[0][:2] == b"\xff\xd8"  # one real frame, as JPEG
+    assert "Frame for scene 1:" in parts and "Frame for scene 2:" not in parts
+    assert "screenshot" not in parts[0]  # storage keys are not shown to the model
+
+    # text-only request: unchanged path, no vision call
+    monkeypatch.setattr(rewrite, "complete", lambda *a, **k: '["x"]')
+    assert rewrite.generate_script([{"target": "t", "narration": "", "seconds": 2}]) == ["x"]
+    assert len(seen) == 1

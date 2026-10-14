@@ -115,6 +115,16 @@ def document_generate_task(self, project_id: str, doc_version: int, skill_id=Non
         raise self.retry(exc=exc)
 
 
+@app.task(name="refract.script.generate")
+def script_generate_task(session_id: str, job_id: str, brief: str, mode: str = "fit", instruction=None):  # noqa: ANN001
+    """Write a narration script from the recording's frames and re-run
+    understanding with it. No Celery retry: a failure is recorded on the Job
+    row for the editor, and a blind retry would spend the vision calls twice."""
+    from worker.pipeline.videoscript_job import run_video_script
+
+    return run_video_script(session_id, job_id, brief, mode, instruction)
+
+
 @app.task(name="refract.document.snapshot", bind=True, max_retries=1, default_retry_delay=3)
 def document_snapshot_task(self, project_id: str, step_id: str, t_seconds: float):  # noqa: ANN001
     """Re-grab one doc step's snapshot at a chosen moment of the recording."""

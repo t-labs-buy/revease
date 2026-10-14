@@ -17,6 +17,9 @@ let ctx = null; // recording context: { apiBase, sessionId }
 // refuses.
 const STOP_BYTES = (500 - 12) * 1024 * 1024;
 const STOP_MS = 30 * 60 * 1000 - 2000;
+// Recording quality tiers (encoder bit rate). "sharp" holds ~8 min under the
+// size cap; "long" is sized so the full 30 min fits.
+const QUALITY_BPS = { sharp: 8_000_000, long: 2_200_000 };
 let bytes = 0;
 let startedAt = 0;
 let limitHit = null; // "size" | "time" | null
@@ -52,7 +55,11 @@ async function start({ streamId, apiBase, sessionId }) {
     },
   });
   const mimeType = pickMime();
-  recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+  // Bit rate is the recording's quality — same tiers as the web recorder
+  // (apps/web/lib/limits.ts). Chrome's default (~2.5 Mbps) smears 1080p text.
+  const { recQuality } = await chrome.storage.local.get("recQuality");
+  const videoBitsPerSecond = QUALITY_BPS[recQuality] || QUALITY_BPS.sharp;
+  recorder = new MediaRecorder(stream, { ...(mimeType ? { mimeType } : {}), videoBitsPerSecond });
   bytes = 0;
   limitHit = null;
   recorder.ondataavailable = (e) => {

@@ -8,7 +8,7 @@ import json
 import re
 import logging
 
-from app.llm import complete, has_llm, provider_name
+from app.llm import complete, complete_vision, has_llm, provider_name
 from app.tracing import observe
 
 log = logging.getLogger("refract.rewrite")
@@ -49,12 +49,47 @@ def _prompt(lines: list[str], instruction: str | None) -> str:
     )
 
 
-def _parse(text: str, n: int) -> list[str]:
+def json_values(text: str) -> list:
+    """Every JSON array or object in a reply, in order. A model asked for one
+    array has answered with five one-element arrays on separate lines (one per
+    frame it was shown), with prose around the array, and with code fences;
+    json.loads rejects all of those and the user saw a bogus timeout."""
     t = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-    arr = json.loads(t)
-    if not isinstance(arr, list) or len(arr) != n:
-        raise ValueError(f"expected {n} lines, got {type(arr).__name__} of {len(arr) if isinstance(arr, list) else '?'}")
-    return [str(x).strip() for x in arr]
+    dec = json.JSONDecoder()
+    out: list = []
+    i = 0
+    while i < len(t):
+        starts = [j for j in (t.find("[", i), t.find("{", i)) if j >= 0]
+        if not starts:
+            break
+        j = min(starts)
+        try:
+            val, end = dec.raw_decode(t, j)
+        except ValueError:
+            i = j + 1
+            continue
+        out.append(val)
+        i = end
+    return out
+
+
+def _parse(text: str, n: int) -> list[str]:
+    arrays = [v for v in json_values(text) if isinstance(v, list)]
+    arr = arrays[0] if len(arrays) == 1 else [x for a in arrays for x in a]
+    if len(arr) != n:
+        raise ValueError(f"expected {n} lines, got {len(arr)}")
+    return [_line_of(x) for x in arr]
+
+
+def _line_of(item: object) -> str:
+    """A model sometimes answers in the shape it was asked in — `{"line": …,
+    "max_words": 23}` instead of the bare string — and str() of that object
+    once became a scene's narration. Unwrap it; anything else is text."""
+    if isinstance(item, dict):
+        for key in ("line", "text", "narration"):
+            if isinstance(item.get(key), str):
+                return item[key].strip()
+    return str(item).strip()
 
 
 GEN_SYSTEM = (
@@ -73,9 +108,10 @@ GEN_SYSTEM = (
     "list of captions.\n"
     "- TTS-safe: plain spoken words only — no emojis, markdown, parentheses, stage "
     "directions, or camera notes. Expand awkward abbreviations; keep numbers easy to say.\n"
-    "- Timing budget: each scene includes its on-screen duration in seconds. Write about "
-    "2 to 2.5 words per second for that scene and NEVER more — the video's final length "
-    "depends on it. Minimum one short sentence.\n"
+    "- Timing budget: each scene carries \"max_words\", the most words its footage can "
+    "carry before the picture would freeze waiting for the voice. Count your words; never "
+    "exceed it. Prefer one tight sentence; split nothing across scenes. A scene with "
+    "max_words 0 gets an empty string — the footage simply plays.\n"
     "- Ground truth only: never invent features, results, or UI the scene data does not "
     "mention. Keep every product and feature name exactly as given.\n"
     "- Banned words/phrases: 'simply', 'just', 'easy', 'basically', 'as you can see', "
@@ -87,8 +123,8 @@ GEN_SYSTEM = (
 def _gen_prompt(scenes: list[dict], title: str, instruction: str | None) -> str:
     extra = f"\nAlso follow this instruction: {instruction}\n" if instruction else ""
     return (
-        f'Video title: "{title}". Write the narration script. Respect each scene\'s '
-        '"seconds" budget (about 2 to 2.5 words per second, never more). Reply with ONLY a '
+        f'Video title: "{title}". Write the narration script. Each scene\'s "max_words" is a '
+        "hard limit — count the words of every line. Reply with ONLY a "
         "JSON array of strings (no prose, no code fences) — exactly one narration line per "
         "scene, same order."
         + extra
@@ -111,9 +147,11 @@ AI_DEADLINE_S = 45
 BATCH = 30
 
 
-def _run_batches(items: list, work, *, size: int = BATCH, deadline_s: float | None = None):
+def _run_batches(items: list, work, *, size: int = BATCH, deadline_s: float | None = None,
+                 errors: list[str] | None = None):
     """[(start, batch, result|None)] — result is None when that batch failed or
-    missed the deadline, so callers fall back for just those items."""
+    missed the deadline, so callers fall back for just those items. `errors`
+    collects why, so a caller that has nothing left can say so honestly."""
     from concurrent.futures import ThreadPoolExecutor, wait
 
     deadline_s = AI_DEADLINE_S if deadline_s is None else deadline_s
@@ -128,9 +166,22 @@ def _run_batches(items: list, work, *, size: int = BATCH, deadline_s: float | No
         else:
             reason = fut.exception() if fut in done else f"no answer within {deadline_s:.0f}s"
             log.warning("AI batch %d-%d failed: %s", start, start + len(batch) - 1, reason)
+            if errors is not None:
+                errors.append(str(reason))
             out.append((start, batch, None))
     pool.shutdown(wait=False, cancel_futures=True)  # late calls finish in the background, ignored
     return out
+
+
+def _all_failed(errors: list[str]) -> RuntimeError:
+    """The error for a call where no batch produced lines: a timeout when that
+    is what happened, otherwise the first real reason (an unreadable reply, an
+    API error) — "did not answer in time" used to cover both and sent users
+    retrying a prompt the model had answered in four seconds."""
+    real = [e for e in errors if not e.startswith("no answer within")]
+    if real:
+        return RuntimeError(f"the AI reply could not be used ({real[0]}) — try again")
+    return RuntimeError("the AI did not answer in time — try again")
 
 
 def _part_note(start: int, batch: list, total: int) -> str:
@@ -139,25 +190,141 @@ def _part_note(start: int, batch: list, total: int) -> str:
     return f"\n(These are scenes {start + 1}-{start + len(batch)} of {total}; keep the style consistent.)\n"
 
 
+GEN_FRAMES_NOTE = (
+    "\n\nEach scene below is followed by a frame from the recording at that scene. Narrate "
+    "what the frame shows — name the pages, buttons and fields you can actually read — and "
+    "never describe UI that is not visible. A scene's \"target\" may be a generic placeholder "
+    "(\"Screen 3\") when the recording had no clicks or speech; trust the frame over it."
+)
+# Frames are heavy: fewer scenes per call keeps each call inside AI_DEADLINE_S.
+FRAMES_BATCH = 12
+
+
+def _gen_with_frames(batch: list[dict], prompt: str) -> str:
+    """One Generate call that also shows the model each scene's frame — the
+    only way to narrate a recording that had no clicks and no speech. Scenes
+    whose frame can't be loaded are simply described in text."""
+    from app.frames import frame_jpeg
+
+    parts: list[str | bytes] = [prompt]
+    for i, sc in enumerate(batch):
+        img = frame_jpeg(sc.get("screenshot"))
+        if img is not None:
+            parts += [f"Frame for scene {i + 1}:", img]
+    return complete_vision(GEN_SYSTEM + GEN_FRAMES_NOTE, parts, max_tokens=16000, timeout=AI_DEADLINE_S)
+
+
+# A generated line must fit its footage: the render retimes a scene to its TTS
+# length + SCENE_GAP_MS and FREEZES the last frame when the voice runs past
+# the window (render.py). Kokoro speaks ~2.6 words/s at speed 1 (tts.py); the
+# budget uses a little less so a long word or a comma does not tip a scene over.
+BUDGET_WORDS_PER_S = 2.3
+SCENE_GAP_S = 0.8
+
+
+def scene_word_budget(seconds: float, speed: float = 1.0) -> int:
+    """Most words a scene of `seconds` can carry at voice `speed` (speed × pace)
+    without the picture freezing. 0 for a scene too short to say anything."""
+    return max(0, int((float(seconds or 0) - SCENE_GAP_S) * BUDGET_WORDS_PER_S * max(0.5, speed)))
+
+
+def _word_count(line: str) -> int:
+    return len(line.split())
+
+
+def fit_to_budget(line: str, max_words: int) -> str:
+    """Last resort after the model ignored its budget twice: drop trailing
+    sentences until the line fits. A single sentence that is still over stays
+    whole — a cut-off sentence read aloud is worse than a short freeze."""
+    if _word_count(line) <= max_words:
+        return line
+    if max_words <= 0:
+        return ""
+    sents = re.split(r"(?<=[.!?])\s+", line.strip())
+    while len(sents) > 1 and _word_count(" ".join(sents)) > max_words:
+        sents.pop()
+    return " ".join(sents).strip()
+
+
+SHORTEN_SYSTEM = (
+    "You tighten narration lines for a TTS voiceover so each fits a hard word limit. "
+    "Keep the meaning, the product names and the tone; cut filler and secondary clauses. "
+    "Count the words. Reply with ONLY a JSON array of the shortened lines as plain strings, "
+    "one per line, same order — no objects, no keys, no word counts."
+)
+
+
+def _shorten(lines: list[str], limits: list[int]) -> list[str]:
+    # lines and limits as two flat lists: there is no object shape to echo back
+    prompt = (
+        "Lines:\n" + json.dumps(lines, ensure_ascii=False)
+        + "\nWord limit for each line, same order:\n" + json.dumps(limits)
+        + "\nShorten each line to at most its limit."
+    )
+    return _call_claude(SHORTEN_SYSTEM, prompt, len(lines))
+
+
+def enforce_budgets(lines: list[str], limits: list[int | None]) -> list[str]:
+    """Lines that overran their scene go back once to be shortened, then are
+    trimmed at a sentence boundary. Budget-less scenes (limit None) pass through."""
+    over: list[tuple[int, int]] = [
+        (i, m) for i, (ln, m) in enumerate(zip(lines, limits)) if m is not None and _word_count(ln) > m
+    ]
+    if not over:
+        return lines
+    out = list(lines)
+    try:
+        shorter = _shorten([lines[i] for i, _ in over], [m for _, m in over])
+        for (i, _), ln in zip(over, shorter):
+            out[i] = ln
+    except Exception as e:
+        log.warning("shorten pass failed (%s); trimming at sentence boundaries", e)
+    for i, m in over:
+        out[i] = fit_to_budget(out[i], m)
+    return out
+
+
 @observe(name="ai-generate-script")
 def generate_script(scenes: list[dict], title: str = "Product demo", instruction: str | None = None) -> list[str]:
     """Write a coherent narration line for each scene (using its target/action + any
-    existing note as context)."""
+    existing note as context, and its frame when the editor sends `screenshot`),
+    each no longer than its footage can carry (`max_words`, or derived from
+    `seconds`). Runs only when the user presses Generate — the pipeline never
+    calls this."""
     if not scenes:
         return []
     if not has_llm():
         raise RuntimeError("no AI key configured (set REFRACT_ANTHROPIC_API_KEY or REFRACT_OPENROUTER_API_KEY in .env)")
+    with_frames = any(sc.get("screenshot") for sc in scenes)
+    limits: list[int | None] = [
+        int(sc["max_words"]) if sc.get("max_words") is not None
+        else scene_word_budget(sc["seconds"]) if sc.get("seconds") is not None
+        else None
+        for sc in scenes
+    ]
+    text_only = [
+        {**{k: v for k, v in sc.items() if k not in ("screenshot", "seconds")}, "max_words": m}
+        if m is not None else {k: v for k, v in sc.items() if k != "screenshot"}
+        for sc, m in zip(scenes, limits)
+    ]
 
     def work(start: int, batch: list[dict]) -> list[str]:
-        return _call_claude(GEN_SYSTEM, _gen_prompt(batch, title, instruction) + _part_note(start, batch, len(scenes)), len(batch))
+        prompt = _gen_prompt(text_only[start:start + len(batch)], title, instruction) + _part_note(start, batch, len(scenes))
+        if with_frames:
+            return _parse(_gen_with_frames(batch, prompt), len(batch))
+        return _call_claude(GEN_SYSTEM, prompt, len(batch))
 
-    results = _run_batches(scenes, work)
+    errors: list[str] = []
+    results = _run_batches(scenes, work, size=FRAMES_BATCH if with_frames else BATCH, errors=errors)
     if all(r is None for _, _, r in results):
-        raise RuntimeError("the AI did not answer in time — try again")
+        raise _all_failed(errors)
     lines: list[str] = []
+    generated: list[bool] = []
     for _start, batch, res in results:  # a failed batch keeps its current narration
         lines += res if res is not None else [str(sc.get("narration") or "") for sc in batch]
-    return lines
+        generated += [res is not None] * len(batch)
+    # only what the model wrote is held to the budget; kept narration is the user's
+    return enforce_budgets(lines, [m if g else None for m, g in zip(limits, generated)])
 
 
 SKILL_SYSTEM = (
@@ -369,9 +536,10 @@ def rewrite_lines(lines: list[str], instruction: str | None = None) -> list[str]
         text = complete(SYSTEM, _prompt(batch, instruction), max_tokens=16000, timeout=AI_DEADLINE_S)
         return _parse(text, len(batch))
 
-    results = _run_batches(clean, work)
+    errors: list[str] = []
+    results = _run_batches(clean, work, errors=errors)
     if all(r is None for _, _, r in results):
-        raise RuntimeError("the AI did not answer in time — try again")
+        raise _all_failed(errors)
     out: list[str] = []
     for start, batch, res in results:  # a failed batch keeps the original lines
         out += res if res is not None else list(lines[start:start + len(batch)])

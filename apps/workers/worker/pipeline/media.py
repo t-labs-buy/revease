@@ -152,10 +152,13 @@ def normalize_video(
     s = get_settings()
     out_mp4.parent.mkdir(parents=True, exist_ok=True)
     tmp = out_mp4.with_name(out_mp4.stem + ".part.mp4")
+    # A window share can be an odd size (1850x1053): libx264 rejects odd yuv420p
+    # dimensions, so drop at most one row/column rather than fail the whole stage.
     cmd = ["ffmpeg", "-y", "-fflags", "+genpts", "-i", str(src),
+           "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
            "-fps_mode", "cfr", "-r", str(s.media_normalize_fps),
-           "-c:v", "libx264", "-preset", s.media_normalize_preset, "-pix_fmt", "yuv420p",
-           "-threads", str(s.media_threads)]
+           "-c:v", "libx264", "-preset", s.media_normalize_preset, "-crf", str(s.media_normalize_crf),
+           "-pix_fmt", "yuv420p", "-threads", str(s.media_threads)]
     has_a = has_audio(src)
     cmd += ["-c:a", "aac", "-ar", "44100"] if has_a else ["-an"]
     cmd += ["-movflags", "+faststart", str(tmp)]
@@ -201,16 +204,57 @@ def demux_audio(video_path: Path, out_wav: Path) -> Path | None:
     return out_wav
 
 
+# Scene score (0..1) above which two consecutive sampled frames count as a screen
+# change. Screen recordings are mostly static, so this sits far below the ~0.3
+# used for film cuts: a page navigation or a modal scores ~0.1+, typing or a
+# cursor move ~0.001.
+SCENE_CUT_THRESHOLD = 0.08
+
+
+def detect_scene_cuts(video_path: Path, threshold: float = SCENE_CUT_THRESHOLD) -> list[float]:
+    """Times (seconds) where the screen visibly changes — the boundaries a
+    speechless recording is segmented on, and what script lines snap to.
+
+    One decode at 5 fps / 320 px wide, no output file. Best-effort: any ffmpeg
+    failure returns [] and callers fall back to evenly spaced / proportional
+    boundaries."""
+    try:
+        proc = _run([
+            "ffmpeg", "-threads", str(get_settings().media_threads), "-i", str(video_path),
+            "-vf", f"fps=5,scale=320:-2,select='gt(scene,{threshold})',showinfo",
+            "-an", "-f", "null", "-",
+        ])
+    except (FFmpegError, FileNotFoundError):
+        log.warning("scene-cut detection failed for %s; continuing without cuts", video_path)
+        return []
+    cuts = sorted(float(m) for m in re.findall(r"pts_time:([0-9.]+)", proc.stderr))
+    log.info("detected %d scene cuts in %s", len(cuts), video_path)
+    return cuts
+
+
+def keyframe_fps(duration_s: float, fps_cap: float = 1.0, max_frames: int = 600) -> float:
+    """Sampling rate that fits a recording into `max_frames`: the cap for
+    anything short enough, else slower so the frames spread over the whole
+    length. `-frames:v` alone simply stopped at the 600th frame, so a 30-minute
+    recording had frames for its first ten minutes and nothing after — no scene
+    cuts, no script alignment and no narration from the rest. An unknown
+    duration (header-less WebM reads 0) keeps the cap and the backstop."""
+    if duration_s <= 0 or duration_s * fps_cap <= max_frames:
+        return fps_cap
+    return (max_frames - 1) / duration_s
+
+
 def extract_keyframes(
     video_path: Path, out_dir: Path, fps_cap: float = 1.0, max_frames: int = 600
 ) -> list[Keyframe]:
-    """Adaptive keyframes: scene changes plus a hard time cap of ~fps_cap frames/sec
-    (default 1 fps). `fps=fps_cap` samples on a fixed clock; scene detection adds
-    extra frames at cuts. Emits frame_%04d.jpg + showinfo timestamps."""
+    """Keyframes on a fixed clock: ~fps_cap a second (default 1 fps) for
+    recordings up to max_frames seconds, spread evenly across longer ones
+    (keyframe_fps). Emits frame_%04d.jpg + showinfo timestamps."""
     out_dir.mkdir(parents=True, exist_ok=True)
-    # fps=<cap> samples on a fixed clock (~cap frames/sec) — predictable, never
-    # explodes. `-frames:v max_frames` is a hard backstop for very long videos.
-    vf = f"fps={fps_cap},showinfo"
+    # fps=<rate> samples on a fixed clock — predictable, never explodes.
+    # `-frames:v max_frames` stays as a hard backstop for an unknown duration.
+    fps = keyframe_fps(_container_duration(video_path), fps_cap, max_frames)
+    vf = f"fps={fps:.5f},showinfo"
     proc = _run([
         "ffmpeg", "-y", "-threads", str(get_settings().media_threads), "-i", str(video_path),
         # -fps_mode replaced -vsync in ffmpeg 5.1 and -vsync was removed in 7; the

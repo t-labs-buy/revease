@@ -83,7 +83,7 @@ def diff_graphs(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
 
 
 CARRY_KEYS = (
-    "voice", "aspect", "intro", "outro", "captions", "music", "title",
+    "voice", "aspect", "export", "intro", "outro", "captions", "music", "title",
     # user-level look/timing settings must survive a reprocess (e.g. trim keep-ranges)
     "crop", "crops", "elements", "brand", "motion_zoom", "pace", "background",
     # editor Media tab: inserted clips / title cards and picture-in-picture overlays

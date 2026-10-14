@@ -24,7 +24,7 @@ from typing import Any
 from sqlalchemy import select
 
 from app.db import SessionLocal
-from app.editspec import effective_inserts, effective_script
+from app.editspec import effective_inserts, effective_script, spoken_text, split_pauses
 from app.usage import record_event
 from app.models import MediaAsset, Project, RenderJob, VideoProject, WorkflowGraphRow
 from app.storage import store
@@ -37,6 +37,53 @@ log = logging.getLogger("refract.pipeline.render")
 
 ASPECTS = {"16:9": (1920, 1080), "9:16": (1080, 1920), "1:1": (1080, 1080)}
 FPS = 30
+
+
+def _even(n: float) -> int:
+    return max(2, int(round(n / 2)) * 2)  # yuv420p needs even dimensions
+
+
+def output_dims(aspect: str, short: int) -> tuple[int, int]:
+    """Frame size for `aspect` whose short side is `short` pixels. Both sides
+    are even: "Match recording" can hand us a window share such as 1850x1053,
+    and libx264 refuses an odd yuv420p dimension outright."""
+    short = _even(short)
+    if aspect == "9:16":
+        return (short, _even(short * 16 / 9))
+    if aspect == "1:1":
+        return (short, short)
+    return (_even(short * 16 / 9), short)
+
+
+def export_dims(spec: dict[str, Any], source_dims: tuple[int, int] | None) -> tuple[int, int]:
+    """The export frame from the spec's aspect + export resolution. Pure."""
+    aspect = spec.get("aspect", "16:9")
+    res = str((spec.get("export") or {}).get("resolution") or DEFAULT_RESOLUTION)
+    if res == "source" and source_dims:
+        short = min(max(min(source_dims), 720), 2160)
+    else:
+        short = RESOLUTIONS.get(res, RESOLUTIONS[FALLBACK_RESOLUTION])
+    return output_dims(aspect, short)
+
+
+def export_quality(spec: dict[str, Any]) -> tuple[str, str, str]:
+    """(tier, crf, preset) for the final encode from the spec's export quality."""
+    tier = str((spec.get("export") or {}).get("quality") or DEFAULT_QUALITY)
+    if tier not in QUALITY:
+        tier = DEFAULT_QUALITY
+    return (tier, *QUALITY[tier])
+
+
+def _probe_dims(path: Path) -> tuple[int, int] | None:
+    proc = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height",
+         "-of", "csv=p=0", str(path)], capture_output=True, text=True,
+    )
+    try:
+        w, h = proc.stdout.strip().split(",")[:2]
+        return (int(w), int(h))
+    except (ValueError, AttributeError):
+        return None
 # Every clip that feeds the final concat MUST share one video time base. The
 # concat demuxer (ffmpeg 4.4 on the deploy host) does not rescale between
 # differing time bases: a 30 fps intro (tbn 15360) followed by 25 fps scenes
@@ -57,9 +104,22 @@ DEFAULT_PACE = 1.0  # global tempo, applies uniformly whether a scene has voice 
 # and the next starts on the very next frame, which reads as rushed. The pause is
 # baked into the scene's audio (and thus its timeline slot), so nothing drifts.
 SCENE_GAP_MS = 800
-# Screen recordings are mostly text; the x264 default (crf 23) — applied twice,
-# once per segment and again at concat — smears it. 18 is visually lossless.
-CRF = "18"
+# Screen recordings are mostly text, and every clip here is encoded TWICE: once
+# as a scene (three times with a zoom) and again at the final join. The x264
+# default (crf 23) at each pass smeared it. Intermediates are therefore
+# near-lossless (crf 14 — they only feed the next encode and live in the render
+# cache), and only the FINAL encode decides the file: the user's export quality.
+CRF = "14"
+# Export quality tiers -> (crf, x264 preset) for the final join. A slower preset
+# finds a better encode at the same crf, so "best" costs export time, not just size.
+QUALITY = {"standard": ("20", "veryfast"), "high": ("17", "medium"), "best": ("15", "slow")}
+DEFAULT_QUALITY = "high"
+# Export resolutions by SHORT side; the aspect decides the frame. "source" takes
+# the recording's own short side (clamped to the table's range) — the only way a
+# 1440p/4K capture keeps its detail, and pointless for a 720p one.
+RESOLUTIONS = {"720p": 720, "1080p": 1080, "1440p": 1440, "2160p": 2160}
+DEFAULT_RESOLUTION = "source"
+FALLBACK_RESOLUTION = "1080p"  # no source dims, or a spec from before this field
 
 # Auto-zoom density: zooming every scene makes the whole video feel like it never
 # stops moving. Keep at least this much SOURCE time between zoom-ins (the output
@@ -538,18 +598,26 @@ def _render_segment(seg, seg_tl, src_video, dims, captions, font, work: Path,
         # word timestamps, so each chunk's window is proportional to its share of
         # the script's characters within the voiced part of the slot (the trailing
         # SCENE_GAP_MS breather stays caption-free).
-        chunks = _caption_chunks(script)
+        # A script with pause markers arrives as cues — each spoken stretch with
+        # its real start/end — so captions go quiet during a pause instead of
+        # drifting across it.
         voiced_s = max(0.3, dur_s - seg.get("_gap_ms", 0) / 1000.0)
-        total_chars = sum(len(c) for c in chunks) or 1
-        t0 = 0.0
-        for i, chunk in enumerate(chunks):
-            capfile = work / f"cap_{clip_hash}_{i}.txt"
-            capfile.write_text(chunk)
-            t1 = voiced_s if i == len(chunks) - 1 else t0 + voiced_s * len(chunk) / total_chars
-            dt = _drawtext(font, capfile, size=int(dims[0] / 48), y="h-th-40")
-            if dt:
-                parts.append(f"{dt}:enable='between(t,{t0:.3f},{t1:.3f})'")
-            t0 = t1
+        cues = seg.get("_cues") or [(script, 0, voiced_s * 1000)]
+        n_cap = 0
+        for text, c0, c1 in cues:
+            chunks = _caption_chunks(text)
+            w0, w1 = c0 / 1000.0, min(dur_s, c1 / 1000.0)
+            total_chars = sum(len(c) for c in chunks) or 1
+            t0 = w0
+            for i, chunk in enumerate(chunks):
+                capfile = work / f"cap_{clip_hash}_{n_cap}.txt"
+                n_cap += 1
+                capfile.write_text(chunk)
+                t1 = w1 if i == len(chunks) - 1 else t0 + (w1 - w0) * len(chunk) / total_chars
+                dt = _drawtext(font, capfile, size=int(dims[0] / 48), y="h-th-40")
+                if dt:
+                    parts.append(f"{dt}:enable='between(t,{t0:.3f},{t1:.3f})'")
+                t0 = t1
     image_inputs: list[Path] = []
     element_filters, image_overlays = _element_filters(
         elements, dims, font, work, clip_hash, image_inputs, 2,
@@ -853,7 +921,7 @@ def _exact_audio(clip: Path, slot_ms: int) -> Path:
 
 
 def _join_cmd(video_list: Path, audio_list: Path, ov_inputs: list[str], ov_graph: str,
-              total_ms: int, out: Path) -> list[str]:
+              total_ms: int, out: Path, crf: str = CRF, preset: str = "veryfast") -> list[str]:
     """ffmpeg command for the final join: video from the clip concat (input 0),
     Media-tab overlays composited in the same encode (inputs 1..n, see
     _overlay_graph), and audio from the exact-length PCM concat — appended
@@ -863,7 +931,7 @@ def _join_cmd(video_list: Path, audio_list: Path, ov_inputs: list[str], ov_graph
     return ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(video_list), *ov_inputs,
             "-f", "concat", "-safe", "0", "-i", str(audio_list),
             *video_map, "-map", f"{a_idx}:a",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", CRF, "-pix_fmt", "yuv420p",
+            "-c:v", "libx264", "-preset", preset, "-crf", crf, "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-t", f"{total_ms / 1000:.3f}", str(out)]
 
 
@@ -943,6 +1011,54 @@ class StepAudio:
     duration_ms: int
     cached: bool
     gap_ms: int  # SCENE_GAP_MS if this is a narrated (TTS) clip, else 0
+    # Only for a script with pause markers: (spoken text, start_ms, end_ms) per
+    # voiced stretch, on the clip's clock — what captions are timed against.
+    cues: list[tuple[str, int, int]] | None = None
+
+
+def _paused_step_audio(
+    parts: list[str | float], *, work: Path, voice: dict[str, Any], pace: float
+) -> StepAudio | None:
+    """Voice a script that contains pause markers: each spoken stretch is
+    synthesised on its own (so it shares the TTS cache with any other scene
+    saying the same words, and editing one pause re-synthesises nothing), then
+    joined with silences of the marked lengths plus the usual scene breather.
+    None when the join fails — the caller then voices the text without pauses."""
+    inputs: list[Path] = []
+    names: list[str] = []
+    cues: list[tuple[str, int, int]] = []
+    cached = True
+    t = 0
+    for p in parts:
+        if isinstance(p, float):
+            ms = int(round(p * 1000))
+            sil = work / f"pause_{ms}.wav"
+            if not sil.exists():
+                _silent_wav(sil, ms)
+            inputs.append(sil)
+            names.append(f"p{ms}")
+            t += ms
+        else:
+            r = synth_step(p, media_root=store.root, voice_id=voice["voice_id"],
+                           speed=voice.get("speed", 1.0) * pace)
+            local = store.local_path(r.storage_key)
+            inputs.append(local)
+            names.append(local.stem)
+            cues.append((p, t, t + r.duration_ms))
+            t += r.duration_ms
+            cached = cached and r.cached
+    out = work / f"pad{SCENE_GAP_MS}_pz{_sha(names)}.wav"
+    if not out.exists():
+        cmd = ["ffmpeg", "-y"]
+        for p in inputs:
+            cmd += ["-i", str(p)]
+        chain = "".join(f"[{i}:a]" for i in range(len(inputs)))
+        cmd += ["-filter_complex",
+                f"{chain}concat=n={len(inputs)}:v=0:a=1,apad=pad_dur={SCENE_GAP_MS / 1000:.3f}[a]",
+                "-map", "[a]", "-ac", "1", "-ar", "24000", "-c:a", "pcm_s16le", str(out)]
+        if not _run(cmd) or not out.exists():
+            return None
+    return StepAudio(str(out), t + SCENE_GAP_MS, cached, SCENE_GAP_MS, cues)
 
 
 def compute_step_audio(
@@ -957,7 +1073,7 @@ def compute_step_audio(
     in the render."""
     script = effective_script(s.get("words", []), s.get("removed", []))
     src_ms = max(0, s.get("source_end_ms", 0) - s.get("source_start_ms", 0))
-    if not script.strip():
+    if not spoken_text(script):  # nothing to say (a lone pause marker counts as nothing)
         dur_ms = max(300, int(src_ms / pace))
         apath = work / f"sil_{s['step_id']}_{dur_ms}.wav"
         if not apath.exists():
@@ -969,6 +1085,15 @@ def compute_step_audio(
             src_video, s.get("source_start_ms", 0), s.get("source_end_ms", 0), apath, tempo=pace,
         )
         return StepAudio(str(apath), dur_ms, False, 0)
+    # Pause markers take their own path; a script without one must stay on the
+    # exact path below, or every existing clip's hash (via the audio file name)
+    # would change and nothing would be reused.
+    parts = split_pauses(script)
+    if any(isinstance(p, float) for p in parts):
+        paused = _paused_step_audio(parts, work=work, voice=voice, pace=pace)
+        if paused is not None:
+            return paused
+        script = spoken_text(script)
     r = synth_step(script, media_root=store.root, voice_id=voice["voice_id"],
                     speed=voice.get("speed", 1.0) * pace)
     tts_local = store.local_path(r.storage_key)
@@ -998,7 +1123,6 @@ def run_render(render_job_id: str) -> dict:
 
         vp = db.get(VideoProject, job.video_project_id)
         spec = vp.edit_spec_json
-        dims = ASPECTS.get(spec.get("aspect", "16:9"), ASPECTS["16:9"])
         captions = bool(spec.get("captions", {}).get("enabled", True))
         voice = spec.get("voice", {"voice_id": "alloy", "speed": 1.0})
         font = _font()
@@ -1010,6 +1134,8 @@ def run_render(render_job_id: str) -> dict:
             .order_by(WorkflowGraphRow.version.desc())
         )
         src_video, src_session_id = _find_source_video(db, vp.project_id)
+        dims = export_dims(spec, _probe_dims(src_video) if src_video else None)
+        quality, final_crf, final_preset = export_quality(spec)
 
         segs = spec.get("segments", [])
         # skip: scenes flagged "skipped" are dropped from the render entirely.
@@ -1111,6 +1237,8 @@ def run_render(render_job_id: str) -> dict:
             s["_audio_path"] = audio.path
             if audio.gap_ms:
                 s["_gap_ms"] = audio.gap_ms  # captions stop before the breather
+            if audio.cues:
+                s["_cues"] = audio.cues
                 tts_cached += int(audio.cached)
                 tts_synth += int(not audio.cached)
             z = s.get("zoom") or {}
@@ -1192,14 +1320,16 @@ def run_render(render_job_id: str) -> dict:
         music = spec.get("music") or {}
         music_src = _music_source(music, work)
         overlays = [o for o in spec.get("overlays") or [] if isinstance(o, dict) and o.get("media_key")]
-        overall = _sha([c.name for c in clips], music, overlays)
+        overall = _sha([c.name for c in clips], music, overlays, quality)
         out_key = f"renders/{vp.id}/final_{overall}.mp4"
         out_path = store.local_path(out_key)
         ov_inputs, ov_graph = _overlay_graph(overlays, placed, dims)
-        ok = _run(_join_cmd(list_file, audio_list, ov_inputs, ov_graph, clock, out_path))
+        ok = _run(_join_cmd(list_file, audio_list, ov_inputs, ov_graph, clock, out_path,
+                            crf=final_crf, preset=final_preset))
         if not ok and ov_graph:
             log.warning("overlay pass failed; exporting without overlays")
-            ok = _run(_join_cmd(list_file, audio_list, [], "", clock, out_path))
+            ok = _run(_join_cmd(list_file, audio_list, [], "", clock, out_path,
+                                crf=final_crf, preset=final_preset))
         if not ok:
             raise RuntimeError("concat failed")
 
@@ -1228,6 +1358,8 @@ def run_render(render_job_id: str) -> dict:
             "inserts": inserts_done,
             "overlays": len(overlays),
             "aspect": spec.get("aspect"),
+            "quality": quality,
+            "dims": list(dims),
         }
         report(0.96, "Saving the video…")
         store.commit(out_key)

@@ -162,3 +162,35 @@ def test_backdrop_source_is_pinned_to_fps():
 
 def test_mp4_timescale_matches_fps():
     assert MP4_TIMESCALE == FPS * 512
+
+
+def test_export_dims_follow_resolution_and_aspect():
+    from worker.pipeline.render import export_dims, output_dims
+
+    assert output_dims("16:9", 1080) == (1920, 1080)
+    assert output_dims("9:16", 1080) == (1080, 1920)
+    assert output_dims("1:1", 720) == (720, 720)
+    assert output_dims("16:9", 768) == (1366, 768)  # even sizes for yuv420p
+    assert export_dims({"aspect": "16:9"}, None) == (1920, 1080)  # no source dims: 1080p
+    assert export_dims({"aspect": "16:9"}, (1280, 720)) == (1280, 720)  # default: the recording's size
+    assert export_dims({"aspect": "16:9", "export": {"resolution": "2160p"}}, None) == (3840, 2160)
+    # "source" takes the recording's short side, clamped to the table's range
+    assert export_dims({"aspect": "16:9", "export": {"resolution": "source"}}, (2560, 1440)) == (2560, 1440)
+    assert export_dims({"aspect": "16:9", "export": {"resolution": "source"}}, (640, 360)) == (1280, 720)
+    assert export_dims({"aspect": "16:9", "export": {"resolution": "source"}}, None) == (1920, 1080)
+    # an odd-sized window share (libx264 would refuse 1872x1053)
+    assert export_dims({"aspect": "16:9"}, (1850, 1053)) == (1870, 1052)
+    assert output_dims("9:16", 1053) == (1052, 1870)
+    assert export_dims({"aspect": "16:9", "export": {"resolution": "nope"}}, None) == (1920, 1080)
+
+
+def test_export_quality_sets_the_final_encode_only():
+    from worker.pipeline.render import CRF, export_quality
+
+    assert export_quality({}) == ("high", "17", "medium")
+    assert export_quality({"export": {"quality": "best"}}) == ("best", "15", "slow")
+    assert export_quality({"export": {"quality": "bogus"}}) == ("high", "17", "medium")
+    cmd = render._join_cmd(Path("v.txt"), Path("a.txt"), [], "", 1000, Path("o.mp4"), crf="15", preset="slow")
+    assert cmd[cmd.index("-crf") + 1] == "15" and cmd[cmd.index("-preset") + 1] == "slow"
+    # intermediates stay near-lossless whatever the export tier
+    assert int(CRF) <= 15

@@ -15,14 +15,20 @@ import type { UploadProgress } from "@/lib/upload";
 import { fmtBytes } from "@/lib/upload";
 import { Spinner } from "@/components/ui";
 import {
+  captureConstraints,
   checkVideoFile,
   clockOf,
+  DEFAULT_RECORD_QUALITY,
   LIMIT_LABEL,
   MAX_VIDEO_MIN,
+  RECORD_AUDIO_BPS,
+  RECORD_QUALITIES,
   RECORD_WARN_BYTES,
   RECORD_WARN_MS,
+  type RecordQuality,
   recordingLimitHit,
   recordingStoppedNote,
+  recordMinutesAt,
 } from "@/lib/limits";
 
 /** "Uploading 42% · 1.2 GB of 2.9 GB" — large recordings take a while. */
@@ -95,6 +101,23 @@ export function CaptureModal({
   const [uploadProg, setUploadProg] = useState<UploadProgress | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const [hasAudio, setHasAudio] = useState<boolean | null>(null);
+  // Remembered per browser: a user who records demos wants Sharp every time.
+  const [recQuality, setRecQuality] = useState<RecordQuality>(() => {
+    try {
+      const v = localStorage.getItem("rec.quality");
+      return v === "sharp" || v === "long" ? v : DEFAULT_RECORD_QUALITY;
+    } catch {
+      return DEFAULT_RECORD_QUALITY;
+    }
+  });
+  const pickQuality = (q: RecordQuality) => {
+    setRecQuality(q);
+    try {
+      localStorage.setItem("rec.quality", q);
+    } catch {
+      /* private window */
+    }
+  };
   const streamRef = useRef<MediaStream | null>(null);
   const recRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
@@ -127,7 +150,7 @@ export function CaptureModal({
     setError(null);
     try {
       // must be first in the user gesture
-      const display = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+      const display = await navigator.mediaDevices.getDisplayMedia(captureConstraints());
       displayRef.current = display;
       let mic: MediaStream | null = null;
       try {
@@ -168,7 +191,13 @@ export function CaptureModal({
         ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"].find((m) =>
           MediaRecorder.isTypeSupported(m),
         ) || "video/webm";
-      const rec = new MediaRecorder(stream, { mimeType: mime });
+      // Bit rate is the recording's quality (see lib/limits RECORD_QUALITIES);
+      // Chrome's default would compress 1080p text to mush.
+      const rec = new MediaRecorder(stream, {
+        mimeType: mime,
+        videoBitsPerSecond: RECORD_QUALITIES[recQuality].bps,
+        audioBitsPerSecond: RECORD_AUDIO_BPS,
+      });
       bytesRef.current = 0;
       limitRef.current = null;
       setRecBytes(0);
@@ -375,8 +404,31 @@ export function CaptureModal({
                   <strong> “Share tab audio”</strong> in the picker, and allow your microphone when
                   prompted.
                 </div>
+                <div className="mt-3 flex items-center justify-center gap-1 rounded-xl border border-[var(--border)] p-1 text-xs">
+                  {(Object.keys(RECORD_QUALITIES) as RecordQuality[]).map((q) => {
+                    const info = RECORD_QUALITIES[q];
+                    const on = recQuality === q;
+                    return (
+                      <button
+                        key={q}
+                        onClick={() => pickQuality(q)}
+                        title={`${info.blurb} · ${(info.bps / 1_000_000).toFixed(1)} Mbps`}
+                        className={`flex-1 rounded-lg px-3 py-1.5 transition-colors ${
+                          on ? "bg-[#1E8F8E] text-white" : "text-[var(--text-2)] hover:bg-[var(--hover)]"
+                        }`}
+                      >
+                        <span className="font-semibold">{info.label}</span>
+                        <span className={on ? "text-white/80" : "text-[var(--text-3)]"}>
+                          {" "}
+                          · up to {recordMinutesAt(info.bps)} min
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
                 <p className="mt-2 text-xs text-[var(--text-3)]">
-                  Each recording can be {LIMIT_LABEL}; it stops and saves by itself at the limit.
+                  {RECORD_QUALITIES[recQuality].blurb}. Recordings are {LIMIT_LABEL}; it stops and
+                  saves by itself at the limit.
                 </p>
                 <button onClick={startRecording} className="btn btn-primary mt-4">
                   <IconPlus width={16} height={16} /> Start recording

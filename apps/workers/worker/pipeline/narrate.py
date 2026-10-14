@@ -62,7 +62,7 @@ def _is_verbatim_partition(segments: list[str], transcript: str) -> bool:
 ALIGN_SYSTEM = (
     "You align a product-demo narration script to the ordered steps the demo performs. "
     "You receive the full transcript and a numbered list of steps (each with what it does "
-    "and which coverage-plan item it belongs to). Split the transcript into exactly one "
+    "and, when there is a coverage plan, which plan item it belongs to). Split the transcript into exactly one "
     "contiguous slice per step, IN ORDER, so that concatenating all slices reproduces the "
     "transcript EXACTLY — every word, verbatim, nothing added, removed, reworded, or "
     "reordered. A step may get an empty string when no narration belongs to it (e.g. a "
@@ -81,10 +81,11 @@ def _align_prompt(steps: list[dict], plan_items: list[dict], transcript: str) ->
         }
         for i, s in enumerate(steps)
     ]
+    # A user script applied to a recorded session has steps but no coverage plan.
+    plan = "Coverage plan:\n" + json.dumps(plan_items, ensure_ascii=False) + "\n\n" if plan_items else ""
     return (
-        "Coverage plan:\n"
-        + json.dumps(plan_items, ensure_ascii=False)
-        + f"\n\nTranscript (verbatim, {len(_words(transcript))} words):\n"
+        plan
+        + f"Transcript (verbatim, {len(_words(transcript))} words):\n"
         + json.dumps(transcript, ensure_ascii=False)
         + f"\n\nSteps ({len(steps)}):\n"
         + json.dumps(numbered, ensure_ascii=False)

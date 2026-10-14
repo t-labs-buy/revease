@@ -33,8 +33,12 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   const hasGraph = sessions.some((s) => s.status === "ready");
 
   return (
-    <main className="min-h-screen bg-[var(--bg)]">
-      <div className="mx-auto max-w-[1600px] px-8 py-10">
+    // The page is sized to the viewport minus the top bar (h-14) and the
+    // footer (h-12): the heading and the capture panel stay put and only the
+    // captures grid scrolls, inside its own box, when there are more cards
+    // than fit. A document-tall page scrolled the whole window instead.
+    <main className="flex h-[calc(100dvh-3.5rem-3rem)] flex-col bg-[var(--bg)]">
+      <div className="mx-auto flex min-h-0 w-full max-w-[1600px] flex-1 flex-col px-8 py-6">
         <Link
           href="/"
           className="btn btn-ghost -ml-3 flex h-12 w-12 items-center justify-center text-2xl leading-none"
@@ -105,7 +109,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
         {/* Capture panel — shelved. Both cards are drawn but dimmed and inert,
             with an "Upcoming" chip on top that stays at full contrast rather
             than fading along with the card behind it. */}
-        <div className="mt-10 grid gap-6 md:grid-cols-2">
+        <div className="mt-6 grid gap-6 md:grid-cols-2">
           <div aria-disabled="true" className="relative cursor-not-allowed select-none">
             <div className="pointer-events-none h-full opacity-40">
               <div className="card h-full p-6">
@@ -160,21 +164,24 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
         </div>
 
         {/* Captures */}
-        <div className="mt-12 flex items-center justify-between">
+        <div className="mt-8 flex items-center justify-between">
           <h2 className="text-[28px] font-semibold tracking-tight text-[var(--text)]">Captures</h2>
         </div>
         {sessions.length === 0 && !error ? (
-          <div className="mt-6">
+          <div className="mt-4">
             <EmptyState
               title="No captures yet"
               hint="Record your screen or upload a video above — it'll appear here and process into a Workflow Graph."
             />
           </div>
         ) : (
-          <div className="mt-6 grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-            {sessions.map((s) => (
-              <CaptureCard key={s.id} session={s} href={`/projects/${id}/sessions/${s.id}`} />
-            ))}
+          // the one scrolling region of the page (see <main>)
+          <div className="mt-4 min-h-0 flex-1 overflow-y-auto pb-2 pr-1">
+            <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 2xl:grid-cols-6">
+              {sessions.map((s) => (
+                <CaptureCard key={s.id} session={s} href={`/projects/${id}/sessions/${s.id}`} />
+              ))}
+            </div>
           </div>
         )}
       </div>

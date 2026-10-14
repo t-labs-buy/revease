@@ -9,7 +9,7 @@ from typing import Literal
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -18,9 +18,10 @@ from app.progress import summarize
 from app.auth import CurrentUser
 from app.db import get_session
 from app.limits import check_duration
+from app.llm import has_llm
 from app.models import CaptureSession, Event, Job, MediaAsset, Project
 from app.ownership import owned_project, owned_session, project_ids_for
-from app.queue import enqueue_understanding
+from app.queue import enqueue_script_generate, enqueue_understanding
 from app.usage import record_event
 from app.schemas import (
     AssetRegister,
@@ -31,6 +32,7 @@ from app.schemas import (
     SessionCreate,
     SessionDetail,
     SessionOut,
+    SessionScript,
     SessionStatus,
     SessionTrim,
     UploadTargetOut,
@@ -74,6 +76,7 @@ def create_session(
         telemetry="absent",
         status="created",
         viewport_json=payload.viewport.model_dump() if payload.viewport else None,
+        script_text=(payload.script or "").strip() or None,
     )
     db.add(sess)
     db.commit()
@@ -207,6 +210,72 @@ def reprocess_session(
     return sess
 
 
+@router.put("/{session_id}/script", response_model=SessionOut)
+def set_script(
+    session_id: str, payload: SessionScript, user: CurrentUser, db: Session = Depends(get_session)
+) -> CaptureSession:
+    """Set (or, with an empty string, clear) the narration script and re-run
+    understanding, which rebuilds the scenes around it. Refused while a run is
+    live for the same reason as reprocess — and so the script a running pipeline
+    read can't change underneath it."""
+    sess = owned_session(db, user, session_id)
+    if _pipeline_running(db, sess.id):
+        raise HTTPException(status_code=409, detail="this recording is still being processed")
+    sess.script_text = payload.script.strip() or None
+    db.commit()
+    db.refresh(sess)
+    enqueue_understanding(sess.id)
+    return sess
+
+
+class ScriptGenerateReq(BaseModel):
+    brief: str = Field(min_length=1, max_length=4000)  # what the video is about, from the author
+    mode: Literal["fit", "free"] = "fit"  # fit: lines sized to their footage; free: no limit
+    instruction: str | None = Field(default=None, max_length=1000)  # tone etc.
+
+
+@router.post("/{session_id}/generate-script", response_model=JobOut, status_code=202)
+def generate_script_from_recording(
+    session_id: str, payload: ScriptGenerateReq, user: CurrentUser, db: Session = Depends(get_session)
+) -> Job:
+    """Write the narration from the recording's frames (app.videoscript) as a
+    background job, then re-run understanding with it so the scenes are rebuilt
+    around the lines — the whole-recording Generate. The Job row (stage
+    "script", this run's version) carries progress; `GET /status` lists it.
+    Refused while a run is live, like set_script, and without an AI key."""
+    sess = owned_session(db, user, session_id)
+    if _pipeline_running(db, sess.id):
+        raise HTTPException(status_code=409, detail="this recording is still being processed")
+    if not has_llm():
+        raise HTTPException(
+            status_code=400,
+            detail="no AI key configured (set REFRACT_ANTHROPIC_API_KEY or REFRACT_OPENROUTER_API_KEY)",
+        )
+    n_frames = db.scalar(
+        select(func.count()).select_from(MediaAsset).where(
+            MediaAsset.session_id == sess.id, MediaAsset.kind == "frame"
+        )
+    )
+    if not n_frames:
+        raise HTTPException(status_code=400, detail="this recording has no frames yet — process it first")
+    version = db.scalar(select(func.max(Job.version)).where(Job.session_id == sess.id)) or 0
+    job = db.scalar(
+        select(Job).where(Job.session_id == sess.id, Job.stage == "script", Job.version == version)
+    )
+    if job is None:
+        job = Job(session_id=sess.id, stage="script", version=version)
+        db.add(job)
+    job.status = "pending"
+    job.progress = 0.0
+    job.message = "Queued"
+    job.error_json = None
+    job.started_at = None
+    db.commit()
+    db.refresh(job)
+    enqueue_script_generate(sess.id, job.id, payload.brief.strip(), payload.mode, payload.instruction)
+    return job
+
+
 def _pipeline_running(db: Session, session_id: str) -> bool:
     """A stage is running with a fresh heartbeat (see worker progress.Heartbeat)."""
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=get_settings().pipeline_stale_after_s)
@@ -264,6 +333,7 @@ def get_session_detail(
     detail = SessionDetail.model_validate(sess)  # assets filled from the relationship
     detail.event_count = event_count or 0
     detail.poster = _poster_for(db, sess.id)
+    detail.script = sess.script_text
     return detail
 
 

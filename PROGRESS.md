@@ -136,6 +136,89 @@ Release-gate checklist (§5) all satisfied except the two provider-key items (Wh
   packed clock. A crop left entirely inside a cut (cropped first, trimmed
   later) packs to zero width and is not drawn — it matches no scene, so it has
   no effect anyway. The main timeline stays on the raw clock by choice.
+## Narration for videos without a voiceover (2026-10-06)
+
+Everything up to the editor is unchanged: record / upload → processing starts
+at once, exactly as before, and processing **never writes narration** (no
+tokens spent without asking). A voiceless recording opens in the editor with
+empty scenes and a panel offering **Generate script** / **Upload script**.
+
+- **Generate script** (editor, on click only). The existing
+  `POST /projects/{id}/generate-script` now takes each scene's `screenshot`;
+  with frames present it calls the model through `llm.complete_vision`
+  (`rewrite._gen_with_frames`, 12 scenes per call) so a silent recording is
+  narrated from what is on screen rather than from "Screen N" labels. Frames
+  are downscaled by `app/frames.py` (Pillow via fpdf2, no new dependency).
+- **Upload script** (editor "Apply script"; also `script` on session create for
+  API callers). Stored on `CaptureSession.script_text`; `PUT
+  /sessions/{id}/script` sets or clears it and re-runs understanding (409
+  while live, like reprocess). The modal waits for the new graph version.
+- **Timing.** A script needs no timestamps: a scene's output length is already
+  its TTS length, so the only thing computed is which stretch of video each
+  line owns. `worker/pipeline/scriptalign.py` (pure): one scene per sentence;
+  starts from a user timestamp (`[0:42]`, `1:02 -`, SRT cues) when written,
+  else the vision model's answer (`scriptvision.align_starts`, up to 48
+  downscaled keyframes), else the line's share of the words; unpinned starts
+  snap to a real screen change. Windows partition the kept video (trim /
+  keep ranges honoured), narration stays verbatim. On a click-telemetry
+  session the click steps are kept and the script is spread across them with
+  the Auto Record aligner (`narrate_steps`, now plan-optional).
+- **Silent upload, no script.** `media.detect_scene_cuts` (one low-res ffmpeg
+  pass, `scene>0.08`) replaces the evenly spaced slices with real screen
+  changes (`segment.scene_bounds`, still capped at 20). No AI call: the
+  scenes stay empty until the user presses Generate or uploads a script.
+- **Pause markers.** `[pause:1.5]` (0.2–3 s) inside a scene's script is one
+  token; `editspec.split_pauses` / `spoken_text` are shared by API, worker and
+  a TS port in `lib/api.ts`. The renderer voices each stretch separately and
+  joins them with silence (`_paused_step_audio`), captions go quiet during the
+  pause, docs / titles / rewrite prompts see the prose only. A script without
+  markers takes the exact old path, so existing clip hashes are unchanged
+  (render test asserts a pause re-renders only its own scene).
+- Tests: `apps/workers/tests/test_scriptalign.py`, `test_pipeline_script.py`,
+  `test_segment.py` (cuts), `test_render.py` (pause); `apps/api/tests/test_script.py`,
+  `test_llm.py` (Generate with frames).
+
+## Generate from the whole recording (2026-10-13)
+
+Why: on a silent upload the per-scene Generate wrote into the segmenter's five
+"Screen N" scenes from one frame each, under word caps of 5–27 words, and the
+result could not match the script the same video got when dropped into a chat
+with Claude (dozens of frames, free structure). One in four runs also failed
+with "did not answer in time" when the model had answered in four seconds but
+split its reply across several arrays.
+
+- **Whole-recording Generate.** `POST /sessions/{id}/generate-script`
+  `{brief, mode, instruction}` queues `refract.script.generate` (default
+  queue) with a Job row (stage `script`) the status endpoint lists. The worker
+  (`videoscript_job.py`) shows the model the recording's stored keyframes,
+  windowed at 60 per call (`app/videoscript.py`, pure helpers), each window
+  seeded with the previous window's last lines; the reply is timed lines
+  (`{"t", "line"}`), joined and written to `CaptureSession.script_text` as
+  `[m:ss.s] line`, then understanding re-runs — the ordinary Apply-script
+  path, so the model's cuts become the scenes and the graph is never touched
+  here. Click recordings keep their click scenes (the script is spread across
+  them, as before).
+- **Two lengths.** `mode: "fit"` budgets each line by the footage to the next
+  start (same `scene_word_budget` + shorten-then-trim as the per-scene path);
+  `"free"` has no limit and leaves pacing to Fit narration. The per-scene
+  Generate takes the same choice (free = no `max_words` sent).
+- **Editor.** The Generate modal asks for the brief, Source (Whole recording /
+  Current scenes — defaults to the recording when every scene is empty or the
+  scenes were cut for an uploaded script) and Length, then waits on the job
+  and the rebuild like Apply script does.
+- **Long recordings.** `media.keyframe_fps` spreads the 600-frame cap over the
+  whole length (a 30-min recording used to get frames for its first ten
+  minutes only, so nothing after that had cuts, alignment or narration). Up to
+  10 vision calls per Generate, ~350 input tokens a frame.
+- **Parser + error.** `rewrite.json_values` reads one array, several arrays on
+  separate lines, or an array inside prose/fences; all-batches-failed now
+  reports the real reason (an unreadable reply) instead of a timeout.
+- Tests: `apps/api/tests/test_videoscript.py` (windowing, parsing, joining,
+  fit budgets, the route's 202/400/404/409/422), `apps/workers/tests/
+  test_videoscript_job.py` (job end-to-end offline, then the pipeline cuts
+  one scene per line at the model's times; failure leaves the script alone),
+  `test_media_progress.py` (keyframe_fps).
+
 ## Deployed to ivolve as v3 (2026-09-24)
 
 - Images `reg.ivolve.cloud/ivolve/revease:{api,worker,web}-v3`, built natively on the host.

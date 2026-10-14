@@ -124,6 +124,7 @@ export interface Asset {
 export interface SessionDetail extends Session {
   assets: Asset[];
   event_count: number;
+  script?: string | null; // the narration script the user supplied, if any
 }
 
 export interface CaptureEvent {
@@ -347,6 +348,94 @@ export async function setTrim(
   return r.json();
 }
 
+/** Replace (or, with "", clear) a recording's narration script. The pipeline
+ * re-runs and rebuilds the scenes around it; 409 while it is still processing. */
+export async function setSessionScript(sessionId: string, script: string): Promise<Session> {
+  const r = await apiFetch(`/sessions/${sessionId}/script`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ script }),
+  });
+  if (r.status === 409) throw new Error("This recording is still being processed — try again in a moment.");
+  if (!r.ok) throw new Error(`setSessionScript failed: ${r.status}`);
+  pokeActivity();
+  return r.json();
+}
+
+// Pause marker inside a scene's script, e.g. `[pause:1.5]` — one token, voiced
+// as silence. Ports of PAUSE_RE / split_pauses / spoken_text in
+// apps/api/app/editspec.py; keep the three in step.
+export const PAUSE_RE = /\[pause:(\d+(?:\.\d+)?)\]/gi;
+export const PAUSE_MIN_S = 0.2;
+export const PAUSE_MAX_S = 3.0;
+const clampPause = (s: number) => Math.min(PAUSE_MAX_S, Math.max(PAUSE_MIN_S, s));
+
+/** Seconds if `word` is a pause marker, else null. */
+export function pauseSeconds(word: string): number | null {
+  const m = /^\[pause:(\d+(?:\.\d+)?)\]$/i.exec(word);
+  return m ? clampPause(parseFloat(m[1])) : null;
+}
+
+export const pauseToken = (seconds: number) => `[pause:${clampPause(seconds)}]`;
+
+/** The script as prose: pause markers removed. */
+export function spokenText(script: string): string {
+  return script.replace(PAUSE_RE, " ").trim().split(/\s+/).filter(Boolean).join(" ");
+}
+
+/** Most words a scene of `seconds` can carry at voice `speed` (speed × pace)
+ * before the render would freeze its last frame waiting for the voice. Port of
+ * rewrite.scene_word_budget: ~2.3 words/s (a little under Kokoro's real rate)
+ * after the 0.8 s scene gap. */
+export function sceneWordBudget(seconds: number, speed = 1): number {
+  return Math.max(0, Math.floor((seconds - 0.8) * 2.3 * Math.max(0.5, speed)));
+}
+
+/** The whole script against the whole recording. When the total runs over,
+ * every scene overruns at once (a long script spread over short footage) and
+ * per-scene fixes are pointless — the script as a whole has to shrink, or the
+ * recording grow. `ratio` is how much of each line can stay. */
+export function scriptFit(spec: EditSpec): { words: number; budget: number; ratio: number } {
+  let words = 0;
+  let budget = 0;
+  const speed = (spec.voice.speed || 1) * Math.min(1.5, Math.max(1, spec.pace ?? 1));
+  for (const seg of spec.segments) {
+    if (seg.skipped) continue;
+    const kept = seg.words.filter((_, i) => !seg.removed.includes(i));
+    const n = kept.filter((w) => pauseSeconds(w) === null).length;
+    if (!n) continue;
+    const pauseS = kept.reduce((t, w) => t + (pauseSeconds(w) ?? 0), 0);
+    words += n;
+    budget += sceneWordBudget((seg.source_end_ms - seg.source_start_ms) / 1000 - pauseS, speed);
+  }
+  return { words, budget, ratio: words ? Math.min(1, budget / words) : 1 };
+}
+
+/** Spoken length of a script at ~2.6 words/s (what estimateOutputMs assumes). */
+export function spokenSeconds(text: string, speed = 1): number {
+  const n = spokenText(text).split(/\s+/).filter(Boolean).length;
+  return n / (2.6 * Math.max(0.5, speed));
+}
+
+/** Whether a scene's script runs past its footage — the render would then hold
+ * the last frame while the voice finishes. Pause markers eat footage time
+ * rather than words, so they come off the budget first. Returns null when the
+ * line fits (or the scene is skipped / silent / on the original voice). */
+export function sceneOverrun(
+  seg: EditSegment,
+  spec: EditSpec,
+): { words: number; budget: number } | null {
+  if (seg.skipped || spec.voice.use_original) return null;
+  const kept = seg.words.filter((_, i) => !seg.removed.includes(i));
+  const words = kept.filter((w) => pauseSeconds(w) === null).length;
+  if (words === 0) return null;
+  const pauseS = kept.reduce((t, w) => t + (pauseSeconds(w) ?? 0), 0);
+  const speed = (spec.voice.speed || 1) * Math.min(1.5, Math.max(1, spec.pace ?? 1));
+  const seconds = (seg.source_end_ms - seg.source_start_ms) / 1000 - pauseS;
+  const budget = sceneWordBudget(seconds, speed);
+  return words > budget ? { words, budget } : null;
+}
+
 /** Approximate AI-generated output duration (ms) from an edit-spec. Mirrors the
  * render pipeline's timing rules exactly:
  *  - silent scene → full source length ÷ pace (same as a narrated scene)
@@ -361,13 +450,16 @@ export function estimateOutputMs(spec: EditSpec): number {
   for (const s of spec.segments) {
     if (s.skipped) continue; // excluded from the render
     const srcMs = Math.max(0, s.source_end_ms - s.source_start_ms);
-    const words = s.words.filter((_, i) => !s.removed.includes(i));
+    const kept = s.words.filter((_, i) => !s.removed.includes(i));
+    // pause markers are silence, not words: counted by their length instead
+    const words = kept.filter((w) => pauseSeconds(w) === null);
+    const pauseMs = kept.reduce((t, w) => t + (pauseSeconds(w) ?? 0) * 1000, 0);
     if (words.length === 0) {
       body += Math.max(300, srcMs / pace);
     } else if (useOriginal) {
       body += Math.max(300, srcMs / pace);
     } else {
-      body += Math.max(300, (words.length / (WPS * (spec.voice.speed || 1) * pace)) * 1000);
+      body += Math.max(300, (words.length / (WPS * (spec.voice.speed || 1) * pace)) * 1000) + pauseMs;
     }
   }
   const inserts = effectiveInserts(spec).reduce((t, it) => t + insertDurationMs(it), 0);
@@ -770,7 +862,14 @@ export async function rewriteLines(
 
 export async function generateScript(
   projectId: string,
-  scenes: { target?: string; action?: string; narration?: string; seconds?: number }[],
+  scenes: {
+    target?: string;
+    action?: string;
+    narration?: string;
+    seconds?: number;
+    max_words?: number; // hard cap so the line fits the footage (see sceneWordBudget)
+    screenshot?: string | null; // the scene's frame: the model then narrates what it sees
+  }[],
   title: string,
   instruction?: string,
 ): Promise<string[]> {
@@ -789,6 +888,38 @@ export async function generateScript(
     throw new Error(detail);
   }
   return (await r.json()).lines as string[];
+}
+
+/** "fit": every line sized to the footage it covers; "free": no limit. */
+export type ScriptMode = "fit" | "free";
+
+/** The whole-recording Generate: the worker shows the model the recording's
+ * frames and writes a timed script, then re-analyses the recording with it
+ * (scenes rebuilt around the lines, like Apply script). Returns the queued
+ * job; poll getSessionStatus for its progress (stage "script"), then for the
+ * new graph version. */
+export async function generateScriptFromRecording(
+  sessionId: string,
+  brief: string,
+  mode: ScriptMode,
+  instruction?: string,
+): Promise<JobStatus> {
+  const r = await apiFetch(`/sessions/${sessionId}/generate-script`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ brief, mode, instruction: instruction ?? null }),
+  });
+  if (!r.ok) {
+    let detail = `generate failed: ${r.status}`;
+    try {
+      detail = (await r.json()).detail ?? detail;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(detail);
+  }
+  pokeActivity();
+  return (await r.json()) as JobStatus;
 }
 
 export async function suggestZooms(
@@ -1041,11 +1172,26 @@ export const cropActive = (c: CropRegion, atMs: number): boolean =>
 export const activeCrop = (crops: CropRegion[], atMs: number): CropRegion | undefined =>
   crops.find((c) => cropActive(c, atMs));
 
+export type ExportQuality = "standard" | "high" | "best";
+export type ExportResolution = "720p" | "1080p" | "1440p" | "2160p" | "source";
+// The one export control: the frame size. "source" (the default) keeps the
+// recording's own size so nothing is stretched or shrunk; compression is fixed
+// at the "high" tier for every file (quality stays an API-only field).
+export const EXPORT_RESOLUTIONS: { value: ExportResolution; label: string }[] = [
+  { value: "source", label: "Match recording" },
+  { value: "720p", label: "720p" },
+  { value: "1080p", label: "1080p" },
+  { value: "1440p", label: "1440p" },
+  { value: "2160p", label: "4K" },
+];
+
 export interface EditSpec {
   graph_version: number;
   title: string;
   voice: { voice_id: string; speed: number; use_original?: boolean };
   aspect: "16:9" | "9:16" | "1:1";
+  // how the final file is encoded; clips are near-lossless regardless
+  export?: { quality: ExportQuality; resolution: ExportResolution };
   intro: IntroOutroCard;
   outro: IntroOutroCard;
   captions: { enabled: boolean };
@@ -1357,10 +1503,19 @@ export interface TranscriptWord {
  * capture had no speech. Lets the editor split a scene at the instant a word
  * was spoken instead of guessing by proportion. */
 export async function getTranscriptWords(projectId: string): Promise<TranscriptWord[]> {
+  return (await getTranscript(projectId)).words;
+}
+
+/** The same call, plus which capture the words belong to — the project's latest
+ * session, i.e. the one whose recording the editor previews. `sessionId` is
+ * null only for a project with no capture. */
+export async function getTranscript(
+  projectId: string,
+): Promise<{ sessionId: string | null; words: TranscriptWord[] }> {
   const r = await apiFetch(`/projects/${projectId}/transcript`, { cache: "no-store" });
-  if (!r.ok) return [];
-  const body = (await r.json()) as { words?: TranscriptWord[] };
-  return body.words ?? [];
+  if (!r.ok) return { sessionId: null, words: [] };
+  const body = (await r.json()) as { session_id?: string | null; words?: TranscriptWord[] };
+  return { sessionId: body.session_id ?? null, words: body.words ?? [] };
 }
 
 export async function patchVideo(projectId: string, editSpec: EditSpec): Promise<VideoSpec> {
