@@ -14,6 +14,10 @@ os.environ["REFRACT_ADMIN_EMAILS"] = "admin@example.com"  # bootstrap admin for 
 os.environ["REFRACT_USAGE_REPORT_KEY"] = "test-report-key"  # for test_usage
 os.environ["REFRACT_AUTH_ALLOWED_EMAIL_DOMAIN"] = ""  # allow mock test domains
 
+# Usage spans export nothing unless a test installs its own (in-memory) provider.
+# Set-but-empty, so a repo .env that configures an endpoint cannot switch it on.
+os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = ""
+
 from app.db import init_db  # noqa: E402
 
 init_db()

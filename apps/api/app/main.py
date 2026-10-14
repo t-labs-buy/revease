@@ -39,12 +39,18 @@ async def lifespan(app: FastAPI):
     from app.tracing import init_tracing
 
     init_tracing()  # Langfuse + Anthropic auto-instrumentation (no-op if unconfigured)
+    from app.usage_tracking import init_usage_tracking
+
+    init_usage_tracking()  # Usage Tracker spans (no-op without OTEL_EXPORTER_OTLP_ENDPOINT)
     init_db()
     from app.storage import store
 
     if store.backend == "s3":
         store.ensure_bucket()
     yield
+    from app.usage_tracking import flush
+
+    flush()  # push buffered usage spans before the process exits
 
 
 app = FastAPI(title="Refract API", version="0.1.0", lifespan=lifespan)

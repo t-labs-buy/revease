@@ -11,6 +11,7 @@ from app.auth import CurrentUser
 from app.db import get_session
 from app.models import KbArticle
 from app.ownership import owned_project, owned_row
+from app.usage_tracking import tracked
 
 router = APIRouter(prefix="/kb", tags=["kb"])
 
@@ -63,6 +64,8 @@ def get_article(
 
 
 @router.post("", response_model=ArticleOut)
+@tracked("knowledge_base", "create_article", "kb_article.created", "kb_article",
+         entity_id=lambda a: a.id)
 def create_article(
     payload: ArticleIn, user: CurrentUser, db: Session = Depends(get_session)
 ) -> ArticleOut:

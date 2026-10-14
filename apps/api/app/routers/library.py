@@ -39,6 +39,7 @@ from app.schemas import (
     UploadCompleteIn,
 )
 from app.storage import store
+from app.usage_tracking import current as usage, tracked
 
 router = APIRouter(prefix="/library", tags=["library"])
 
@@ -113,9 +114,13 @@ def _start_processing(db: Session, a: LibraryAsset) -> LibraryAssetOut:
 
 
 @router.post("/{asset_id}/uploaded", response_model=LibraryAssetOut)
+@tracked("media_library", "upload_asset", "library_asset.uploaded", "library_asset",
+         entity_id="asset_id")
 def single_put_done(asset_id: str, user: CurrentUser, db: Session = Depends(get_session)) -> LibraryAssetOut:
     a = _owned(db, user, asset_id)
+    usage().set(asset_kind=a.kind)
     if a.status != "uploading":
+        usage().skip()  # already completed; a re-sent completion is not a new upload
         return _out(a)
     if not store.exists(a.storage_key):
         raise HTTPException(status_code=409, detail="file not received yet")
@@ -170,10 +175,14 @@ async def put_part(asset_id: str, number: int, request: Request, user: CurrentUs
 
 
 @router.post("/{asset_id}/complete", response_model=LibraryAssetOut)
+@tracked("media_library", "upload_asset", "library_asset.uploaded", "library_asset",
+         entity_id="asset_id")
 def complete(asset_id: str, payload: UploadCompleteIn, user: CurrentUser,
              db: Session = Depends(get_session)) -> LibraryAssetOut:
     a = _owned(db, user, asset_id)
+    usage().set(asset_kind=a.kind)
     if a.status != "uploading":
+        usage().skip()  # already completed; a re-sent completion is not a new upload
         return _out(a)
     if not a.upload_id:
         raise HTTPException(status_code=409, detail="not a multipart upload")

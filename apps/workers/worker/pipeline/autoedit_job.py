@@ -10,6 +10,7 @@ from app.db import SessionLocal
 from app.models import AutoEditJob, CaptureSession, MediaAsset, Project, Transcript
 from app.storage import store
 from app.usage import record_event
+from app.usage_tracking import current as usage, email_for_user_id, tracked
 from worker.pipeline import autoedit
 from worker.pipeline.tts import _probe_duration_ms
 
@@ -33,26 +34,32 @@ def _find_source_video(db, project_id: str):
     return None, None
 
 
+@tracked("video", "auto_edit", "video.auto_edited", "autoedit_job", entity_id="job_id")
 def run_autoedit(job_id: str) -> dict:
     db = SessionLocal()
     try:
         job = db.get(AutoEditJob, job_id)
         if job is None:
             log.warning("autoedit job %s not found; skipping", job_id)
+            usage().skip()
             return {"job_id": job_id, "skipped": "not found"}
         job.status = "running"
         db.commit()
+        owner = db.get(Project, job.project_id)
+        usage().identify(email_for_user_id(db, owner.user_id if owner else None))
 
         opts = job.options_json or {}
         preset = opts.get("aggressiveness", "balanced")
         want_captions = opts.get("captions", True)
         want_zoom = opts.get("zoom", True)
+        usage().set(preset=preset, captions=bool(want_captions), zoom=bool(want_zoom))
 
         video, session_id = _find_source_video(db, job.project_id)
         if video is None:
             job.status = "error"
             job.error_json = {"error": "no source video for this project"}
             db.commit()
+            usage().failed("NO_SOURCE_VIDEO", stage="validate")
             return {"job_id": job_id, "error": "no source video"}
 
         analysis = autoedit.analyze(video, preset=preset, zoom=want_zoom)

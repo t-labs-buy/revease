@@ -20,6 +20,7 @@ from sqlalchemy.orm.attributes import flag_modified
 from app.config import get_settings
 from app.db import SessionLocal
 from app.docwriter import effective_narrations, write_document
+from app.usage_tracking import current as usage, email_for_user_id, tracked
 from app.models import (
     CaptureSession,
     Document,
@@ -129,6 +130,7 @@ def _cleanup_old_docshots(db, session_id: str, keep: set[str], doc_version: int)
         db.delete(asset)
 
 
+@tracked("documentation", "generate_document", "document.generated", "document")
 def run_document_generate(
     project_id: str, doc_version: int, skill_id: str | None = None, instruction: str | None = None
 ) -> dict:
@@ -137,12 +139,18 @@ def run_document_generate(
         row = db.scalar(select(Document).where(Document.project_id == project_id))
         if row is None:
             log.warning("document for project %s not found; skipping", project_id)
+            usage().skip()
             return {"project_id": project_id, "skipped": "not found"}
         if (row.doc_version or 0) != doc_version:
             log.info("document %s: stale task (v%s, row is v%s); skipping", row.id, doc_version, row.doc_version)
+            usage().skip()
             return {"project_id": project_id, "skipped": "stale"}
         if row.status == "ready":
+            usage().skip()
             return {"project_id": project_id, "skipped": "already ready"}
+        owner = db.get(Project, project_id)
+        usage().entity(row.id).identify(email_for_user_id(db, owner.user_id if owner else None))
+        usage().set(skill_used=bool(skill_id), custom_instruction=bool(instruction))
         row.status = "running"
         row.progress = 0.02
         row.message = "Reading the recording and transcript…"
@@ -233,6 +241,9 @@ def run_document_generate(
             flag_modified(row, "doc_json")
             db.commit()
             heartbeat.__exit__(None, None, None)
+            usage().item_count(len(doc["steps"])).set(
+                writer=str(doc["meta"].get("writer") or "").split(":", 1)[0] or None
+            )
             return {
                 "project_id": project_id,
                 "doc_version": doc_version,

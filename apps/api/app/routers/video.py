@@ -26,6 +26,7 @@ from app.ownership import owned_project, owned_render_job
 from app.queue import enqueue_render, enqueue_voice_track
 from app.schemas import EditSpecPatch, RenderJobOut, TranscriptOut, TranscriptWordOut, VideoSpecOut
 from app.storage import store
+from app.usage_tracking import current as usage, tracked
 
 router = APIRouter(tags=["video"])
 
@@ -239,6 +240,8 @@ class VoiceTrackReq(BaseModel):
 
 
 @router.post("/projects/{project_id}/voice-track")
+@tracked("video", "generate_voice_track", "voice_track.generated", "project",
+         entity_id="project_id")
 def start_voice_track(
     project_id: str, payload: VoiceTrackReq, user: CurrentUser, db: Session = Depends(get_session)
 ) -> dict:
@@ -251,7 +254,9 @@ def start_voice_track(
     # needs the timeline to place each line under its scene, and a track
     # without one (an interrupted build) is rebuilt rather than served as-is.
     if store.exists(key) and store.exists(tkey):
+        usage().skip()  # already built for this script + voice: nothing generated
         return {"url": store.download_url(key), "ready": True, "timeline_url": store.download_url(tkey)}
+    usage().set(voice=payload.voice_id, speed=payload.speed)
     enqueue_voice_track(project_id, payload.voice_id, payload.speed)
     return {"url": store.download_url(key), "ready": False, "timeline_url": None}
 

@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 
 from celery import Celery
-from celery.signals import worker_process_init
+from celery.signals import worker_process_init, worker_process_shutdown
 
 REDIS_URL = os.environ.get("REFRACT_REDIS_URL", "redis://localhost:6379/0")
 
@@ -47,8 +47,18 @@ app.conf.update(
 def _init_langfuse(**_kwargs):
     """Instrument each prefork worker process so Anthropic calls are traced."""
     from app.tracing import init_tracing
+    from app.usage_tracking import init_usage_tracking
 
     init_tracing()
+    init_usage_tracking()  # after the fork: this child's own batch-export thread
+
+
+@worker_process_shutdown.connect
+def _flush_usage(**_kwargs):
+    """A prefork child may exit without running atexit hooks; push buffered usage spans."""
+    from app.usage_tracking import flush
+
+    flush()
 
 
 # Import tasks so they register.

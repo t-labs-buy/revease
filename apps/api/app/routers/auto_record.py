@@ -30,6 +30,7 @@ from app.schemas import (
     PlanItemOut,
     SessionStatus,
 )
+from app.usage_tracking import current as usage, tracked
 
 router = APIRouter(prefix="/auto-record", tags=["auto-record"])
 
@@ -105,6 +106,8 @@ def _apply_results(log: list[dict], results: list[ActionResult]) -> None:
 
 # --------------------------------------------------------------------------- #
 @router.post("/runs", response_model=AutoRecordRunOut, status_code=status.HTTP_201_CREATED)
+@tracked("auto_record", "start_run", "autorecord_run.started", "autorecord_run",
+         entity_id=lambda r: r.run_id)
 def create_run(
     payload: AutoRecordCreate, user: CurrentUser, db: Session = Depends(get_session)
 ) -> AutoRecordRunOut:
@@ -112,6 +115,7 @@ def create_run(
     plan = _parse_plan(payload.coverage_plan)
     if not plan:
         raise HTTPException(status_code=400, detail="coverage plan is empty")
+    usage().item_count(len(plan))
 
     sess = CaptureSession(
         project_id=payload.project_id,
@@ -235,6 +239,8 @@ class RunComplete(BaseModel):
 
 
 @router.post("/runs/{run_id}/complete", response_model=AutoRecordRunOut)
+@tracked("auto_record", "finish_run", "autorecord_run.finished", "autorecord_run",
+         entity_id="run_id")
 def complete_run(
     run_id: str, payload: RunComplete, user: CurrentUser, db: Session = Depends(get_session)
 ) -> AutoRecordRunOut:
@@ -248,6 +254,10 @@ def complete_run(
 
     if payload.status != "completed":
         run.status = "aborted" if payload.status == "aborted" else "failed"
+        if payload.status == "aborted":
+            usage().cancelled()
+        else:
+            usage().failed("AUTORECORD_FAILED", stage="execute")
         sess.status = "aborted"
         db.commit()
         return _run_out(db, run)
@@ -260,6 +270,7 @@ def complete_run(
     if payload.duration_ms is not None:
         sess.duration_ms = payload.duration_ms
     run.status = "capture_done"
+    usage().item_count(event_count or 0)
     db.commit()
     enqueue_understanding(sess.id)
     db.refresh(run)
@@ -267,11 +278,16 @@ def complete_run(
 
 
 @router.post("/runs/{run_id}/abort", response_model=AutoRecordRunOut)
+@tracked("auto_record", "finish_run", "autorecord_run.finished", "autorecord_run",
+         entity_id="run_id")
 def abort_run(
     run_id: str, user: CurrentUser, db: Session = Depends(get_session)
 ) -> AutoRecordRunOut:
     run = owned_autorecord_run(db, user, run_id)
-    if run.status not in _TERMINAL:
+    if run.status in _TERMINAL:
+        usage().skip()  # already finished; this abort changes nothing
+    else:
+        usage().cancelled()
         run.status = "aborted"
         sess = db.get(CaptureSession, run.session_id)
         if sess is not None and sess.status not in ("ready",):

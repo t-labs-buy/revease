@@ -28,6 +28,7 @@ from app.models import CaptureSession, Document, MediaAsset, Skill, WorkflowGrap
 from app.ownership import owned_project, owned_row
 from app.queue import enqueue_document_generate, enqueue_document_snapshot
 from app.schemas import DocGenerateIn, DocPatchIn, DocSnapshotIn, DocumentOut
+from app.usage_tracking import current as usage, tracked
 
 router = APIRouter(tags=["documents"])
 
@@ -203,6 +204,7 @@ def save_document(
     response_model=DocumentOut,
     status_code=202,
 )
+@tracked("documentation", "regrab_snapshot", "snapshot.regrabbed", "document")
 def regrab_snapshot(
     project_id: str,
     step_id: str,
@@ -215,6 +217,7 @@ def regrab_snapshot(
     row = _doc_row(db, project_id)
     if row is None:
         raise HTTPException(status_code=404, detail="no document yet — generate one first")
+    usage().entity(row.id)
     if row.status in GENERATING:
         raise HTTPException(status_code=409, detail="document is being generated — try again shortly")
     if not _has_video(db, project_id):
@@ -237,6 +240,7 @@ def regrab_snapshot(
 
 
 @router.get("/projects/{project_id}/document/export")
+@tracked("documentation", "export_document", "document.exported", "document")
 def export_document(
     project_id: str,
     request: Request,
@@ -249,6 +253,7 @@ def export_document(
     row = _doc_row(db, project_id)
     if row is None or not row.doc_json:
         raise HTTPException(status_code=404, detail="no document yet — generate one first")
+    usage().entity(row.id).set(format=format)
     _upgrade_in_place(db, row, graph)
     doc = row.doc_json
     name = slugify(doc.get("title", "document"))

@@ -11,6 +11,7 @@ from app.db import get_session
 from app.models import CaptureSession, Document, Project, ProjectCollaborator, User
 from app.ownership import delete_project_cascade, owned_project, purge_media
 from app.schemas import ProjectCreate, ProjectOut
+from app.usage_tracking import tracked
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -54,6 +55,7 @@ def _is_collaborator(db: Session, user_id: str, project_id: str) -> bool:
 
 
 @router.post("", response_model=ProjectOut, status_code=status.HTTP_201_CREATED)
+@tracked("project", "create_project", "project.created", "project", entity_id=lambda p: p.id)
 def create_project(
     payload: ProjectCreate, user: CurrentUser, db: Session = Depends(get_session)
 ) -> ProjectOut:
@@ -113,6 +115,7 @@ def get_project(
 
 
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
+@tracked("project", "delete_project", "project.deleted", "project", entity_id="project_id")
 def delete_project(
     project_id: str, user: CurrentUser, db: Session = Depends(get_session)
 ) -> None:

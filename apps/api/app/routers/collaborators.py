@@ -17,6 +17,7 @@ from app.db import get_session
 from app.models import ProjectCollaborator, User
 from app.ownership import owned_project
 from app.schemas import CollaboratorCreate, CollaboratorOut
+from app.usage_tracking import current as usage, tracked
 
 router = APIRouter(prefix="/projects/{project_id}/collaborators", tags=["collaborators"])
 
@@ -44,6 +45,7 @@ def list_collaborators(
 
 
 @router.post("", response_model=list[CollaboratorOut], status_code=status.HTTP_201_CREATED)
+@tracked("project", "add_collaborator", "collaborator.added", "project", entity_id="project_id")
 def add_collaborator(
     project_id: str,
     payload: CollaboratorCreate,
@@ -67,6 +69,8 @@ def add_collaborator(
     if exists is None:
         db.add(ProjectCollaborator(project_id=project_id, user_id=invitee.id, invited_by=user.id))
         db.commit()
+    else:
+        usage().skip()  # already a collaborator: nothing was added
     return _rows(db, project_id)
 
 

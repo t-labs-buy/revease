@@ -22,6 +22,10 @@ make lint             # ruff (api, workers) + eslint (workspaces)
 make typecheck        # mypy app (non-blocking) + tsc --noEmit per workspace
 make fmt              # ruff format
 make clean            # rm -rf data/  (SQLite + all media — destructive)
+make bg-model         # ISNet background-removal model (~170MB) — without it bg removal uses the colour-key fallback
+make infra-up|infra-down   # optional MinIO (:9000) + Postgres (:5432) for s3/postgres mode
+make retention-dry    # what the hourly retention sweep would delete (`make retention` runs it)
+make db-copy TARGET=postgresql+psycopg://…   # SQLite → Postgres;  `make storage-migrate` copies data/media → S3
 ```
 
 Single tests:
@@ -33,6 +37,8 @@ npm run test --workspace @refract/workflow-graph      # node --test over src/ind
 ```
 
 Docker deploy: `python shift.py --tag v1` builds/pushes `tlabsdoc/revease:{api,worker,web}-<tag>`; `TAG=v1 docker compose -f docker-compose.prod.yml up -d` runs it. See [DOCKER.md](DOCKER.md). The web image bakes `NEXT_PUBLIC_API_BASE` at build time, so LAN access needs a web rebuild with `--api-base`.
+
+The **live deployment** is a different path: [infra/ivolve/](infra/ivolve/README.md) (compose, edge nginx, `build.sh`, `backup.sh`) is the source of truth for the host, where images are built on the host itself and pushed to `reg.ivolve.cloud`. Its README is the runbook — bump the version notes there when you deploy.
 
 `make purge-legacy` / `purge-legacy-force` deletes pre-auth ownerless rows — destructive, dry-run first.
 
@@ -83,6 +89,8 @@ Every external dependency sits behind an adapter that works with no key and no G
 | Background removal | ISNet ONNX via onnxruntime (`make bg-model`) | key out the border-connected flat colour |
 
 `init_tracing()` must run **before** any Anthropic client is constructed — it's called in the API lifespan and in the Celery `worker_process_init` signal.
+
+**Usage Tracker** ([apps/api/app/usage_tracking.py](apps/api/app/usage_tracking.py)) is separate from Langfuse: business-action spans (`usage.feature`, `usage.event.name`, …) on their *own* TracerProvider, configured only by `OTEL_*` env vars and off without `OTEL_EXPORTER_OTLP_ENDPOINT`. A new user-facing action gets `@tracked(feature, action, "<object>.<past_verb>", entity_type, entity_id=…)` on its route (or worker function) and adds facts via `usage_tracking.current()`; async jobs record on completion in the worker, keyed by the job row's id. Event names are the dashboard's vocabulary — don't rename them. Never put tokens, prompts or free text in attributes; `user.id` is the login e-mail. A failure says why through `usage.error.*`: name the rule with `usage().failed("CODE")` (a key of `ERRORS` in the helper — add codes there, never at throw sites) or hand over a caught exception with `failed(exc=e)`; anything uncoded is classified from its exception type in `_classify`.
 
 ### Auth & ownership
 

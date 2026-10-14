@@ -12,6 +12,7 @@ from app.auth import CurrentUser
 from app.db import get_session
 from app.models import BrandPackage
 from app.ownership import owned_row
+from app.usage_tracking import tracked
 
 router = APIRouter(prefix="/packages", tags=["packages"])
 
@@ -51,6 +52,8 @@ def get_package(
 
 
 @router.post("", response_model=PackageOut)
+@tracked("branding", "create_brand_package", "brand_package.created", "brand_package",
+         entity_id=lambda p: p.id)
 def create_package(
     payload: PackageIn, user: CurrentUser, db: Session = Depends(get_session)
 ) -> PackageOut:

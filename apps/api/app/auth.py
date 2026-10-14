@@ -6,6 +6,10 @@ There is no server-side session table, so "log out" is simply the client
 discarding its token; rotating REFRACT_AUTH_SECRET_KEY invalidates every token.
 The one per-account revocation is a password change: `set_password` stamps
 `User.password_changed_at`, and tokens issued before that instant are refused.
+
+Each token carries a random `sid` claim minted at sign-in. It identifies the
+sign-in session for usage tracking only (`session.id`); nothing authorises on
+it, and tokens minted before it existed simply have no session id.
 """
 
 from __future__ import annotations
@@ -13,6 +17,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
@@ -86,6 +91,7 @@ def create_access_token(user_id: str) -> str:
         # Fractional so it orders correctly against `User.password_changed_at`
         # even when the change and the next login land in the same second.
         "iat": now.timestamp(),
+        "sid": uuid.uuid4().hex,
         "exp": int((now + timedelta(hours=settings.auth_token_ttl_hours)).timestamp()),
     }
     return jwt.encode(payload, settings.resolved_auth_secret(), algorithm=ALGORITHM)
@@ -95,8 +101,9 @@ def token_ttl_seconds() -> int:
     return get_settings().auth_token_ttl_hours * 3600
 
 
-def decode_access_token(token: str) -> tuple[str, float]:
-    """Return (user id, issued-at unix time) from a valid token, else raise 401."""
+def decode_access_token(token: str) -> tuple[str, float, str | None]:
+    """Return (user id, issued-at unix time, session id) from a valid token, else
+    raise 401."""
     try:
         payload = jwt.decode(
             token, get_settings().resolved_auth_secret(), algorithms=[ALGORITHM]
@@ -111,7 +118,12 @@ def decode_access_token(token: str) -> tuple[str, float]:
     issued_at = payload.get("iat")
     # Tokens from before `iat` was set read as issued at epoch 0, so a password
     # change revokes them too.
-    return user_id, float(issued_at) if isinstance(issued_at, (int, float)) else 0.0
+    sid = payload.get("sid")
+    return (
+        user_id,
+        float(issued_at) if isinstance(issued_at, (int, float)) else 0.0,
+        sid if isinstance(sid, str) else None,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -123,13 +135,15 @@ def get_current_user(
 ) -> User:
     if creds is None or not creds.credentials:
         raise _unauthorized("not authenticated")
-    user_id, issued_at = decode_access_token(creds.credentials)
+    user_id, issued_at, session_id = decode_access_token(creds.credentials)
     user = db.get(User, user_id)
     if user is None:
         # Token signed for an account that no longer exists.
         raise _unauthorized("account no longer exists")
     if user.password_changed_at is not None and issued_at < user.password_changed_at:
         raise _unauthorized("password was changed — sign in again")
+    # Transient (unmapped) attribute: read by app.usage_tracking for session.id.
+    user.usage_session_id = session_id
     return user
 
 

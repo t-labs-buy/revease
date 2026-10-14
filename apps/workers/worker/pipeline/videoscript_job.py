@@ -38,6 +38,7 @@ from app.videoscript import (
     window_bounds,
     write_window,
 )
+from app.usage_tracking import current as usage, email_for_user_id, tracked
 from worker.pipeline.progress import Heartbeat, Reporter
 
 log = logging.getLogger("refract.pipeline.videoscript_job")
@@ -107,15 +108,22 @@ def _write_script(
     return [ln for ln in lines if ln.text.strip()], editor_ranges
 
 
+@tracked("ai_assist", "generate_narration", "narration.generated", "capture_session",
+         entity_id="session_id")
 def run_video_script(session_id: str, job_id: str, brief: str, mode: str = "fit", instruction: str | None = None) -> dict:
     db = SessionLocal()
     try:
         job = db.get(Job, job_id)
         sess = db.get(CaptureSession, session_id)
         if job is None or sess is None:
+            usage().skip()
             return {"skipped": "missing job or session"}
         if job.status == "done":
+            usage().skip()
             return {"skipped": "already done"}  # a redelivered copy
+        owner = db.get(Project, sess.project_id)
+        usage().identify(email_for_user_id(db, owner.user_id if owner else None))
+        usage().set(mode=mode, custom_instruction=bool(instruction and instruction.strip()))
         job.status = "running"
         job.attempts += 1
         job.progress = 0.0
@@ -126,11 +134,13 @@ def run_video_script(session_id: str, job_id: str, brief: str, mode: str = "fit"
         report = Reporter(Job, job.id)
         try:
             if not has_llm():
+                usage().failed("AI_NOT_CONFIGURED", stage="validate")
                 raise RuntimeError("no AI key configured (set REFRACT_ANTHROPIC_API_KEY or REFRACT_OPENROUTER_API_KEY)")
             full_brief = f"{instruction.strip()}\n\n{brief}" if instruction and instruction.strip() else brief
             with Heartbeat(Job, job.id):
                 lines, editor_ranges = _write_script(db, sess, report, full_brief, mode)
             if not lines:
+                usage().failed("AI_EMPTY_RESULT")
                 raise RuntimeError("the AI wrote no narration for this recording")
             sess.script_text = timed_script_text(lines)
             if editor_ranges:
@@ -138,12 +148,14 @@ def run_video_script(session_id: str, job_id: str, brief: str, mode: str = "fit"
                 sess.keep_ranges_json = editor_ranges
                 sess.trim_start_ms = None
                 sess.trim_end_ms = None
+            usage().item_count(len(lines))
             job.status = "done"
             job.progress = 1.0
             job.message = f"Wrote {len(lines)} lines — rebuilding scenes…"
             db.commit()
         except Exception as e:
             log.exception("video script for session %s failed", session_id)
+            usage().failed(exc=e)  # keeps a code named above; else classified from e
             job.status = "error"
             job.error_json = {"error": str(e)[:2000]}
             job.message = str(e)[:300]

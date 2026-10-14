@@ -33,6 +33,7 @@ from app.models import (
     WorkflowGraphRow,
 )
 from app.storage import store
+from app.usage_tracking import current as usage, email_for_user_id, tracked
 from worker.pipeline import media as media_stage
 from worker.pipeline.extract import build_graph, build_graph_auto
 from worker.pipeline.narrate import narrate_steps
@@ -106,6 +107,7 @@ def _duration_s(sess: CaptureSession, events: list[dict], keyframes, transcript)
     return 0.0
 
 
+@tracked("workflow", "extract_workflow", "workflow_graph.generated", "workflow_graph")
 def run_pipeline(session_id: str, token: str | None = None) -> dict[str, Any]:
     init_db()
     db = SessionLocal()
@@ -115,10 +117,12 @@ def run_pipeline(session_id: str, token: str | None = None) -> dict[str, Any]:
             # Permanent condition (e.g. a stale queued message for a deleted session).
             # Return gracefully so the task acks instead of retrying forever.
             log.warning("session %s not found; skipping", session_id)
+            usage().skip()
             return {"session_id": session_id, "skipped": "session not found"}
 
         live = _live_duplicate(db, session_id)
         if live is not None:
+            usage().skip()  # deferred or duplicate delivery: this copy builds nothing
             if token and token != sess.pipeline_token:
                 # A new request (re-trim / reprocess): wait for the live run to end.
                 log.info("session %s: new request waits for the running %s stage", session_id, live.stage)
@@ -140,6 +144,11 @@ def run_pipeline(session_id: str, token: str | None = None) -> dict[str, Any]:
 
         # Auto Record: the agent's own decision log is the authoritative step source,
         # and the transcript is user-supplied text (no spoken audio to transcribe).
+        from app.models import Project
+
+        proj_row = db.get(Project, sess.project_id)
+        usage().identify(email_for_user_id(db, proj_row.user_id if proj_row else None))
+        usage().set(source=sess.source_type)
         is_auto = sess.source_type == "auto"
         auto_run = (
             db.scalar(select(AutoRecordRun).where(AutoRecordRun.session_id == session_id))
@@ -299,7 +308,7 @@ def run_pipeline(session_id: str, token: str | None = None) -> dict[str, Any]:
                     title=title,
                     version=version,
                 )
-            _persist_graph(db, sess.project_id, version, graph)
+            usage().entity(_persist_graph(db, sess.project_id, version, graph))
             extract_hb.__exit__(None, None, None)
             _finish(db, job, "Workflow ready")
         except Exception as e:
@@ -314,6 +323,7 @@ def run_pipeline(session_id: str, token: str | None = None) -> dict[str, Any]:
             if auto_run is not None:
                 auto_run.status = "error"
             db.commit()
+            usage().failed(exc=e, stage="extract")
             return {"session_id": session_id, "version": version, "error": str(e)}
 
         # Precompute auto-zooms into the edit spec so the editor shows real zooms
@@ -345,6 +355,7 @@ def run_pipeline(session_id: str, token: str | None = None) -> dict[str, Any]:
         if auto_run is not None:
             auto_run.status = "ready"
         db.commit()
+        usage().item_count(len(graph["steps"]))
         return {"session_id": session_id, "version": version, "steps": len(graph["steps"])}
     finally:
         db.close()
@@ -614,8 +625,9 @@ def _precompute_zooms(db, sess: CaptureSession, version: int) -> None:
     log.info("zoom precompute: %d/%d scenes zoomed", zoomed, len(spec.get("segments", [])))
 
 
-def _persist_graph(db, project_id: str, version: int, graph: dict[str, Any]) -> None:
-    """Upsert by (project_id, version) so a re-run never creates a duplicate graph."""
+def _persist_graph(db, project_id: str, version: int, graph: dict[str, Any]) -> str:
+    """Upsert by (project_id, version) so a re-run never creates a duplicate graph.
+    Returns the row id (the usage entity id, so a retried run counts once)."""
     existing = db.scalar(
         select(WorkflowGraphRow).where(
             WorkflowGraphRow.project_id == project_id, WorkflowGraphRow.version == version
@@ -623,6 +635,9 @@ def _persist_graph(db, project_id: str, version: int, graph: dict[str, Any]) -> 
     )
     if existing:
         existing.graph_json = graph
+        row = existing
     else:
-        db.add(WorkflowGraphRow(project_id=project_id, version=version, graph_json=graph))
+        row = WorkflowGraphRow(project_id=project_id, version=version, graph_json=graph)
+        db.add(row)
     db.commit()
+    return row.id

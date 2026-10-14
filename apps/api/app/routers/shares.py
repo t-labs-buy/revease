@@ -17,6 +17,7 @@ from app.models import Document, RenderJob, Share, VideoProject, WorkflowGraphRo
 from app.ownership import owned_project, project_ids_for
 from app.schemas import ShareCreate, SharePublic, ShareOut, ShareUpdate
 from app.storage import store
+from app.usage_tracking import current as usage, tracked
 
 router = APIRouter(tags=["shares"])
 
@@ -50,6 +51,7 @@ def _latest_render_key(db: Session, project_id: str) -> str | None:
 
 
 @router.post("/projects/{project_id}/share", response_model=ShareOut)
+@tracked("sharing", "create_share", "share.created", "share")
 def create_share(
     project_id: str, payload: ShareCreate, user: CurrentUser, db: Session = Depends(get_session)
 ) -> ShareOut:
@@ -63,6 +65,7 @@ def create_share(
         )
     )
     if existing:
+        usage().skip()  # the existing link is handed back; no new share was created
         if payload.allow_download is not None and existing.allow_download != payload.allow_download:
             existing.allow_download = payload.allow_download
             db.commit()
@@ -74,6 +77,8 @@ def create_share(
     db.add(share)
     db.commit()
     db.refresh(share)
+    # Share.id, never the token: the token *is* the public link.
+    usage().entity(share.id).set(share_kind=share.kind, allow_download=share.allow_download)
     return _out(share)
 
 
@@ -117,8 +122,12 @@ def update_share(
 
 
 @router.delete("/shares/{token}")
+@tracked("sharing", "revoke_share", "share.revoked", "share")
 def revoke_share(token: str, user: CurrentUser, db: Session = Depends(get_session)) -> dict:
     s = _owned_share(db, user, token)  # only the owner (or an admin) can revoke a link
+    usage().entity(s.id).set(share_kind=s.kind)
+    if s.revoked:
+        usage().skip()
     s.revoked = True
     db.commit()
     return {"revoked": True}

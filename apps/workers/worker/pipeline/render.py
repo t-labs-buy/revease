@@ -28,6 +28,7 @@ from app.editspec import effective_inserts, effective_script, spoken_text, split
 from app.usage import record_event
 from app.models import MediaAsset, Project, RenderJob, VideoProject, WorkflowGraphRow
 from app.storage import store
+from app.usage_tracking import current as usage, email_for_user_id, tracked
 from worker.pipeline.placement import Placed, enable_expr, insert_slots, overlay_box, overlay_windows
 from worker.pipeline.smoothzoom import apply_zoom
 from worker.pipeline.timeline import StepInput, build_timeline
@@ -1105,12 +1106,14 @@ def compute_step_audio(
     return StepAudio(path, dur_ms, r.cached, SCENE_GAP_MS)
 
 
+@tracked("video", "render_video", "video.rendered", "render_job", entity_id="render_job_id")
 def run_render(render_job_id: str) -> dict:
     db = SessionLocal()
     try:
         job = db.get(RenderJob, render_job_id)
         if job is None:
             log.warning("render job %s not found; skipping", render_job_id)
+            usage().skip()
             return {"render_job_id": render_job_id, "skipped": "render job not found"}
         job.status = "running"
         job.progress = 0.0
@@ -1122,6 +1125,8 @@ def run_render(render_job_id: str) -> dict:
         heartbeat = Heartbeat(RenderJob, job.id).__enter__()
 
         vp = db.get(VideoProject, job.video_project_id)
+        owner = db.get(Project, vp.project_id)
+        usage().identify(email_for_user_id(db, owner.user_id if owner else None))
         spec = vp.edit_spec_json
         captions = bool(spec.get("captions", {}).get("enabled", True))
         voice = spec.get("voice", {"voice_id": "alloy", "speed": 1.0})
@@ -1370,6 +1375,10 @@ def run_render(render_job_id: str) -> dict:
         job.progress = 1.0
         job.message = f"Rendered {rendered} scenes, reused {reused}"
         db.commit()
+        usage().item_count(len(segs)).set(
+            scenes_rendered=rendered, scenes_reused=reused, aspect=spec.get("aspect"),
+            music=music_src is not None, captions=captions,
+        )
         project = db.get(Project, vp.project_id)
         record_event(
             "video",

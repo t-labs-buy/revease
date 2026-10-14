@@ -33,6 +33,7 @@ from app.db import SessionLocal
 from app.limits import duration_error
 from app.models import LibraryAsset
 from app.storage import store
+from app.usage_tracking import current as usage, email_for_user_id, tracked
 from worker.pipeline import bgremove
 from worker.pipeline.media import run_with_progress
 
@@ -244,6 +245,8 @@ def process_asset(asset_id: str) -> dict:
         shutil.rmtree(work, ignore_errors=True)
 
 
+@tracked("media_library", "import_recording", "library_asset.imported", "library_asset",
+         entity_id="asset_id")
 def import_recording(asset_id: str) -> dict:
     """Copy another project's processed recording into the library, so deleting
     that project later never breaks a video that reuses it."""
@@ -251,11 +254,14 @@ def import_recording(asset_id: str) -> dict:
     try:
         a = db.get(LibraryAsset, asset_id)
         if a is None:
+            usage().skip()
             return {"skipped": "asset deleted"}
+        usage().identify(email_for_user_id(db, a.user_id))
         src = store.fetch(a.storage_key)
         if src is None:
             a.status, a.error = "error", "the recording's video is no longer available"
             db.commit()
+            usage().failed("SOURCE_MISSING", stage="load")
             return {"status": a.status}
         key = f"library/{a.id}/original.{a.ext or 'mp4'}"
         _commit_file(key, src)
@@ -264,19 +270,27 @@ def import_recording(asset_id: str) -> dict:
         db.commit()
     finally:
         db.close()
-    return process_asset(asset_id)
+    result = process_asset(asset_id)
+    if result.get("status") == "error":
+        usage().failed("PROCESSING_FAILED", stage="transform")
+    return result
 
 
+@tracked("media_library", "remove_background", "library_asset.background_removed",
+         "library_asset", entity_id="asset_id")
 def remove_background(asset_id: str) -> dict:
     """Write `nobg.png` (the original stays) and flip `bg_status` to ready."""
     db = SessionLocal()
     try:
         a = db.get(LibraryAsset, asset_id)
         if a is None:
+            usage().skip()
             return {"skipped": "asset deleted"}
+        usage().identify(email_for_user_id(db, a.user_id))
         try:
             src = store.fetch(a.normalized_key or a.storage_key)
             if src is None:
+                usage().failed("IMAGE_MISSING", stage="validate")
                 raise ValueError("the image is missing")
             with Image.open(src) as im:
                 im.load()
@@ -294,7 +308,9 @@ def remove_background(asset_id: str) -> dict:
             a.bg_status = "error"
             a.error = str(e)[:500] or "background removal failed"
             method = None
+            usage().failed(exc=e)
         db.commit()
+        usage().set(method=method)
         return {"bg_status": a.bg_status, "method": method}
     finally:
         db.close()

@@ -12,6 +12,7 @@ from app.auth import CurrentUser
 from app.db import get_session
 from app.models import Skill
 from app.ownership import owned_row
+from app.usage_tracking import current as usage, tracked
 
 router = APIRouter(prefix="/skills", tags=["skills"])
 
@@ -55,6 +56,7 @@ def list_skills(
 
 
 @router.post("/generate", response_model=SkillOut)
+@tracked("skills", "generate_skill", "skill.generated", "skill", entity_id=lambda s: s.id)
 def generate(
     payload: GenSkillReq, user: CurrentUser, db: Session = Depends(get_session)
 ) -> SkillOut:
@@ -77,6 +79,7 @@ def generate(
     db.add(s)
     db.commit()
     db.refresh(s)
+    usage().set(skill_target=s.target)
     return _out(s)
 
 
@@ -102,6 +105,7 @@ def update_skill(
 
 
 @router.post("", response_model=SkillOut)
+@tracked("skills", "create_skill", "skill.created", "skill", entity_id=lambda s: s.id)
 def create_skill(
     payload: SkillIn, user: CurrentUser, db: Session = Depends(get_session)
 ) -> SkillOut:
@@ -115,6 +119,7 @@ def create_skill(
     db.add(s)
     db.commit()
     db.refresh(s)
+    usage().set(skill_target=s.target)
     return _out(s)
 
 

@@ -15,6 +15,10 @@ os.environ.pop("REFRACT_ANTHROPIC_API_KEY", None)
 os.environ["REFRACT_DISABLE_WHISPER"] = "1"
 os.environ["REFRACT_TTS_PROVIDER"] = "silent"  # no real Piper synth in tests
 
+# Usage spans export nothing unless a test installs its own (in-memory) provider.
+# Set-but-empty, so a repo .env that configures an endpoint cannot switch it on.
+os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = ""
+
 from app.db import init_db  # noqa: E402
 
 init_db()

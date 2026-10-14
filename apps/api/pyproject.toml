@@ -16,6 +16,9 @@ dependencies = [
     "anthropic>=0.116.0",
     "langfuse>=4.13.0",
     "opentelemetry-instrumentation-anthropic>=0.62.1",
+    # Usage Tracker spans (app/usage_tracking.py) — own provider + OTLP/HTTP exporter
+    "opentelemetry-sdk>=1.30",
+    "opentelemetry-exporter-otlp-proto-http>=1.30",
     "python-dotenv>=1.2.2",
     "pyjwt>=2.9.0",
     "bcrypt>=4.2.0",

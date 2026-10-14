@@ -23,6 +23,7 @@ from app.models import CaptureSession, Event, Job, MediaAsset, Project
 from app.ownership import owned_project, owned_session, project_ids_for
 from app.queue import enqueue_script_generate, enqueue_understanding
 from app.usage import record_event
+from app.usage_tracking import current as usage, tracked
 from app.schemas import (
     AssetRegister,
     EventsIngest,
@@ -124,6 +125,8 @@ def ingest_events(
 
 
 @router.post("/{session_id}/complete", response_model=SessionOut)
+@tracked("capture", "complete_capture", "capture.completed", "capture_session",
+         entity_id="session_id")
 def complete_session(
     session_id: str, payload: SessionComplete, user: CurrentUser, db: Session = Depends(get_session)
 ) -> CaptureSession:
@@ -139,7 +142,10 @@ def complete_session(
         sess.duration_ms = payload.duration_ms
     db.commit()
     db.refresh(sess)
-    if not already_captured:  # count each capture once, even if complete is re-sent
+    usage().set(source=sess.source_type, has_telemetry=sess.telemetry == "present")
+    if already_captured:
+        usage().skip()
+    else:  # count each capture once, even if complete is re-sent
         record_event(
             "upload" if sess.source_type == "upload" else "recording",
             user.id,
@@ -199,6 +205,8 @@ def get_session_status(
 
 
 @router.post("/{session_id}/reprocess", response_model=SessionOut)
+@tracked("capture", "reprocess_capture", "capture.reprocessed", "capture_session",
+         entity_id="session_id")
 def reprocess_session(
     session_id: str, user: CurrentUser, db: Session = Depends(get_session)
 ) -> CaptureSession:
@@ -211,6 +219,7 @@ def reprocess_session(
 
 
 @router.put("/{session_id}/script", response_model=SessionOut)
+@tracked("capture", "import_script", "script.imported", "capture_session", entity_id="session_id")
 def set_script(
     session_id: str, payload: SessionScript, user: CurrentUser, db: Session = Depends(get_session)
 ) -> CaptureSession:
@@ -222,6 +231,10 @@ def set_script(
     if _pipeline_running(db, sess.id):
         raise HTTPException(status_code=409, detail="this recording is still being processed")
     sess.script_text = payload.script.strip() or None
+    if sess.script_text is None:
+        usage().skip()  # clearing the script imports nothing
+    else:
+        usage().item_count(sum(1 for ln in sess.script_text.splitlines() if ln.strip()))
     db.commit()
     db.refresh(sess)
     enqueue_understanding(sess.id)
