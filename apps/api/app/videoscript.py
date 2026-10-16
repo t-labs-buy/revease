@@ -301,6 +301,32 @@ def kept_ranges(spec: dict | None, duration_ms: int) -> list[list[int]] | None:
     return merged
 
 
+def narrow_ranges(base: list[list[int]], editor: list[list[int]] | None) -> list[list[int]] | None:
+    """The footage both `base` (the recording's keep ranges or trim) and the
+    editor still keep, or None when the editor cut nothing more out of base.
+
+    Why: once a recording has keep ranges (Prepare page, or an earlier
+    Generate), the editor's scenes are rebuilt inside them — so a trim made in
+    the editor after that is a further cut, and reading only the stored ranges
+    showed the model footage the user had removed since. Intersecting never
+    widens base, so a spec left over from before a Prepare change can't bring
+    cut footage back. Scene windows end a few ms short of their range; a loss
+    under UNTRIMMED_TOLERANCE_MS is that, not a trim."""
+    if not editor:
+        return None
+    out: list[list[int]] = []
+    for a, b in base:
+        for c, d in editor:
+            lo, hi = max(a, c), min(b, d)
+            if hi > lo:
+                out.append([lo, hi])
+    out.sort()
+    kept = sum(b - a for a, b in out)
+    if not out or kept >= sum(b - a for a, b in base) - UNTRIMMED_TOLERANCE_MS:
+        return None
+    return out
+
+
 # A line the model dates this soon after removed footage starts where the kept
 # footage resumes: the model saw the first frame after the cut, not the cut.
 SNAP_TO_CUT_S = 3.0

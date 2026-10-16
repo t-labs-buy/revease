@@ -208,6 +208,11 @@ function fitTextarea(el: HTMLTextAreaElement | null) {
 // (~20 min) covers even a very long narration's first build; every later build
 // hits the per-line cache and returns immediately.
 const MAX_VOICE_POLLS = 800;
+// Quiet time after a block is split/deleted/skipped before the voice rebuilds,
+// so a burst of edits costs one rebuild.
+const VOICE_REBUILD_DELAY_MS = 2000;
+const blocksSigOf = (s: EditSpec) =>
+  JSON.stringify(s.segments.map((g) => [g.step_id, !!g.skipped]));
 const clock = (t: number) => {
   if (!Number.isFinite(t) || t < 0) return "00:00.00";
   const cs = Math.round(t * 100);
@@ -455,6 +460,10 @@ export default function VideoEditor({
     });
   // signature of the spec the CURRENT voice track was built from
   const [voiceBuiltSig, setVoiceBuiltSig] = useState<string | null>(null);
+  // which blocks (id, skipped) that build had — see the auto-rebuild below
+  const builtBlocksRef = useRef<string | null>(null);
+  // Play is off while the voice rebuilds after a block change
+  const [holdPlay, setHoldPlay] = useState(false);
   const voiceStale =
     wantAiVoice &&
     !!spec &&
@@ -477,6 +486,7 @@ export default function VideoEditor({
     // this build bakes in the CURRENT voice-relevant spec — record it so only
     // later voice-relevant edits mark the track stale
     setVoiceBuiltSig(voiceSigOf(spec));
+    builtBlocksRef.current = blocksSigOf(spec);
     const applyReady = async (url: string, timelineUrl: string | null) => {
       if (cancelled) return;
       setVoiceUrl(url);
@@ -531,6 +541,34 @@ export default function VideoEditor({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, voiceKey, voiceSpeed, useOriginal, voiceNonce]);
+
+  // Split / delete / skip / duplicate / merge (and their undo) change which
+  // blocks exist. The built voice's timeline is keyed by block id, so a stale
+  // one can't place a new block and still speaks a removed one — playback then
+  // froze at a split or jumped into cut footage. So the old voice is dropped
+  // at once (the video plays on its own meanwhile) and rebuilt once the edits
+  // settle; only changed lines are re-synthesised. Word edits and edge drags
+  // keep the manual Refresh: liveTimeline already follows a drag, and
+  // rebuilding on every keystroke would be wasteful.
+  const blocksSig = spec ? blocksSigOf(spec) : null;
+  useEffect(() => {
+    if (!blocksSig || !wantAiVoice) return;
+    if (builtBlocksRef.current === null || blocksSig === builtBlocksRef.current) return;
+    // stop playback and keep Play off until the new voice is in: playing on
+    // without the voice the user expects reads as a broken preview
+    pausePlayback();
+    setHoldPlay(true);
+    setVoiceUrl(null);
+    setPreviewTimeline(null);
+    setVoiceLoading(true);
+    const t = setTimeout(() => setVoiceNonce((n) => n + 1), VOICE_REBUILD_DELAY_MS);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [blocksSig, wantAiVoice]);
+  // the rebuild finished (or failed — then Play comes back without the voice)
+  useEffect(() => {
+    if (!voiceLoading || !wantAiVoice) setHoldPlay(false);
+  }, [voiceLoading, wantAiVoice]);
 
   useEffect(() => {
     if (videoRef.current) videoRef.current.muted = wantAiVoice;
@@ -1229,7 +1267,11 @@ export default function VideoEditor({
       // recording with no narration at all sends its frames, so the model can
       // narrate what is on screen instead of a "Screen 3" placeholder label.
       const silent = spec.segments.every((s) => !eff(s).trim());
-      const scenes = spec.segments.map((s) => ({
+      // A skipped block is cut from the video: the model is not shown it and
+      // writes nothing for it (its narration, if any, stays as it was).
+      const kept = spec.segments.filter((s) => !s.skipped);
+      if (kept.length === 0) return;
+      const scenes = kept.map((s) => ({
         target: s.target ?? "",
         action: s.action ?? "",
         narration: eff(s),
@@ -1264,11 +1306,13 @@ export default function VideoEditor({
         );
         return;
       }
+      const lineFor = new Map(kept.map((s, i) => [s.step_id, lines[i] ?? ""]));
       setSpec((s) => {
         if (!s) return s;
-        const segs = s.segments.map((seg, i) => {
+        const segs = s.segments.map((seg) => {
+          if (!lineFor.has(seg.step_id)) return seg; // skipped: not sent
           if (fillEmptyOnly && eff(seg).trim()) return seg; // keep existing narration
-          return { ...seg, words: tokenize(lines[i] || eff(seg)), removed: [] };
+          return { ...seg, words: tokenize(lineFor.get(seg.step_id) || eff(seg)), removed: [] };
         });
         return { ...s, segments: segs };
       });
@@ -1431,7 +1475,7 @@ export default function VideoEditor({
   }
   function playFrom(seconds: number) {
     seekTo(seconds);
-    void videoRef.current?.play();
+    if (!holdPlay) void videoRef.current?.play();
   }
   // A user-initiated pause. Drops `playing` synchronously instead of waiting for
   // the video's 'pause' event: Chrome queues that event as a task, so the
@@ -1454,7 +1498,7 @@ export default function VideoEditor({
     // resumed the frozen frame and the line kept advancing; only a second
     // click paused.
     if (playing) pausePlayback();
-    else void v.play().catch(() => { });
+    else if (!holdPlay) void v.play().catch(() => { });
   }
   function fullscreen() {
     void frameRef.current?.requestFullscreen?.();
@@ -2534,7 +2578,9 @@ export default function VideoEditor({
               <div className="mt-3 flex items-center gap-3 rounded-xl border border-[var(--border)] bg-[var(--card)] px-4 py-2.5">
                 <button
                   onClick={togglePlay}
-                  className="flex h-9 w-9 items-center justify-center rounded-full bg-[#1E8F8E] text-white shadow-sm"
+                  disabled={holdPlay && !playing}
+                  title={holdPlay ? "Updating the AI voice for your edit…" : undefined}
+                  className="flex h-9 w-9 items-center justify-center rounded-full bg-[#1E8F8E] text-white shadow-sm disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   {playing ? "❚❚" : "▶"}
                 </button>
@@ -4243,7 +4289,9 @@ function TrimTrack({
               style={{ left: `${(t / totalSec) * 100}%` }}
               className="absolute -translate-x-1/2"
             >
-              {mmss(t)}
+              {/* ticks sit evenly on the packed track but read in source time,
+                  the clock the script, block label and player all use */}
+              {mmss(effToSource(t * 1000) / 1000)}
             </span>
           ))}
         </div>
@@ -4351,7 +4399,10 @@ function TrimBlock({
   effAtClientX: (clientX: number) => number;
 }) {
   const left = (it.start / layoutTotal) * 100;
-  const width = Math.max(0.6, (it.d / layoutTotal) * 100);
+  // True width; the floor is a few px (in the style below), not a percentage —
+  // 0.6% of a 21-minute recording is ~8 s, so a sub-second block was drawn
+  // that wide and covered its neighbours.
+  const width = (it.d / layoutTotal) * 100;
   const text = eff(it.s);
   const blkFrames = framesInRange(
     frames,
@@ -4403,7 +4454,7 @@ function TrimBlock({
       onPointerUp={() => {
         if (!dragEdge.current) onSeek();
       }}
-      style={{ left: `${left}%`, width: `${width}%` }}
+      style={{ left: `${left}%`, width: `max(${width}%, 6px)` }}
       title={skipped ? `Skipped — ${text}` : text}
       className={`absolute top-0 h-full overflow-hidden rounded-md bg-[#0e1116] ring-1 ring-inset ${active ? "ring-2 ring-[#1E8F8E]" : "ring-black/20"
         }`}

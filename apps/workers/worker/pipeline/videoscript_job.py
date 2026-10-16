@@ -33,6 +33,7 @@ from app.videoscript import (
     fit_lines,
     join_lines,
     kept_ranges,
+    narrow_ranges,
     plan_windows,
     timed_script_text,
     window_bounds,
@@ -47,22 +48,22 @@ def _spans(
     db, sess: CaptureSession, keyframes: list[tuple[float, str]]
 ) -> tuple[list[tuple[float, float]], list[list[int]] | None]:
     """(kept source windows in seconds, editor ranges to store). The same
-    precedence as run_pipeline — keep ranges, else the trim window — and
-    then, new here, a trim the editor holds only in the edit spec (see
-    videoscript.kept_ranges), which the caller writes back to the session as
-    keep ranges so the rebuilt scenes keep it. Else the whole recording."""
-    if sess.keep_ranges_json:
-        rngs = [(a / 1000.0, b / 1000.0) for a, b in sess.keep_ranges_json if b > a]
-        if rngs:
-            return rngs, None
-    if sess.trim_start_ms is not None and sess.trim_end_ms is not None:
-        return [(sess.trim_start_ms / 1000.0, sess.trim_end_ms / 1000.0)], None
+    precedence as run_pipeline — keep ranges, else the trim window, else the
+    whole recording — then narrowed by a trim the editor holds only in the
+    edit spec (see videoscript.kept_ranges / narrow_ranges), which the caller
+    writes back to the session as keep ranges so the rebuilt scenes keep it.
+    The editor trim applies on top of stored ranges too: a cut made after a
+    Prepare or an earlier Generate is still a cut."""
     end_ms = int(sess.duration_ms or 0) or int(max((t for t, _ in keyframes), default=0.0) * 1000)
+    base = [[int(a), int(b)] for a, b in (sess.keep_ranges_json or []) if b > a]
+    if not base and sess.trim_start_ms is not None and sess.trim_end_ms is not None:
+        base = [[int(sess.trim_start_ms), int(sess.trim_end_ms)]]
+    if not base:
+        base = [[0, end_ms]]
     vp = db.scalar(select(VideoProject).where(VideoProject.project_id == sess.project_id))
-    editor = kept_ranges(vp.edit_spec_json if vp else None, end_ms)
-    if editor:
-        return [(a / 1000.0, b / 1000.0) for a, b in editor], editor
-    return [(0.0, end_ms / 1000.0)], None
+    editor = narrow_ranges(base, kept_ranges(vp.edit_spec_json if vp else None, end_ms))
+    kept = editor or base
+    return [(a / 1000.0, b / 1000.0) for a, b in kept], editor
 
 
 def _load_keyframes(db, session_id: str) -> list[tuple[float, str]]:
