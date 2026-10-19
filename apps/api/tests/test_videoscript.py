@@ -82,6 +82,20 @@ def test_kept_ranges_reads_the_editor_trim_out_of_the_spec():
     assert kept_ranges({"segments": [seg(4000, 35067)]}, 35067) == [[4000, 35067]]
 
 
+def test_narrow_ranges_applies_an_editor_cut_on_top_of_stored_ranges():
+    from app.videoscript import narrow_ranges
+
+    base = [[0, 20000], [30000, 40000]]
+    # scenes rebuilt inside the stored ranges, a few ms short: no further cut
+    assert narrow_ranges(base, [[0, 19990], [30000, 39995]]) is None
+    assert narrow_ranges(base, None) is None
+    # the user then cut 5–10 s in the editor: only that comes out
+    assert narrow_ranges(base, [[0, 5000], [10000, 20000], [30000, 40000]]) == [
+        [0, 5000], [10000, 20000], [30000, 40000]]
+    # an editor range outside the stored ones never brings that footage back
+    assert narrow_ranges(base, [[0, 10000], [20000, 35000]]) == [[0, 10000], [30000, 35000]]
+
+
 def test_timed_script_text_is_what_apply_script_reads():
     lines = [TimedLine(0.0, "Open Integrations."), TimedLine(63.4, "Click Next."), TimedLine(3725.0, "Done.")]
     assert timed_script_text(lines) == "[0:00.0] Open Integrations.\n[1:03.4] Click Next.\n[1:02:05.0] Done."

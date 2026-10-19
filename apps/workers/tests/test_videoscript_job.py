@@ -146,6 +146,42 @@ def test_job_keeps_a_trim_the_editor_made_in_its_scenes(monkeypatch):
         db.close()
 
 
+def test_job_honours_an_editor_cut_made_after_keep_ranges_were_stored(monkeypatch):
+    """An earlier Generate stored keep ranges; the user then skipped 5–10 s in
+    the editor. The next Generate must not show the model that footage."""
+    db = SessionLocal()
+    try:
+        sess, job = _recording(db, seconds=40)
+        sess.keep_ranges_json = [[0, 20000], [30000, 36000]]
+        spec = {"segments": [
+            {"step_id": "s1", "source_start_ms": 0, "source_end_ms": 5000, "words": [], "removed": []},
+            {"step_id": "s2", "source_start_ms": 5000, "source_end_ms": 10000, "words": [], "removed": [], "skipped": True},
+            {"step_id": "s3", "source_start_ms": 10000, "source_end_ms": 20000, "words": [], "removed": []},
+            {"step_id": "s4", "source_start_ms": 30000, "source_end_ms": 36000, "words": [], "removed": []},
+        ]}
+        db.add(VideoProject(project_id=sess.project_id, graph_version=1, edit_spec_json=spec))
+        db.commit()
+        calls: list[list] = []
+
+        def fake_vision(system, parts, **kw):
+            calls.append(parts)
+            return '[{"t": 0, "line": "Open the invoices tab to begin."}, {"t": 31, "line": "Export the invoice as a PDF."}]'
+
+        monkeypatch.setattr(videoscript, "complete_vision", fake_vision)
+        monkeypatch.setattr(vj, "frame_jpeg", lambda key: key.encode())
+        monkeypatch.setattr(vj, "has_llm", lambda: True)
+        monkeypatch.setattr(vj, "enqueue_understanding", lambda sid: None)
+
+        assert vj.run_video_script(sess.id, job.id, "A demo", "free")["lines"] == 2
+        shown = [p.decode() for p in calls[0] if isinstance(p, bytes)]
+        times = [int(k.rsplit("f", 1)[1].split(".")[0]) for k in shown]
+        assert times == list(range(0, 6)) + list(range(10, 21)) + list(range(30, 37))
+        db.refresh(sess)
+        assert sess.keep_ranges_json == [[0, 5000], [10000, 20000], [30000, 36000]]
+    finally:
+        db.close()
+
+
 def test_job_records_a_failure_and_keeps_the_script_untouched(monkeypatch):
     db = SessionLocal()
     try:
