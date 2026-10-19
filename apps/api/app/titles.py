@@ -374,3 +374,17 @@ def is_placeholder_name(name: str) -> bool:
     """Names the app or the OS gave automatically ("Screen Recording · 4 Sept,
     09:54", "Screen Recording 2026-09-24 at 3.16 PM") — safe to replace."""
     return not (name or "").strip() or bool(_PLACEHOLDER.search(name))
+
+
+# The pipeline titles a graph "Workflow (N steps)" before it names the project
+# (the auto-title runs last), so a fresh edit spec inherits that placeholder.
+_PLACEHOLDER_VIDEO_TITLE = re.compile(r"^\s*Workflow(\s*\(\d+ steps?\))?\s*$")
+
+
+def video_title(spec_title: str | None, project_name: str | None) -> str:
+    """The name to show for a video: what the user typed in the editor, else the
+    project's name while the title is still the pipeline's placeholder."""
+    t = (spec_title or "").strip()
+    if (not t or _PLACEHOLDER_VIDEO_TITLE.match(t)) and (project_name or "").strip():
+        return project_name.strip()
+    return t

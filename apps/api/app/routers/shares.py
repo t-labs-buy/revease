@@ -13,10 +13,11 @@ from sqlalchemy.orm import Session
 from app.auth import CurrentUser
 from app.db import get_session
 from app.docgen import build_document_v2, upgrade_doc
-from app.models import Document, RenderJob, Share, VideoProject, WorkflowGraphRow
+from app.models import Document, Project, RenderJob, Share, VideoProject, WorkflowGraphRow
 from app.ownership import owned_project, project_ids_for
 from app.schemas import ShareCreate, SharePublic, ShareOut, ShareUpdate
 from app.storage import store
+from app.titles import video_title
 
 router = APIRouter(tags=["shares"])
 
@@ -135,7 +136,16 @@ def get_share(token: str, db: Session = Depends(get_session)) -> SharePublic:
         .where(WorkflowGraphRow.project_id == s.project_id)
         .order_by(WorkflowGraphRow.version.desc())
     )
-    title = (graph.graph_json.get("title") if graph else None) or "Refract video"
+    # Same name the editor header shows: the user's video title, else the
+    # project's name — never the pipeline's "Workflow (N steps)" placeholder.
+    project = db.get(Project, s.project_id)
+    vp = db.scalar(select(VideoProject).where(VideoProject.project_id == s.project_id))
+    spec_title = (vp.edit_spec_json or {}).get("title") if vp else None
+    title = (
+        video_title(spec_title or (graph.graph_json.get("title") if graph else None),
+                    project.name if project else None)
+        or "Refract video"
+    )
     allow_download = bool(s.allow_download)
     if s.kind == "doc":
         if graph is None:
@@ -148,7 +158,8 @@ def get_share(token: str, db: Session = Depends(get_session)) -> SharePublic:
             doc = upgrade_doc(row.doc_json, graph.graph_json if row.graph_version == graph.version else None)
         else:
             doc = build_document_v2(graph.graph_json)
-        return SharePublic(kind="doc", title=doc.get("title") or title, project_id=s.project_id,
+        doc_title = video_title(doc.get("title"), project.name if project else None) or title
+        return SharePublic(kind="doc", title=doc_title, project_id=s.project_id,
                            allow_download=allow_download, doc=doc)
     key = _latest_render_key(db, s.project_id)
     if key is None:

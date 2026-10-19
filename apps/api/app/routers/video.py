@@ -26,6 +26,7 @@ from app.ownership import owned_project, owned_render_job
 from app.queue import enqueue_render, enqueue_voice_track
 from app.schemas import EditSpecPatch, RenderJobOut, TranscriptOut, TranscriptWordOut, VideoSpecOut
 from app.storage import store
+from app.titles import video_title
 
 router = APIRouter(tags=["video"])
 
@@ -60,7 +61,7 @@ def _latest_viewport(db: Session, project_id: str) -> dict | None:
 def _get_or_build(db: Session, user, project_id: str) -> VideoProject:
     """Every project-scoped route funnels through here, so the ownership check
     lives here too — a new route cannot forget it."""
-    owned_project(db, user, project_id)
+    project = owned_project(db, user, project_id)
     vp = db.scalar(select(VideoProject).where(VideoProject.project_id == project_id))
     graph = _latest_graph(db, project_id)
     if graph is None:
@@ -90,7 +91,19 @@ def _get_or_build(db: Session, user, project_id: str) -> VideoProject:
         vp.graph_version = graph.version
         db.commit()
         db.refresh(vp)
+    _adopt_project_name(db, vp, project)
     return vp
+
+
+def _adopt_project_name(db: Session, vp: VideoProject, project) -> None:
+    """Show the project's name as the video title until the user types their own.
+    The title never enters a clip hash, so this re-renders nothing."""
+    spec = vp.edit_spec_json or {}
+    title = video_title(spec.get("title"), project.name)
+    if title and title != spec.get("title"):
+        vp.edit_spec_json = {**spec, "title": title}
+        db.commit()
+        db.refresh(vp)
 
 
 def _render_out(job: RenderJob) -> RenderJobOut:
