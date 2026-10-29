@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { mediaUrl, type DocStepV2 } from "@/lib/api";
 import { AutosizeTextarea } from "@/components/doc/AutosizeTextarea";
-import { mmss, TipCallout } from "@/components/doc/DocView";
+import { Inline, mmss, TipCallout } from "@/components/doc/DocView";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import {
   IconArrowDown,
@@ -15,6 +15,57 @@ import {
   IconX,
 } from "@/components/icons";
 import { Spinner } from "@/components/ui";
+
+/** Step text as the reader sees it (**bold** rendered, no asterisks) until it is
+ *  clicked or tabbed into; only then the raw markup is shown for editing. An empty
+ *  field stays a textarea so its placeholder is visible. */
+function MarkupField({
+  value,
+  onChange,
+  label,
+  className,
+  minRows,
+  placeholder,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  label: string;
+  className: string;
+  minRows: number;
+  placeholder: string;
+}) {
+  const [editing, setEditing] = useState(false);
+  if (editing || !value.trim())
+    return (
+      <AutosizeTextarea
+        value={value}
+        minRows={minRows}
+        autoFocus={editing}
+        onChange={(e) => onChange(e.target.value)}
+        onFocus={(e) => {
+          setEditing(true);
+          e.currentTarget.setSelectionRange(value.length, value.length);
+        }}
+        onBlur={() => setEditing(false)}
+        placeholder={placeholder}
+        aria-label={label}
+        className={className}
+      />
+    );
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      aria-label={`${label} (click to edit)`}
+      title="Click to edit"
+      onClick={() => setEditing(true)}
+      onFocus={() => setEditing(true)}
+      className={`input cursor-text whitespace-pre-wrap ${className}`}
+    >
+      <Inline text={value} />
+    </div>
+  );
+}
 
 export function StepCard({
   step,
@@ -102,12 +153,12 @@ export function StepCard({
       </div>
 
       {/* body */}
-      <AutosizeTextarea
+      <MarkupField
         value={step.body}
         minRows={2}
-        onChange={(e) => onPatch({ body: e.target.value })}
+        onChange={(body) => onPatch({ body })}
         placeholder="What the reader should do, and what they will see. Use **bold** for UI labels."
-        aria-label={`Step ${index + 1} instructions`}
+        label={`Step ${index + 1} instructions`}
         className="mt-3 text-[14.5px] leading-relaxed"
       />
 
@@ -123,12 +174,12 @@ export function StepCard({
       ) : (
         <TipCallout>
           <div className="flex items-start gap-2">
-            <AutosizeTextarea
+            <MarkupField
               value={step.tip}
               minRows={1}
-              onChange={(e) => onPatch({ tip: e.target.value })}
+              onChange={(tip) => onPatch({ tip })}
               placeholder="A shortcut, a caveat, or what to do if the screen looks different"
-              aria-label={`Step ${index + 1} tip`}
+              label={`Step ${index + 1} tip`}
               className="border-0 bg-transparent p-0 text-[13.5px] focus:ring-0"
             />
             <button

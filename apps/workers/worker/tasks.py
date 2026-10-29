@@ -59,23 +59,23 @@ def run_render_task(self, render_job_id: str):  # noqa: ANN001
 
 
 @app.task(name="refract.tts.preview")
-def tts_preview_task(voice_id: str):  # noqa: ANN001
-    """Synthesize a short sample of a voice into previews/<voice_id>.wav (cached)."""
+def tts_preview_task(voice_id: str, speed: float = 1.0):  # noqa: ANN001
+    """Synthesize a short sample of a voice at a speed into `preview_key` (cached)."""
     import shutil
 
     from app.storage import store
-    from app.voices import PREVIEW_TEXT
+    from app.voices import PREVIEW_TEXT, preview_key
     from worker.pipeline.tts import synth_step
 
-    key = f"previews/{voice_id}.wav"
+    key = preview_key(voice_id, speed)
     dst = store.local_path(key)
     if store.exists(key):
         return {"voice_id": voice_id, "cached": True}
-    r = synth_step(PREVIEW_TEXT, media_root=store.root, voice_id=voice_id)
+    r = synth_step(PREVIEW_TEXT, media_root=store.root, voice_id=voice_id, speed=float(speed))
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(store.local_path(r.storage_key), dst)
     store.commit(key)
-    return {"voice_id": voice_id, "key": f"previews/{voice_id}.wav"}
+    return {"voice_id": voice_id, "key": key}
 
 
 @app.task(name="refract.voice.track")

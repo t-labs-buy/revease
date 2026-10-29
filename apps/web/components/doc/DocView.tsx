@@ -47,7 +47,9 @@ export function TipCallout({ children }: { children: ReactNode }) {
 export function DocView({ doc }: { doc: DocV2 }) {
   return (
     <article>
-      <h1 className="text-[28px] font-bold leading-tight tracking-tight text-[var(--text)]">{doc.title}</h1>
+      <h1 className="text-[28px] font-bold leading-tight tracking-tight text-[var(--text)]">
+        <Inline text={doc.title} />
+      </h1>
       {doc.overview && (
         <p className="mt-3 whitespace-pre-wrap text-[15px] leading-relaxed text-[var(--text-2)]">
           <Inline text={doc.overview} />
@@ -74,7 +76,9 @@ export function DocView({ doc }: { doc: DocV2 }) {
               <span className="mt-0.5 flex h-6 w-6 flex-none items-center justify-center rounded-full bg-[var(--brand)] text-xs font-semibold text-white">
                 {i + 1}
               </span>
-              <h2 className="text-[17px] font-semibold leading-snug text-[var(--text)]">{s.title}</h2>
+              <h2 className="text-[17px] font-semibold leading-snug text-[var(--text)]">
+                <Inline text={s.title} />
+              </h2>
             </div>
             {s.body && (
               <p className="mt-2 whitespace-pre-wrap text-[14.5px] leading-relaxed text-[var(--text)]">

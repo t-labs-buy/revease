@@ -53,9 +53,9 @@ def enqueue_autoedit(job_id: str) -> None:
     _send("refract.autoedit.run", [job_id])
 
 
-def enqueue_voice_preview(voice_id: str) -> None:
-    """Synthesize a voice sample clip (cached)."""
-    _send("refract.tts.preview", [voice_id])
+def enqueue_voice_preview(voice_id: str, speed: float = 1.0) -> None:
+    """Synthesize a voice sample clip at a speed (cached)."""
+    _send("refract.tts.preview", [voice_id, speed])
 
 
 def enqueue_voice_track(project_id: str, voice_id: str, speed: float) -> None:

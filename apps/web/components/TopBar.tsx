@@ -11,7 +11,7 @@
  * sidebar is hidden, so the bar also shows the brand.
  */
 
-import { createContext, useContext, useMemo, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { ActivityIndicator } from "@/components/ActivityIndicator";
@@ -25,14 +25,28 @@ const HIDE_ON = [/^\/share\//, /^\/login$/, /^\/register$/];
 interface SlotState {
   slot: HTMLDivElement | null;
   setSlot: (el: HTMLDivElement | null) => void;
+  hidden: boolean;
+  setHidden: (v: boolean) => void;
 }
 
 const TopBarContext = createContext<SlotState | null>(null);
 
 export function TopBarProvider({ children }: { children: React.ReactNode }) {
   const [slot, setSlot] = useState<HTMLDivElement | null>(null);
-  const value = useMemo(() => ({ slot, setSlot }), [slot]);
+  const [hidden, setHidden] = useState(false);
+  const value = useMemo(() => ({ slot, setSlot, hidden, setHidden }), [slot, hidden]);
   return <TopBarContext.Provider value={value}>{children}</TopBarContext.Provider>;
+}
+
+/** Hide the shared header while `hide` is true — e.g. the video editor's Trim/Crop
+ *  views, which want the whole height. Restored when the page unmounts. */
+export function useHideTopBar(hide: boolean): void {
+  const setHidden = useContext(TopBarContext)?.setHidden;
+  useEffect(() => {
+    if (!setHidden) return;
+    setHidden(hide);
+    return () => setHidden(false);
+  }, [hide, setHidden]);
 }
 
 /** The header's search element, or null before it mounts (or where it's hidden).
@@ -48,6 +62,7 @@ export function TopBar() {
 
   if (HIDE_ON.some((re) => re.test(pathname))) return null;
   if (!user) return null; // signed out: the login screen is the whole UI
+  if (context?.hidden) return null;
 
   return (
     <header className="sticky top-0 z-20 flex h-14 items-center gap-4 border-b border-[var(--border)] bg-[var(--panel)] px-5 md:px-8">

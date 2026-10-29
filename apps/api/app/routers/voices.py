@@ -7,13 +7,14 @@ from pydantic import BaseModel
 
 from app.queue import enqueue_voice_preview
 from app.storage import store
-from app.voices import PREVIEW_TEXT, VOICE_IDS, VOICES
+from app.voices import PREVIEW_TEXT, VOICE_IDS, VOICES, preview_key
 
 router = APIRouter(tags=["voices"])
 
 
 class VoicePreview(BaseModel):
     voice_id: str
+    speed: float = 1.0
 
 
 @router.get("/voices")
@@ -25,8 +26,8 @@ def list_voices() -> dict:
 def preview_voice(payload: VoicePreview) -> dict:
     if payload.voice_id not in VOICE_IDS:
         raise HTTPException(status_code=404, detail="unknown voice")
-    key = f"previews/{payload.voice_id}.wav"
+    key = preview_key(payload.voice_id, payload.speed)
     ready = store.exists(key)
     if not ready:
-        enqueue_voice_preview(payload.voice_id)  # synthesize in the background (cached)
+        enqueue_voice_preview(payload.voice_id, payload.speed)  # synthesize in the background (cached)
     return {"url": store.download_url(key), "ready": ready}

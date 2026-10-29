@@ -505,7 +505,7 @@ function AssetCard({
   );
 }
 
-const CHECKER =
+export const CHECKER =
   "linear-gradient(45deg,#8883 25%,transparent 25%),linear-gradient(-45deg,#8883 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#8883 75%),linear-gradient(-45deg,transparent 75%,#8883 75%)";
 
 /* ------------------------------------------------------------------ */
@@ -948,7 +948,7 @@ function MusicSection({
 
 /* ------------------------------------------------------------------ */
 
-function RecordingPicker({ onClose, onPick }: { onClose: () => void; onPick: (r: ReusableRecording) => Promise<void> }) {
+export function RecordingPicker({ onClose, onPick }: { onClose: () => void; onPick: (r: ReusableRecording) => Promise<void> }) {
   const [recs, setRecs] = useState<ReusableRecording[] | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -1009,7 +1009,7 @@ function RecordingPicker({ onClose, onPick }: { onClose: () => void; onPick: (r:
   );
 }
 
-function BgCompare({ a, onClose }: { a: LibraryAsset; onClose: () => void }) {
+export function BgCompare({ a, onClose }: { a: LibraryAsset; onClose: () => void }) {
   return (
     <ModalShell
       title="Background removal"

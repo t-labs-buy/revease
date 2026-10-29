@@ -135,9 +135,6 @@ function LibraryInner() {
           >
             {selectMode ? "Done" : "☑ Select"}
           </button>
-          <Link href="/library/packages" className="btn btn-secondary">
-            🎨 Brand Packages
-          </Link>
         </div>
       </div>
 

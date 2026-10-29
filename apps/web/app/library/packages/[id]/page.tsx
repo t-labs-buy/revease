@@ -75,6 +75,7 @@ export default function PackageEditor({ params }: { params: Promise<{ id: string
   const [f, setF] = useState<Form | null>(null);
   const [tab, setTab] = useState<Tab>("Intro / Outro");
   const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null); // upload/preview in progress
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -110,11 +111,10 @@ export default function PackageEditor({ params }: { params: Promise<{ id: string
     setBusy("voice");
     try {
       for (let i = 0; i < 16; i++) {
-        const { url, ready } = await previewVoice(f!.voice_id);
+        const { url, ready } = await previewVoice(f!.voice_id, f!.voice_speed);
         if (ready) {
           audioRef.current?.pause();
           const a = new Audio(url);
-          a.playbackRate = f!.voice_speed;
           audioRef.current = a;
           await a.play();
           break;
@@ -150,6 +150,9 @@ export default function PackageEditor({ params }: { params: Promise<{ id: string
       };
       const p = await updatePackage(id, f.name, settings);
       setPkg(p);
+      // the button otherwise flips back to "Save" with no sign anything happened
+      setSaved(true);
+      window.setTimeout(() => setSaved(false), 2000);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -180,7 +183,7 @@ export default function PackageEditor({ params }: { params: Promise<{ id: string
             🗑 Delete
           </button>
           <button onClick={save} disabled={saving} className="btn btn-primary">
-            {saving ? "Saving…" : "Save"}
+            {saving ? "Saving…" : saved ? "Saved ✓" : "Save"}
           </button>
         </div>
       </div>

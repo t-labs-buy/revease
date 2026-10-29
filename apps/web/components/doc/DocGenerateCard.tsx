@@ -71,7 +71,7 @@ export function DocGenerateCard({
   const skills = useDocSkills();
   const [opts, setOpts] = useState<GenerateOpts>({});
   return (
-    <section className="card mx-auto max-w-2xl p-6 sm:p-8">
+    <section className="card mx-auto max-w-3xl p-6 sm:p-8">
       <span className="flex h-11 w-11 items-center justify-center rounded-lg bg-[var(--brand-soft)] text-[var(--brand)]">
         <IconDoc width={22} height={22} />
       </span>

@@ -4,6 +4,7 @@ import "./globals.css";
 import { BottomNav } from "@/components/BottomNav";
 import { Footer } from "@/components/Footer";
 import { AuthGate } from "@/components/AuthGate";
+import { FeedbackGate } from "@/components/FeedbackGate";
 import { Sidebar } from "@/components/Sidebar";
 import { TopBar, TopBarProvider } from "@/components/TopBar";
 import { AuthProvider } from "@/contexts/AuthContext";
@@ -46,6 +47,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             </div>
           </TopBarProvider>
           <BottomNav />
+          <FeedbackGate />
         </AuthProvider>
       </body>
     </html>
