@@ -17,3 +17,11 @@ VOICES = [
 
 VOICE_IDS = {v["id"] for v in VOICES}
 DEFAULT_VOICE = "af_sarah"
+
+
+def preview_key(voice_id: str, speed: float = 1.0) -> str:
+    """Storage key of a voice sample at a speed, shared by the API and the worker. Speed is in
+    the name so a new speed is a new file and a new URL (the browser can't replay a stale 1.0x
+    sample); 1.0 keeps the original name so samples already on disk stay cached."""
+    speed = round(min(1.5, max(0.75, float(speed))), 2)
+    return f"previews/{voice_id}.wav" if speed == 1.0 else f"previews/{voice_id}_{speed:g}.wav"

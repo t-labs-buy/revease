@@ -331,8 +331,14 @@ def run_pipeline(session_id: str, token: str | None = None) -> dict[str, Any]:
             from app.models import Project
             from app.titles import is_placeholder_name, suggest_title
 
-            new_name, source = suggest_title(transcript.text, graph.get("steps", []))
             proj = db.get(Project, sess.project_id)
+            # A name the user typed (rename) is never replaced — and checked first,
+            # so a locked project spends no LLM call on a title it would discard.
+            new_name, source = (
+                ("", "")
+                if proj is None or proj.name_locked
+                else suggest_title(transcript.text, graph.get("steps", []))
+            )
             # An AI title may replace any name; the offline heuristic only replaces
             # an automatic placeholder, so it never downgrades a good name.
             if new_name and proj is not None and (source == "llm" or is_placeholder_name(proj.name)):

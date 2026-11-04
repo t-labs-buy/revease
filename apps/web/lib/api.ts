@@ -70,6 +70,17 @@ export async function deleteProject(projectId: string): Promise<void> {
   if (!r.ok) throw new Error(`deleteProject failed: ${r.status}`);
 }
 
+/** Rename a project. The server locks the name so auto-titling never replaces it. */
+export async function renameProject(projectId: string, name: string): Promise<Project> {
+  const r = await apiFetch(`/projects/${projectId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  if (!r.ok) throw new Error(r.status === 422 ? "Name can't be empty" : `Rename failed (${r.status})`);
+  return r.json();
+}
+
 export async function toggleFavorite(projectId: string): Promise<Project> {
   const r = await apiFetch(`/projects/${projectId}/favorite`, { method: "POST" });
   if (!r.ok) throw new Error(`toggleFavorite failed: ${r.status}`);
@@ -251,6 +262,59 @@ export function pokeActivity(): void {
 export async function getActivity(): Promise<ActivityItem[]> {
   const r = await apiFetch(`/activity`, { cache: "no-store" });
   if (!r.ok) return [];
+  return r.json();
+}
+
+// ---- feedback (asked once per video / document while it generates) ----
+export interface FeedbackDue {
+  kind: "video" | "doc";
+  target_id: string;
+  project_id: string;
+  project_name: string;
+}
+export interface FeedbackItem {
+  id: string;
+  email: string;
+  kind: "video" | "doc";
+  target_id: string;
+  project_id: string | null;
+  project_name: string | null;
+  rating: number;
+  challenges: string | null;
+  improvements: string | null;
+  created_at: string;
+}
+
+/** `due`: a generation the user has never rated (must answer). `optional`: a
+ *  regeneration of one they rated before (may skip). Errors read as neither, so a
+ *  failing endpoint can never lock someone behind the popup. */
+export async function getFeedbackStatus(): Promise<{ due: FeedbackDue | null; optional: FeedbackDue | null }> {
+  const r = await apiFetch(`/feedback/status`, { cache: "no-store" });
+  if (!r.ok) return { due: null, optional: null };
+  const j = await r.json();
+  return { due: j.due ?? null, optional: j.optional ?? null };
+}
+
+export async function submitFeedback(body: {
+  kind: "video" | "doc";
+  target_id: string;
+  rating: number;
+  challenges?: string;
+  improvements?: string;
+}): Promise<void> {
+  const r = await apiFetch(`/feedback`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  // 409: already answered (another tab) or the generation just ended — just close.
+  if (!r.ok && r.status !== 409)
+    throw new Error((await r.json().catch(() => ({}))).detail ?? `feedback failed: ${r.status}`);
+}
+
+export async function listFeedback(): Promise<{ count: number; average: number | null; items: FeedbackItem[] }> {
+  const r = await apiFetch(`/admin/feedback`, { cache: "no-store" });
+  if (!r.ok) throw new Error(`feedback list failed: ${r.status}`);
   return r.json();
 }
 
@@ -791,11 +855,14 @@ export async function listVoices(): Promise<{ voices: Voice[]; preview_text: str
   return r.json();
 }
 
-export async function previewVoice(voiceId: string): Promise<{ url: string; ready: boolean }> {
+export async function previewVoice(
+  voiceId: string,
+  speed = 1,
+): Promise<{ url: string; ready: boolean }> {
   const r = await apiFetch(`/voices/preview`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ voice_id: voiceId }),
+    body: JSON.stringify({ voice_id: voiceId, speed }),
   });
   if (!r.ok) throw new Error(`previewVoice failed: ${r.status}`);
   const j = await r.json();

@@ -67,6 +67,9 @@ class Project(Base):
     user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), index=True, nullable=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
     favorite: Mapped[int] = mapped_column(Integer, default=0)  # 0/1 — starred/pinned
+    # 0/1 — the user typed this name, so the pipeline's auto-title must never
+    # replace it (a re-process would otherwise silently undo a rename).
+    name_locked: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     sessions: Mapped[list["CaptureSession"]] = relationship(
@@ -114,6 +117,30 @@ class UsageEvent(Base):
     user_id: Mapped[str | None] = mapped_column(String, index=True, nullable=True)
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)  # length of the video/recording
     created_at: Mapped[datetime] = mapped_column(DateTime(), default=_now_ist, index=True)
+
+
+class Feedback(Base):
+    """A product-feedback response, asked while a video or document is generating.
+    The first generation of each video (`VideoProject`) / document must be rated;
+    later regenerations ask again but can be skipped, so one target can collect
+    several rows (hence no unique constraint — routers/feedback.py decides). Keyed on
+    the video/document, not the project, so it still holds when a project becomes a
+    folder of several videos. Like UsageEvent it is history: ids are plain strings
+    (no FK) and the email is copied in, so a response stays readable after the
+    project or account is gone."""
+
+    __tablename__ = "feedback"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(String, index=True, nullable=False)
+    email: Mapped[str] = mapped_column(String, nullable=False)
+    kind: Mapped[str] = mapped_column(String, nullable=False)  # "video" | "doc"
+    target_id: Mapped[str] = mapped_column(String, nullable=False)  # VideoProject.id | Document.id
+    project_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    rating: Mapped[int] = mapped_column(Integer, nullable=False)  # 1..5 stars, the only required answer
+    challenges: Mapped[str | None] = mapped_column(Text, nullable=True)
+    improvements: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
 class CaptureSession(Base):

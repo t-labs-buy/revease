@@ -54,8 +54,11 @@ import {
 } from "@/lib/segments";
 import { ProgressBar } from "@/components/ProgressBar";
 import { Spinner } from "@/components/ui";
+import { IconChevronLeft, IconChevronRight } from "@/components/icons";
 import { VoicePanel } from "@/components/VoicePanel";
 import { ProjectAccess } from "@/components/ProjectAccess";
+import { ShareButton } from "@/components/ShareButton";
+import { useHideTopBar } from "@/components/TopBar";
 import { PreviewOverlay } from "@/components/PreviewOverlay";
 import { ApplyScriptModal } from "@/components/ApplyScriptModal";
 import { GenerateScriptModal } from "@/components/GenerateScriptModal";
@@ -63,6 +66,8 @@ import { MediaPanel } from "@/components/media/MediaPanel";
 import { MediaOverlayLayer, MusicPreview } from "@/components/media/MediaOverlayLayer";
 import { TlMediaTrack } from "@/components/media/TlMediaTrack";
 import { resolveDuration } from "@/components/EditModals";
+import { useLeaveGuard } from "@/components/useLeaveGuard";
+import { UnsavedChangesDialog } from "@/components/UnsavedChangesDialog";
 import {
   Filmstrip,
   Waveform,
@@ -104,6 +109,12 @@ type Tab =
   | "Captions";
 const SIDE_TABS: Tab[] = ["Script", "AI Voice", "Zoom", "Background", "Media"];
 const TOOL_TABS: Tab[] = ["Elements"];
+
+// The script panel's dragged width: never so narrow its tabs wrap, never so wide
+// the preview is squeezed out (at least ~40% of the window stays for it).
+const PANEL_W_KEY = "revease:editorPanelW";
+const clampPanelW = (w: number) =>
+  Math.round(Math.max(300, Math.min(w, (typeof window === "undefined" ? 1600 : window.innerWidth) * 0.6)));
 
 // Backdrop presets shared with the renderer (same ids in worker render.py).
 const BG_PRESETS: { id: string; label: string; css: string }[] = [
@@ -291,6 +302,7 @@ export default function VideoEditor({
   const [zoomBusy, setZoomBusy] = useState(false);
   const [zoomNote, setZoomNote] = useState<string | null>(null);
   const [activeTool, setActiveTool] = useState<null | "trim" | "crop">(null); // inline preview tools
+  useHideTopBar(activeTool !== null);
   const [cropSel, setCropSel] = useState(0); // which crop region is being edited
   const timelineRef = useRef<HTMLElement>(null);
 
@@ -391,6 +403,53 @@ export default function VideoEditor({
   const [playing, setPlaying] = useState(false);
   const [selOverlay, setSelOverlay] = useState<string | null>(null);
   const [showRender, setShowRender] = useState(false);
+  // the full-screen generate view: progress, then the finished video (see doRender)
+  const [genView, setGenView] = useState(false);
+  // left script/tools panel; collapsing it gives the preview the full width
+  const [panelOpen, setPanelOpen] = useState(true);
+  // its dragged width in px (null = the default 35%), remembered per browser
+  const [panelW, setPanelW] = useState<number | null>(null);
+  useEffect(() => {
+    try {
+      const v = Number(localStorage.getItem(PANEL_W_KEY));
+      if (v > 0) setPanelW(clampPanelW(v));
+    } catch {
+      /* storage blocked — keep the default */
+    }
+  }, []);
+  const savePanelW = useCallback((w: number | null) => {
+    setPanelW(w);
+    try {
+      if (w == null) localStorage.removeItem(PANEL_W_KEY);
+      else localStorage.setItem(PANEL_W_KEY, String(Math.round(w)));
+    } catch {
+      /* not remembered — fine */
+    }
+  }, []);
+  const startPanelResize = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      e.preventDefault();
+      const aside = e.currentTarget.parentElement!;
+      const left = aside.getBoundingClientRect().left;
+      let last = aside.getBoundingClientRect().width;
+      const move = (ev: PointerEvent) => {
+        last = clampPanelW(ev.clientX - left);
+        setPanelW(last);
+      };
+      const up = () => {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+        savePanelW(last);
+      };
+      document.body.style.cursor = "col-resize";
+      document.body.style.userSelect = "none";
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+    },
+    [savePanelW],
+  );
   const [voiceUrl, setVoiceUrl] = useState<string | null>(null);
   const [voiceLoading, setVoiceLoading] = useState(false);
   // How long the current voice build has been running, so a long first build
@@ -442,6 +501,7 @@ export default function VideoEditor({
   const aiVoiceActive = !!voiceUrl && wantAiVoice;
   const dirty =
     !!spec && !!savedSpec && JSON.stringify(spec) !== JSON.stringify(savedSpec);
+  const leaveGuard = useLeaveGuard(dirty);
   // Only the fields the narration audio actually depends on. Visual edits —
   // zoom, crop, elements, captions, background… — must NOT prompt a voice
   // refresh: the voice track never hears them.
@@ -1038,6 +1098,10 @@ export default function VideoEditor({
     const fitW = Math.max(0, Math.min(w, h * videoAspect));
     return { w: Math.floor(fitW), h: Math.floor(fitW / videoAspect) };
   }, [stageSize, videoAspect, spec?.background?.enabled]);
+  // the whole frame's width (video + backdrop padding) — the playback bar matches it
+  const frameOuterW = frameSize.w
+    ? Math.round(frameSize.w + (spec?.background?.enabled ? 2 * 0.026 * stageSize.w : 0))
+    : 0;
 
   const addElement = useCallback(
     (type: EditElement["type"], mediaKey?: string) => {
@@ -1377,19 +1441,32 @@ export default function VideoEditor({
     }
   }
 
-  async function save() {
-    if (!spec) return;
+  /** Returns whether the save went through, so "Save and leave" can wait on it. */
+  async function save(): Promise<boolean> {
+    if (!spec) return false;
     setSaving(true);
     try {
       const v = await patchVideo(id, spec);
       setSpec(v.edit_spec);
       setSavedSpec(v.edit_spec);
       setError(null);
+      return true;
     } catch (e) {
       setError(String(e));
+      return false;
     } finally {
       setSaving(false);
     }
+  }
+
+  async function saveAndLeave() {
+    if (await save()) leaveGuard.leave();
+    else leaveGuard.stay(); // keep the user here so they can see the error banner
+  }
+
+  async function discardAndLeave() {
+    await discard();
+    leaveGuard.leave();
   }
 
   async function discard() {
@@ -1413,7 +1490,8 @@ export default function VideoEditor({
   async function doRender() {
     if (!spec) return;
     setRendering(true);
-    setShowRender(true);
+    setRender(null); // or the generate view would show the previous video until the new job lands
+    setGenView(true);
     try {
       await patchVideo(id, spec);
       const specAtRender = JSON.stringify(spec);
@@ -1447,6 +1525,7 @@ export default function VideoEditor({
     } catch (e) {
       setError(String(e));
       setRendering(false);
+      setGenView(false);
     }
   }
 
@@ -1672,9 +1751,27 @@ export default function VideoEditor({
     // The editor fills the viewport below the shared top bar (h-14) and has no
     // footer (Footer hides on this route); h-screen plus those made the whole
     // page scroll by their height.
-    <div className="flex h-[calc(100dvh-3.5rem)] flex-col bg-[var(--bg)] text-[var(--text)]">
+    // While Trim/Crop is open both headers fold away (see useHideTopBar), so the
+    // editor takes the full height.
+    <div
+      className={`flex flex-col bg-[var(--bg)] text-[var(--text)] ${
+        activeTool ? "h-[100dvh]" : "h-[calc(100dvh-3.5rem)]"
+      }`}
+    >
+      {leaveGuard.pendingHref && (
+        <UnsavedChangesDialog
+          busy={saving}
+          onSave={() => void saveAndLeave()}
+          onDiscard={() => void discardAndLeave()}
+          onStay={leaveGuard.stay}
+        />
+      )}
       {/* header */}
-      <header className="flex items-center justify-between gap-4 border-b border-[var(--border)] bg-[var(--card)] px-6 py-3">
+      <header
+        className={`items-center justify-between gap-4 border-b border-[var(--border)] bg-[var(--card)] px-6 py-3 ${
+          activeTool ? "hidden" : "flex"
+        }`}
+      >
         <div className="flex min-w-0 items-center gap-3">
           <Link
             href={`/projects/${id}`}
@@ -1689,7 +1786,8 @@ export default function VideoEditor({
               <input
                 value={spec.title}
                 onChange={(e) => setSpec({ ...spec, title: e.target.value })}
-                title="Video title — also the default text for a new title card (Media tab)"
+                title="Project name — saving renames the project too, and it's the default text for a new title card (Media tab)"
+                aria-label="Project name"
                 className="min-w-0 flex-1 truncate rounded px-1 -mx-1 text-[17px] font-semibold tracking-tight text-[var(--text)] hover:bg-[var(--hover)] focus:bg-[var(--hover)] focus:outline-none"
               />
               <Link
@@ -1743,10 +1841,10 @@ export default function VideoEditor({
               </option>
             ))}
           </select>
-          <ProjectAccess projectId={id} kind="video" />
+          <ProjectAccess projectId={id} kind="video" share={false} />
           {!rendering && !showRender && render?.status === "done" && render.output_key && (
             <button
-              onClick={() => setShowRender(true)}
+              onClick={() => setGenView(true)}
               title="View or download the last generated video"
               className="btn btn-secondary btn-sm"
             >
@@ -1773,6 +1871,86 @@ export default function VideoEditor({
         <p className="mx-6 mt-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
           {error}
         </p>
+      )}
+
+      {/* The generate screen: full-screen over the editor from the click on. While
+          rendering it shows progress; once done, the video with Download and Share;
+          on error, the error. "Back to editor" is the only way out once it ends.
+          Sits under the feedback popup (z-70), which is asked during this wait. */}
+      {genView && (
+        <div className="fixed inset-0 z-[60] flex flex-col bg-[var(--bg)]">
+          <div className="flex items-center gap-3 border-b border-[var(--border)] px-6 py-3">
+            <h2 className="min-w-0 flex-1 truncate text-[15px] font-semibold text-[var(--text)]">
+              {spec.title || "Video"}
+            </h2>
+            {!rendering && (
+              <button
+                onClick={() => setGenView(false)}
+                className="btn btn-secondary px-4 py-2 text-[15px] font-semibold"
+              >
+                ← Back to editor
+              </button>
+            )}
+          </div>
+
+          <div className="flex min-h-0 flex-1 flex-col items-center justify-center overflow-auto p-6">
+            {render?.status === "done" && render.output_key ? (
+              <div className="w-full max-w-5xl">
+                <video
+                  src={mediaUrl(render.output_key)}
+                  controls
+                  className="max-h-[70vh] w-full rounded-2xl bg-black shadow-lg"
+                />
+                <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
+                  <button
+                    onClick={() => downloadMedia(render.output_key!, `${render.output_key!.split("/").pop()}`)}
+                    className="btn btn-primary btn-sm"
+                  >
+                    ↓ Download
+                  </button>
+                  <div className="relative">
+                    <ShareButton projectId={id} kind="video" />
+                  </div>
+                </div>
+              </div>
+            ) : render?.status === "error" && !rendering ? (
+              <div className="w-full max-w-md text-center">
+                <h3 className="text-lg font-semibold text-[var(--text)]">The video could not be generated</h3>
+                <p className="mt-2 break-words text-sm text-red-500">
+                  {(render.error_json as { message?: string } | null)?.message ?? JSON.stringify(render.error_json)}
+                </p>
+                <button
+                  onClick={() => setGenView(false)}
+                  className="btn btn-secondary mt-5 px-4 py-2 text-[15px] font-semibold"
+                >
+                  ← Back to editor
+                </button>
+              </div>
+            ) : (
+              <div role="status" aria-live="polite" className="w-full max-w-md text-center">
+                <Spinner className="mx-auto h-8 w-8 text-[var(--brand)]" />
+                <h3 className="mt-4 text-lg font-semibold text-[var(--text)]">Generating your video…</h3>
+                <p className="mt-1 truncate text-sm text-[var(--text-2)]">
+                  {render?.message || (render?.status === "pending" ? "Waiting for a worker…" : "Starting…")}
+                </p>
+                <div className="mt-5 flex items-center gap-3">
+                  <ProgressBar
+                    value={!render || render.status === "pending" ? null : render.progress ?? null}
+                    className="flex-1"
+                  />
+                  {typeof render?.progress === "number" && (
+                    <span className="w-10 text-right font-mono text-[13px] font-semibold text-[var(--text)]">
+                      {Math.round(render.progress * 100)}%
+                    </span>
+                  )}
+                </div>
+                <p className="mt-4 text-[12px] text-[var(--text-3)]">
+                  Only changed scenes are re-rendered, so this is quicker after small edits.
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
       )}
 
       {showApplyScript && sessionId && (
@@ -1804,7 +1982,23 @@ export default function VideoEditor({
       {/* body: 35% script / 65% preview */}
       <div className="flex min-h-0 flex-1">
         {/* LEFT — script / tools */}
-        <aside className="flex w-[35%] min-w-[340px] max-w-[560px] flex-col border-r border-[var(--border)] bg-[var(--card)]">
+        {/* hidden, not unmounted, when collapsed: the open tab keeps its state */}
+        <aside
+          className={`${panelOpen ? "flex" : "hidden"} relative flex-none flex-col border-r border-[var(--border)] bg-[var(--card)] ${
+            panelW ? "" : "w-[35%] min-w-[340px] max-w-[560px]"
+          }`}
+          style={panelW ? { width: panelW } : undefined}
+        >
+          {/* drag the right edge to resize; double-click resets */}
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize panel"
+            title="Drag to resize · double-click to reset"
+            onPointerDown={startPanelResize}
+            onDoubleClick={() => savePanelW(null)}
+            className="absolute -right-1 top-0 z-20 h-full w-2 cursor-col-resize hover:bg-[#1E8F8E]/30 active:bg-[#1E8F8E]/50"
+          />
           <nav className="flex items-center gap-1 border-b border-[var(--border)] px-3 py-2">
             {SIDE_TABS.map((t) => (
               <button
@@ -1832,6 +2026,16 @@ export default function VideoEditor({
                 </button>
               </div>
             )}
+            <button
+              onClick={() => setPanelOpen(false)}
+              title="Hide this panel to make the preview bigger"
+              aria-label="Hide panel"
+              className={`btn btn-ghost btn-sm h-8 w-8 p-0 text-[var(--text-3)] hover:text-[var(--text)] ${
+                TOOL_TABS.includes(tab) ? "ml-1" : "ml-auto"
+              }`}
+            >
+              <IconChevronLeft width={16} height={16} />
+            </button>
           </nav>
 
           <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
@@ -2308,7 +2512,16 @@ export default function VideoEditor({
         </aside>
 
         {/* RIGHT — preview */}
-        <main className="flex min-w-0 flex-1 flex-col overflow-hidden p-4">
+        <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden p-4">
+          {!panelOpen && (
+            <button
+              onClick={() => setPanelOpen(true)}
+              title="Show the script panel"
+              className="btn btn-secondary btn-sm absolute left-3 top-3 z-20 gap-1 shadow-sm"
+            >
+              <IconChevronRight width={14} height={14} /> {tab}
+            </button>
+          )}
           {showRender && render ? (
             <div className="mx-auto w-full max-w-3xl">
               <div className="mb-2 flex items-center gap-2 text-sm">
@@ -2372,7 +2585,7 @@ export default function VideoEditor({
               )}
             </div>
           ) : (
-            <div className="mx-auto flex min-h-0 w-full max-w-4xl flex-1 flex-col">
+            <div className="mx-auto flex min-h-0 w-full flex-1 flex-col">
               {/* preview */}
               <div ref={stageRef} className="flex min-h-0 flex-1 items-center justify-center">
                 {source ? (
@@ -2574,8 +2787,12 @@ export default function VideoEditor({
                 )}
               </div>
 
-              {/* playback controls */}
-              <div className="mt-3 flex items-center gap-3 rounded-xl border border-[var(--border)] bg-[var(--card)] px-4 py-2.5">
+              {/* playback controls — as wide as the video frame above, not the column,
+                  so they line up when the preview is height-limited */}
+              <div
+                className="mx-auto mt-3 flex items-center gap-3 rounded-xl border border-[var(--border)] bg-[var(--card)] px-4 py-2.5"
+                style={source && frameOuterW ? { width: Math.max(frameOuterW, 420), maxWidth: "100%" } : undefined}
+              >
                 <button
                   onClick={togglePlay}
                   disabled={holdPlay && !playing}
@@ -2678,8 +2895,14 @@ export default function VideoEditor({
       </div>
 
       {/* tool chips — above the timeline. The grip on this row's top edge
-          resizes the overview timeline below (Trim/Crop views size themselves). */}
-      <div className="relative flex flex-wrap items-center gap-2 border-t border-[var(--border)] bg-[var(--card)] px-6 py-2.5">
+          resizes the overview timeline below (Trim/Crop views size themselves).
+          Hidden while Trim or Crop is open, to give the editor the room; their
+          own Done button brings it back. */}
+      <div
+        className={`relative flex-wrap items-center gap-2 border-t border-[var(--border)] bg-[var(--card)] px-6 py-2.5 ${
+          activeTool === null ? "flex" : "hidden"
+        }`}
+      >
         {activeTool === null && (
           <div
             onPointerDown={onTlHandleDown}
@@ -2765,8 +2988,10 @@ export default function VideoEditor({
 
       {/* TIMELINE — Trim/Crop swap in a focused single-track view; otherwise the
           full Video/Audio/Voice/Captions/Zoom timeline. All edit the same spec live. */}
-      {activeTool === "trim" ? (
-        <TrimTrack
+      {activeTool !== null && (
+        <ToolDock>
+          {activeTool === "trim" ? (
+            <TrimTrack
           sectionRef={timelineRef}
           spec={spec}
           source={source}
@@ -2811,7 +3036,10 @@ export default function VideoEditor({
           onRemoveAll={removeAllCrops}
           onDone={() => setActiveTool(null)}
         />
-      ) : (
+          ) : null}
+        </ToolDock>
+      )}
+      {activeTool === null && (
         <TimelineTracks
           sectionRef={timelineRef}
           spec={spec}
@@ -4085,6 +4313,69 @@ type TrimLayoutItem = PackedItem;
 // footage and scrolls sideways, instead of squeezing the whole recording into
 // the page width (unreadable on a long recording). The Zoom slider multiplies it.
 const TRIM_PX_PER_SEC = 24;
+
+/** The Trim / Crop view's frame. Those views size to their content; this adds the
+ *  same top grip as the overview timeline (whose grip lives on the tool-chip row,
+ *  hidden while a tool is open): drag up for more room, down to give it to the
+ *  preview, double-click for the natural height. Remembered per browser. */
+const TOOL_H_KEY = "tl.toolHeight";
+function ToolDock({ children }: { children: React.ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const drag = useRef<{ y0: number; h0: number } | null>(null);
+  const [h, setH] = useState<number | null>(() => {
+    try {
+      const v = Number(localStorage.getItem(TOOL_H_KEY));
+      return v > 0 ? v : null;
+    } catch {
+      return null;
+    }
+  });
+  const store = (v: number | null) => {
+    try {
+      if (v == null) localStorage.removeItem(TOOL_H_KEY);
+      else localStorage.setItem(TOOL_H_KEY, String(Math.round(v)));
+    } catch {
+      /* storage blocked — the size just won't persist */
+    }
+  };
+  return (
+    <div
+      ref={ref}
+      className="relative flex-none overflow-y-auto"
+      style={h != null ? { height: h } : undefined}
+    >
+      <div
+        onPointerDown={(e) => {
+          drag.current = { y0: e.clientY, h0: ref.current?.getBoundingClientRect().height ?? 0 };
+          e.currentTarget.setPointerCapture(e.pointerId);
+        }}
+        onPointerMove={(e) => {
+          const d = drag.current;
+          if (!d) return;
+          const max = Math.round(window.innerHeight * 0.7);
+          setH(Math.max(80, Math.min(max, d.h0 + (d.y0 - e.clientY))));
+        }}
+        onPointerUp={() => {
+          if (!drag.current) return;
+          drag.current = null;
+          store(ref.current?.getBoundingClientRect().height ?? null);
+        }}
+        onPointerCancel={() => {
+          drag.current = null;
+        }}
+        onDoubleClick={() => {
+          setH(null);
+          store(null);
+        }}
+        title="Drag to resize. Double-click to reset."
+        className="group sticky top-0 z-30 -mb-3 flex h-3 cursor-ns-resize touch-none items-center justify-center"
+      >
+        <span className="h-1 w-12 rounded-full bg-[var(--border)] transition-colors group-hover:bg-[#1E8F8E]" />
+      </div>
+      {children}
+    </div>
+  );
+}
 
 function TrimTrack({
   sectionRef,

@@ -18,6 +18,7 @@ from app.routers import (
     autoedit,
     collaborators,
     documents,
+    feedback,
     graphs,
     kb,
     library,
@@ -77,6 +78,7 @@ app.include_router(packages.router)
 app.include_router(activity.router)
 app.include_router(uploads.router)
 app.include_router(library.router)
+app.include_router(feedback.router)
 
 
 @app.get("/healthz", response_model=HealthOut)

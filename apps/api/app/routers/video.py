@@ -17,6 +17,7 @@ from app.models import (
     CaptureSession,
     LibraryAsset,
     MediaAsset,
+    Project,
     RenderJob,
     Transcript,
     VideoProject,
@@ -104,6 +105,21 @@ def _adopt_project_name(db: Session, vp: VideoProject, project) -> None:
         vp.edit_spec_json = {**spec, "title": title}
         db.commit()
         db.refresh(vp)
+
+
+def _sync_project_name(db: Session, project_id: str, old_title: str, new_title) -> None:
+    """The video title and the project name are one name to the user: typing a
+    new title in the editor renames the project (and locks it against the
+    auto-title, like any rename). Only a real change counts, so saving other
+    edits never touches the name; a blank title leaves the name alone — the
+    editor then falls back to showing the project name."""
+    name = " ".join(str(new_title or "").split())[:200]
+    if not name or name == " ".join(old_title.split()):
+        return
+    project = db.get(Project, project_id)
+    if project is not None and project.name != name:
+        project.name = name
+        project.name_locked = 1
 
 
 def _render_out(job: RenderJob) -> RenderJobOut:
@@ -219,8 +235,10 @@ def patch_video(
 ) -> VideoSpecOut:
     vp = _get_or_build(db, user, project_id)
     _check_media_keys(db, user, project_id, vp.edit_spec_json or {}, payload.edit_spec)
+    old_title = ((vp.edit_spec_json or {}).get("title") or "").strip()
     new_spec = mark_dirty(vp.edit_spec_json, payload.edit_spec)
     vp.edit_spec_json = new_spec
+    _sync_project_name(db, project_id, old_title, new_spec.get("title"))
     db.commit()
     db.refresh(vp)
     return VideoSpecOut(

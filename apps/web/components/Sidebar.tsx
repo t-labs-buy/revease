@@ -30,6 +30,7 @@ import {
   IconHome,
   IconLibrary,
   IconSettings,
+  IconSparkles,
   IconUsers,
   IconVideo,
 } from "@/components/icons";
@@ -39,6 +40,9 @@ import { useAuth } from "@/contexts/AuthContext";
 const HIDE_ON = [/^\/share\//, /^\/login$/, /^\/register$/];
 
 const STORAGE_KEY = "revease.sidebar";
+
+// The video and document editors need the width, so the sidebar starts collapsed there.
+const EDITOR = /^\/projects\/[^/]+\/(video|document)$/;
 
 interface Item {
   href: string;
@@ -55,13 +59,16 @@ const MAIN: Item[] = [
   { href: "/library", label: "Projects", icon: IconFolder, exact: true },
   { href: "/library?kind=video", label: "Videos", icon: IconVideo, exact: true },
   { href: "/library?kind=document", label: "Documents", icon: IconDoc, exact: true },
-  { href: "/library/packages", label: "Library", icon: IconLibrary },
+  // Brand packages are hidden until something applies them to a video; the
+  // pages still exist at /library/packages.
+  { href: "/library/media", label: "Library", icon: IconLibrary },
   { href: "/knowledge-base", label: "Knowledge Base", icon: IconBook, soon: true },
 ];
 
 const ADMIN: Item[] = [
   { href: "/admin/usage", label: "Usage", icon: IconChart, adminOnly: true },
   { href: "/admin/users", label: "Users", icon: IconUsers, adminOnly: true },
+  { href: "/admin/feedback", label: "Feedback", icon: IconSparkles, adminOnly: true },
 ];
 
 const FOOT: Item[] = [
@@ -126,23 +133,29 @@ function SidebarInner() {
   const search = useSearchParams();
   const { user, isAdmin } = useAuth();
   const [collapsed, setCollapsed] = useState(false);
+  const inEditor = EDITOR.test(pathname);
 
-  // Restore the remembered state after mount (see module docstring).
+  // Restore the remembered state after mount (see module docstring). The editors
+  // always open collapsed for the room; leaving one restores the remembered state.
   useEffect(() => {
+    if (inEditor) return setCollapsed(true);
     try {
       setCollapsed(localStorage.getItem(STORAGE_KEY) === "collapsed");
     } catch {
       /* storage unavailable: stay expanded */
     }
-  }, []);
+  }, [inEditor]);
 
   const toggle = () => {
     setCollapsed((v) => {
       const next = !v;
-      try {
-        localStorage.setItem(STORAGE_KEY, next ? "collapsed" : "expanded");
-      } catch {
-        /* ignore */
+      // expanding it inside an editor is a one-off, not the new preference
+      if (!EDITOR.test(window.location.pathname)) {
+        try {
+          localStorage.setItem(STORAGE_KEY, next ? "collapsed" : "expanded");
+        } catch {
+          /* ignore */
+        }
       }
       return next;
     });

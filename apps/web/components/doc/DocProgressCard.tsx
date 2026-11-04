@@ -27,7 +27,7 @@ export function DocProgressCard({
   const pct = typeof progress === "number" ? Math.round(progress * 100) : null;
   const line = phase === "queued" ? message || "Waiting for a worker…" : message || "Working…";
   return (
-    <section className="card mx-auto max-w-2xl p-6 sm:p-8">
+    <section className="card mx-auto max-w-3xl p-6 sm:p-8">
       <div className="flex items-center gap-3">
         <Spinner className="text-[var(--brand)]" />
         <div className="min-w-0 flex-1">

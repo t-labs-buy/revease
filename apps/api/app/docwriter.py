@@ -59,7 +59,7 @@ GROUNDING — non-negotiable:
 STRUCTURE — every step id marked REQUIRED must appear exactly once, in the given order, with its exact id. Never renumber, reorder, split or invent ids. Steps marked OPTIONAL are silent pauses: either omit them or, when the pause obviously belongs with the surrounding action (a page loading, a result appearing), fold what happened into the neighbouring step's text. Do not output an OPTIONAL step whose only content would be "wait".
 
 WRITING:
-- Step title: 3-8 words, imperative, names the action and target ("Open the API Keys page").
+- Step title: 3-8 words, imperative, names the action and target ("Open the API Keys page"). Plain text: no asterisks or backticks.
 - Step body: 1-3 sentences, imperative mood, second person, present tense. Bold UI labels with **double asterisks** ("Click **Save**"). Put literal values the user types in `backticks`. State the visible result when the narration or the next step makes it clear ("The key appears in the list").
 - Step tip: optional (null when nothing to add). One sentence for a shortcut, a caveat, or what to do if the expected screen does not appear — only when the transcript supports it.
 - Overview: 2-4 sentences: what the guide achieves, who it is for, and the end state. Never start with "In this guide" or "This document".
@@ -388,6 +388,13 @@ def _parse_object(text: str) -> dict[str, Any]:
 # ------------------------------------------------------------------ merge ----
 
 _WAIT_ONLY = re.compile(r"^(wait|pause|waiting|loading)[^a-z]*$", re.IGNORECASE)
+# Titles are rendered as plain text everywhere (web headings, DOCX headings, PDF titles), so
+# any **bold** / `code` the model slips into one would show as literal asterisks.
+_INLINE_MD = re.compile(r"\*\*([^*]+)\*\*|`([^`]+)`")
+
+
+def plain_title(text: str) -> str:
+    return _INLINE_MD.sub(lambda m: m.group(1) or m.group(2), text).replace("**", "")
 
 
 def merge_model_output(
@@ -420,7 +427,7 @@ def merge_model_output(
                 missing += 1
                 out_steps.append(mech)
                 continue
-            title = clean_text(item.get("title"), 200) or mech["title"]
+            title = plain_title(clean_text(item.get("title"), 200)) or mech["title"]
             body = clean_text(item.get("body"), 4000) or mech["body"]
             tip = clean_text(item.get("tip"), 600) if item.get("tip") else None
             out_steps.append({**mech, "title": title, "body": body, "tip": tip or None})
@@ -430,7 +437,7 @@ def merge_model_output(
             body = clean_text(item.get("body"), 4000)
             if not body or _WAIT_ONLY.match(body):
                 continue
-            title = clean_text(item.get("title"), 200) or mech["title"]
+            title = plain_title(clean_text(item.get("title"), 200)) or mech["title"]
             tip = clean_text(item.get("tip"), 600) if item.get("tip") else None
             out_steps.append({**mech, "title": title, "body": body, "tip": tip or None})
 
@@ -443,7 +450,7 @@ def merge_model_output(
 
     merged = {
         **fallback,
-        "title": clean_text(parsed.get("title"), 200) or fallback["title"],
+        "title": plain_title(clean_text(parsed.get("title"), 200)) or fallback["title"],
         "overview": clean_text(parsed.get("overview"), 4000) or fallback["overview"],
         "prerequisites": _strs(parsed.get("prerequisites")),
         "steps": out_steps,

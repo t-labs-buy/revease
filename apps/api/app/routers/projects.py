@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.auth import CurrentUser
 from app.db import get_session
-from app.models import CaptureSession, Document, Project, ProjectCollaborator, User
+from app.models import (
+    CaptureSession,
+    Document,
+    Project,
+    ProjectCollaborator,
+    User,
+    VideoProject,
+)
 from app.ownership import delete_project_cascade, owned_project, purge_media
-from app.schemas import ProjectCreate, ProjectOut
+from app.schemas import ProjectCreate, ProjectOut, ProjectUpdate
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -124,6 +131,33 @@ def delete_project(
     sess_ids, vp_ids = delete_project_cascade(db, project)
     db.commit()
     purge_media(sess_ids, vp_ids)  # the DB delete already succeeded
+
+
+@router.patch("/{project_id}", response_model=ProjectOut)
+def rename_project(
+    project_id: str, payload: ProjectUpdate, user: CurrentUser, db: Session = Depends(get_session)
+) -> ProjectOut:
+    """Rename a project. Owner or collaborator (renaming is an edit, like any
+    other). The name is locked so the pipeline's auto-title never undoes it.
+
+    The project name and the video title are one name to the user, so the video
+    title is set too (the editor's title box renames the project the same way,
+    see `_sync_project_name` in the video router). The title never enters a
+    clip hash, so this re-renders nothing."""
+    project = owned_project(db, user, project_id)
+    name = " ".join(payload.name.split())  # trim + collapse whitespace/newlines
+    if not name:
+        raise HTTPException(status_code=422, detail="Name can't be empty")
+    project.name = name
+    project.name_locked = 1
+    vp = db.scalar(select(VideoProject).where(VideoProject.project_id == project.id))
+    if vp is not None:
+        spec = vp.edit_spec_json or {}
+        if spec.get("title") != name:
+            vp.edit_spec_json = {**spec, "title": name}
+    db.commit()
+    db.refresh(project)
+    return _out(db, project, user)
 
 
 @router.post("/{project_id}/favorite", response_model=ProjectOut)

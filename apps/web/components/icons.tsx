@@ -219,6 +219,12 @@ export const IconCheck = (p: SVGProps<SVGSVGElement>) => (
     <path d="m5 12 5 5L20 7" />
   </svg>
 );
+export const IconPencil = (p: SVGProps<SVGSVGElement>) => (
+  <svg {...base(p)}>
+    <path d="M4 20h4L19 9l-4-4L4 16v4Z" />
+    <path d="m13.5 6.5 4 4" />
+  </svg>
+);
 export const IconX = (p: SVGProps<SVGSVGElement>) => (
   <svg {...base(p)}>
     <path d="M6 6l12 12M18 6 6 18" />

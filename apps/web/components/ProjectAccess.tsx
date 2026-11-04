@@ -21,7 +21,17 @@ import {
 import { useAuth } from "@/contexts/AuthContext";
 import { ShareButton } from "@/components/ShareButton";
 
-export function ProjectAccess({ projectId, kind }: { projectId: string; kind: "video" | "doc" }) {
+/** `share={false}` hides the public-link button — the video editor offers it next
+ *  to the finished video instead. */
+export function ProjectAccess({
+  projectId,
+  kind,
+  share = true,
+}: {
+  projectId: string;
+  kind: "video" | "doc";
+  share?: boolean;
+}) {
   const { user, isAdmin } = useAuth();
   const router = useRouter();
   const [project, setProject] = useState<Project | null>(null);
@@ -180,7 +190,7 @@ export function ProjectAccess({ projectId, kind }: { projectId: string; kind: "v
           </div>
         )}
       </div>
-      {canManage && <ShareButton projectId={projectId} kind={kind} />}
+      {canManage && share && <ShareButton projectId={projectId} kind={kind} />}
     </>
   );
 }

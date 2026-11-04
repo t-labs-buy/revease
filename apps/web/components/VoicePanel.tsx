@@ -30,7 +30,7 @@ export function VoicePanel({
     try {
       // poll until the sample is synthesized (first time downloads the voice model)
       for (let i = 0; i < 20; i++) {
-        const { url, ready } = await previewVoice(voiceId);
+        const { url, ready } = await previewVoice(voiceId, value.speed);
         if (ready) {
           audioRef.current?.pause();
           const a = new Audio(url);

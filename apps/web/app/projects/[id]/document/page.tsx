@@ -121,7 +121,7 @@ function DocumentPageInner({ id }: { id: string }) {
   const pickingIndex = pickStep ? (s.doc?.steps.findIndex((x) => x.id === pickStep) ?? -1) : -1;
 
   return (
-    <main className="mx-auto max-w-3xl px-4 py-6 sm:px-6 sm:py-10">
+    <main className="mx-auto w-full max-w-5xl px-4 py-6 sm:px-6 sm:py-10">
       {regen && (
         <RegenerateDialog
           initial={s.lastOpts}
@@ -146,8 +146,14 @@ function DocumentPageInner({ id }: { id: string }) {
         />
       )}
 
-      <Link href={`/projects/${id}`} onClick={(e) => void navigate(e, `/projects/${id}`)} className="btn btn-ghost btn-sm -ml-2">
-        ← Project
+      <Link
+        href={`/projects/${id}`}
+        onClick={(e) => void navigate(e, `/projects/${id}`)}
+        className="btn btn-ghost -ml-3 flex h-12 w-12 items-center justify-center text-2xl leading-none"
+        title="Back to project"
+        aria-label="Back to project"
+      >
+        ←
       </Link>
 
       {/* Video ⇄ Document toggle + actions */}
@@ -200,7 +206,7 @@ function DocumentPageInner({ id }: { id: string }) {
         {s.phase === "none" && <DocGenerateCard onGenerate={(o) => void s.generate(o)} error={s.serverError} />}
         {(s.phase === "queued" || s.phase === "running") && <DocProgressCard phase={s.phase} projectId={id} progress={s.state?.progress} message={s.state?.message} />}
         {s.phase === "error" && (
-          <section className="card mx-auto max-w-2xl p-6 sm:p-8">
+          <section className="card mx-auto max-w-3xl p-6 sm:p-8">
             <h2 className="text-[18px] font-semibold text-[var(--text)]">Generation failed</h2>
             <p className="mt-2 text-[14px] text-[var(--text-2)]">{s.serverError ?? "Something went wrong."}</p>
             <div className="mt-5 flex flex-wrap gap-2">
