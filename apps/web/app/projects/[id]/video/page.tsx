@@ -66,6 +66,8 @@ import { MediaPanel } from "@/components/media/MediaPanel";
 import { MediaOverlayLayer, MusicPreview } from "@/components/media/MediaOverlayLayer";
 import { TlMediaTrack } from "@/components/media/TlMediaTrack";
 import { resolveDuration } from "@/components/EditModals";
+import { useLeaveGuard } from "@/components/useLeaveGuard";
+import { UnsavedChangesDialog } from "@/components/UnsavedChangesDialog";
 import {
   Filmstrip,
   Waveform,
@@ -499,6 +501,7 @@ export default function VideoEditor({
   const aiVoiceActive = !!voiceUrl && wantAiVoice;
   const dirty =
     !!spec && !!savedSpec && JSON.stringify(spec) !== JSON.stringify(savedSpec);
+  const leaveGuard = useLeaveGuard(dirty);
   // Only the fields the narration audio actually depends on. Visual edits —
   // zoom, crop, elements, captions, background… — must NOT prompt a voice
   // refresh: the voice track never hears them.
@@ -1438,19 +1441,32 @@ export default function VideoEditor({
     }
   }
 
-  async function save() {
-    if (!spec) return;
+  /** Returns whether the save went through, so "Save and leave" can wait on it. */
+  async function save(): Promise<boolean> {
+    if (!spec) return false;
     setSaving(true);
     try {
       const v = await patchVideo(id, spec);
       setSpec(v.edit_spec);
       setSavedSpec(v.edit_spec);
       setError(null);
+      return true;
     } catch (e) {
       setError(String(e));
+      return false;
     } finally {
       setSaving(false);
     }
+  }
+
+  async function saveAndLeave() {
+    if (await save()) leaveGuard.leave();
+    else leaveGuard.stay(); // keep the user here so they can see the error banner
+  }
+
+  async function discardAndLeave() {
+    await discard();
+    leaveGuard.leave();
   }
 
   async function discard() {
@@ -1742,6 +1758,14 @@ export default function VideoEditor({
         activeTool ? "h-[100dvh]" : "h-[calc(100dvh-3.5rem)]"
       }`}
     >
+      {leaveGuard.pendingHref && (
+        <UnsavedChangesDialog
+          busy={saving}
+          onSave={() => void saveAndLeave()}
+          onDiscard={() => void discardAndLeave()}
+          onStay={leaveGuard.stay}
+        />
+      )}
       {/* header */}
       <header
         className={`items-center justify-between gap-4 border-b border-[var(--border)] bg-[var(--card)] px-6 py-3 ${
@@ -1762,7 +1786,8 @@ export default function VideoEditor({
               <input
                 value={spec.title}
                 onChange={(e) => setSpec({ ...spec, title: e.target.value })}
-                title="Video title — also the default text for a new title card (Media tab)"
+                title="Project name — saving renames the project too, and it's the default text for a new title card (Media tab)"
+                aria-label="Project name"
                 className="min-w-0 flex-1 truncate rounded px-1 -mx-1 text-[17px] font-semibold tracking-tight text-[var(--text)] hover:bg-[var(--hover)] focus:bg-[var(--hover)] focus:outline-none"
               />
               <Link

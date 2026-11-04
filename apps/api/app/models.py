@@ -67,6 +67,9 @@ class Project(Base):
     user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), index=True, nullable=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
     favorite: Mapped[int] = mapped_column(Integer, default=0)  # 0/1 — starred/pinned
+    # 0/1 — the user typed this name, so the pipeline's auto-title must never
+    # replace it (a re-process would otherwise silently undo a rename).
+    name_locked: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     sessions: Mapped[list["CaptureSession"]] = relationship(

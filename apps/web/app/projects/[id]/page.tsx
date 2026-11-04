@@ -2,7 +2,8 @@
 
 import { use, useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { getProject, listSessions, type Project, type Session } from "@/lib/api";
+import { getProject, listSessions, renameProject, type Project, type Session } from "@/lib/api";
+import { EditableTitle } from "@/components/EditableTitle";
 import { Recorder } from "@/components/Recorder";
 import { Uploader } from "@/components/Uploader";
 import { CaptureCard } from "@/components/CaptureCard";
@@ -49,9 +50,19 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
         </Link>
 
         <section className="animate-fade-in mt-4 flex flex-wrap items-end justify-between gap-4">
-          <div>
-            <h1 className="text-[34px] font-bold leading-[1.15] tracking-tight text-[var(--text)]">
-              {project?.name ?? "Project"}
+          <div className="min-w-0 max-w-full">
+            <h1>
+              {project ? (
+                <EditableTitle
+                  value={project.name}
+                  onSave={async (name) => setProject(await renameProject(id, name))}
+                  className="text-[34px] font-bold leading-[1.15] tracking-tight text-[var(--text)]"
+                />
+              ) : (
+                <span className="text-[34px] font-bold leading-[1.15] tracking-tight text-[var(--text)]">
+                  Project
+                </span>
+              )}
             </h1>
             <p className="mt-1.5 text-[15px] text-[var(--text-2)]">
               {sessions.length} capture{sessions.length === 1 ? "" : "s"}

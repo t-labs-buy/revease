@@ -70,6 +70,17 @@ export async function deleteProject(projectId: string): Promise<void> {
   if (!r.ok) throw new Error(`deleteProject failed: ${r.status}`);
 }
 
+/** Rename a project. The server locks the name so auto-titling never replaces it. */
+export async function renameProject(projectId: string, name: string): Promise<Project> {
+  const r = await apiFetch(`/projects/${projectId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  if (!r.ok) throw new Error(r.status === 422 ? "Name can't be empty" : `Rename failed (${r.status})`);
+  return r.json();
+}
+
 export async function toggleFavorite(projectId: string): Promise<Project> {
   const r = await apiFetch(`/projects/${projectId}/favorite`, { method: "POST" });
   if (!r.ok) throw new Error(`toggleFavorite failed: ${r.status}`);
